@@ -64,7 +64,6 @@ MIN_POINTS = 5
 MIN_INLIER_FRACTION = 0.35
 MAX_RESIDUAL_FRACTION = 0.12       # median landmark error / interocular
 SCALE_MIN, SCALE_MAX = 0.20, 5.00
-MAX_POINT_MINIFY = 0.25            # past this the warp must average first
 
 MIN_SKIN_PX = 1200                 # below this the deficit is noise talking
 MIN_REGION_PX = 400                # and one region needs at least this much
@@ -230,22 +229,30 @@ def _warp_source(src_bgr: np.ndarray, matrix: np.ndarray, scale: float,
                  size_g: tuple[int, int]):
     """Her photograph resampled into the generated frame, plus its coverage.
 
-    Her photograph is usually far larger than the render - 2316 px against 880
-    on this client's own files - and the obvious move, reducing it with
-    INTER_AREA before warping, is wrong here: averaging three pixels into one
-    is precisely the smoothing this module exists to undo, and it removes two
-    thirds of the grain before it can be given back (measured: a band of 4.97
-    collapses to 3.10).  Her grain belongs to her camera's sensor, not to the
-    size at which her face happens to be printed, so it is carried across at
-    its own pixel pitch by the cubic kernel, which already averages four
-    source pixels and is anti-aliasing enough for a band clipped at three
-    sigma.  The pre-reduction is kept only as a safety valve for an extreme
-    ratio, where point sampling really would fold grain into blotches.
+    Her photograph is usually far larger than the render - 2316 px against
+    1024 on this client's own files - and the minification has to average
+    before it samples.  It is tempting not to: the average visibly lowers her
+    band, and the cubic kernel alone leaves a much larger number to hand back.
+    That number is not her skin.  A 1024 px frame cannot carry a frequency
+    that needs 2316 px to exist; sampling it anyway folds her sensor grain
+    down as alias - noise at the wrong scale wearing her amplitude.  Measured
+    on run_713/v2_a1 (scale 0.482), inside the same face mask: the unfiltered
+    cubic warp reads her band as 3.053 and the averaged one as 2.022, so 51%
+    of it was invented, and pure noise of her amplitude pushed through the
+    unfiltered path reads 1.912 - nearly the whole difference.  Believing the
+    inflated figure made the module hand back more grain than she has: two of
+    two treated faces finished above her own photograph on the project's own
+    cheek measurement (+27% and +8%).
+
+    So the reduction is done properly, with INTER_AREA, down to exactly the
+    pitch the render prints at, and the warp then runs at 1:1.  That is also
+    the resampling the evidence script uses to establish her reference level,
+    which is the level this result is judged against.
     """
     width_g, height_g = size_g
     work = src_bgr
     moved = matrix.copy()
-    pre = min(1.0, float(scale) / MAX_POINT_MINIFY)
+    pre = min(1.0, float(scale))
     if pre < 0.999:
         work = cv2.resize(src_bgr, None, fx=pre, fy=pre,
                           interpolation=cv2.INTER_AREA)
@@ -271,18 +278,35 @@ def _fill_hull(canvas: np.ndarray, points: np.ndarray) -> None:
     cv2.fillConvexPoly(canvas, hull, 255)
 
 
-def _feature_exclusions(mesh_g, size_g: tuple[int, int],
-                        interocular: float) -> np.ndarray:
+def _feature_exclusions(mesh_g, size_g: tuple[int, int], interocular: float,
+                        face_box) -> np.ndarray:
     """Eyes, eyebrows, lips and nostrils, grown a little past their edges.
 
     Grown by a small fraction of the interocular distance and no more.  On a
     full length frame her face is 85 px wide, and a margin that looks modest
     in absolute pixels swallows the cheek the grain is meant for: the first
     version of this cut the treated area of the measured patch to 44%.
+
+    Every one of those outlines comes from the mesh, and ``detect_face``
+    returns ok=True with an empty mesh on two of its three backends
+    (``mediapipe_detection``, ``haar``) - a box and at most six named points.
+    Read literally, "no mesh" used to mean "nothing to exclude", which is the
+    opposite of the truth: with the detection backend forced on run_713/v2_a1
+    the transfer wrote grain onto 75% of her lips, 88% of her eyes and 82% of
+    her eyebrows.  Without the outlines a cheek cannot be told from a lip, so
+    the whole head is withdrawn from treatment and only body skin is left.
     """
     width, height = size_g
     canvas = np.zeros((height, width), np.uint8)
     if mesh_g is None:
+        box = list(face_box or [])
+        if len(box) == 4 and float(box[2]) > 0 and float(box[3]) > 0:
+            x, y, w, h = [float(v) for v in box]
+            pad = 0.15 * max(w, h)
+            cv2.rectangle(canvas,
+                          (int(round(x - pad)), int(round(y - pad))),
+                          (int(round(x + w + pad)), int(round(y + h + pad))),
+                          255, -1)
         return canvas
     limit = len(mesh_g)
     for group in _EXCLUDE_GROUPS:
@@ -302,7 +326,8 @@ def _feature_exclusions(mesh_g, size_g: tuple[int, int],
     return cv2.dilate(canvas, kernel)
 
 
-def _skin_regions(gen_bgr: np.ndarray, mesh_g, interocular: float) -> list:
+def _skin_regions(gen_bgr: np.ndarray, mesh_g, interocular: float,
+                  face_box) -> list:
     """Where grain may be added, kept region by region rather than merged.
 
     They stay separate because a generation is only her photograph again in
@@ -346,7 +371,7 @@ def _skin_regions(gen_bgr: np.ndarray, mesh_g, interocular: float) -> list:
         base = cv2.bitwise_and(base, cv2.bitwise_not(hair))
     base = cv2.bitwise_and(
         base, cv2.bitwise_not(_feature_exclusions(mesh_g, (width, height),
-                                                  interocular)))
+                                                  interocular, face_box)))
 
     out: list = []
     mesh_face = None
@@ -523,7 +548,7 @@ def restore_skin_texture(generated_path, source_path, out_path,
 
     # -------------------------------------------------------------- 2. skin
     mesh_g = _mesh_px(face_g, width_g, height_g)
-    candidates = _skin_regions(gen, mesh_g, interocular)
+    candidates = _skin_regions(gen, mesh_g, interocular, face_g.get("bbox"))
     if not candidates:
         return _result(False, generated_path, "no se pudo delimitar la piel",
                        aligned=True)
@@ -643,6 +668,29 @@ def restore_skin_texture(generated_path, source_path, out_path,
     # ------------------------------------------------------------- 6. apply
     luma_out = luma_gen + factors * offer
     luma_out = np.nan_to_num(luma_out, nan=0.0, posinf=255.0, neginf=0.0)
+
+    # The ceiling is the whole point of the module and until now nothing
+    # enforced it on the result, only on the per region arithmetic that leads
+    # to it: the feather, the blur of the factors and the overlap between
+    # regions all land somewhere the solver did not measure.  So the finished
+    # luminance is measured once, on the same pixels, against what her own
+    # photograph carries there, and the one free scalar is solved down if it
+    # came out above her - again in quadrature, because her grain and what the
+    # engine left are independent.  Only her level caps it: if the render was
+    # already above her the module has nothing to add and says so.
+    ceiling = max(fine_src, fine_gen)
+    fine_new = _std_in(_band(luma_out, sigma), core)
+    if fine_new > ceiling:
+        room = math.sqrt(max(0.0, ceiling * ceiling - fine_gen * fine_gen))
+        added = math.sqrt(max(1e-12, fine_new * fine_new - fine_gen * fine_gen))
+        luma_out = luma_gen + (factors * float(room / added)) * offer
+        luma_out = np.nan_to_num(luma_out, nan=0.0, posinf=255.0, neginf=0.0)
+        fine_new = _std_in(_band(luma_out, sigma), core)
+        if fine_new > ceiling * 1.02:
+            return _result(False, generated_path,
+                           "habria pasado de la textura de su propia foto",
+                           aligned=True, regions=len(treated))
+
     lab_out = lab_gen.copy()
     lab_out[:, :, 0] = np.clip(np.rint(luma_out), 0, 255).astype(np.uint8)
 
@@ -655,7 +703,22 @@ def restore_skin_texture(generated_path, source_path, out_path,
                        "el color se habria desplazado, no se toca la imagen",
                        aligned=True, regions=len(treated))
 
-    out = cv2.cvtColor(lab_out, cv2.COLOR_LAB2BGR)
+    # Only the pixels whose L really moved are rebuilt from Lab.  The round
+    # trip is not free: converting the untouched frame back through LAB2BGR
+    # moved 73% of the pixels outside the treated skin and drifted their a and
+    # b by 0.42 and 0.35, which is exactly the colour the module promises not
+    # to move.  Everything the transfer did not reach keeps the provider's own
+    # bytes.
+    out = gen.copy()
+    changed = lab_out[:, :, 0] != lab_gen[:, :, 0]
+    if not np.any(changed):
+        # The solver scaled the whole offer away - the render already carries
+        # her level.  Re-encoding the file to store identical pixels would
+        # only cost her one more JPEG generation.
+        return _result(False, generated_path,
+                       "la imagen ya conserva su textura de piel",
+                       gain=1.0, aligned=True, regions=0)
+    out[changed] = cv2.cvtColor(lab_out, cv2.COLOR_LAB2BGR)[changed]
     try:
         written = loader.save_image(out, out_path, quality=SAVE_QUALITY)
     except Exception as exc:                              # noqa: BLE001

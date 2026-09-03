@@ -1014,8 +1014,9 @@ def _smoothing_verdict(image_path: str, img: np.ndarray, face_d: dict,
     is reported, never gated: measured over her own 24 photographs it fires on
     8 of them (a bare arm in daylight carries far more fine energy than a
     cheek), and over 11 FLUX results it fires on 1, so on its own it would
-    reject her real photographs and miss the retouching.  The gate uses the
-    absolute band instead, compared with what her camera actually records.
+    reject her real photographs and miss the retouching.  The gate compares the
+    fine band of this face against the fine band of the same face in her source
+    photograph, both brought to the same width first - see _texture_loss.
     """
     out = {"failed": False, "severity": 0.0, "loss": None, "detail": ""}
     existing = next((d for d in defects if d.get("type") == "oversmoothed_skin"),
@@ -1047,13 +1048,15 @@ def _smoothing_verdict(image_path: str, img: np.ndarray, face_d: dict,
     out["severity"] = severity
     out["failed"] = loss >= SMOOTH_TEXTURE_LOSS_MAX
     kept = 100.0 * max(1.0 - loss, 0.0)
+    # Say the measured number and nothing more.  A rejection at the line means
+    # three quarters of her grain survived, so "casi ha desaparecido" would be
+    # us exaggerating to her about her own photograph.
     if out["failed"]:
-        out["detail"] = ("Te han suavizado la piel: la textura real casi ha "
-                         "desaparecido, el rostro conserva el %.0f%% del grano "
-                         "de tus fotos." % kept)
+        out["detail"] = ("Te han suavizado la piel: el rostro solo conserva el "
+                         "%.0f%% del grano de tu foto." % kept)
     else:
-        out["detail"] = ("La piel sale mas lisa que en tus fotos: conserva el "
-                         "%.0f%% del grano." % kept)
+        out["detail"] = ("La piel sale algo mas lisa que en tu foto: conserva "
+                         "el %.0f%% del grano." % kept)
 
     detail = ("piel suavizada por el generador: el rostro conserva el %.0f%% "
               "del grano de su foto de origen (%.2f frente a %.2f, medidos con "
