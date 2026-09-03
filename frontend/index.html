@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#1c1a26">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Photo Robot">
+<meta name="description" content="Robot de fotografia: analiza, genera, revisa y corrige.">
+<title>Photo Robot</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+
+<header class="app-bar" id="appbar" hidden>
+  <div class="app-bar__title">
+    <img src="/icons/icon-192.png" alt="" width="26" height="26">
+    <span>Photo Robot</span>
+  </div>
+  <div class="app-bar__actions">
+    <button class="chip chip--balance" id="balance-chip" type="button" hidden></button>
+    <button class="icon-btn" id="alert-btn" type="button" aria-label="Avisos">
+      <span aria-hidden="true">!</span>
+      <span class="badge" id="alert-badge" hidden>0</span>
+    </button>
+  </div>
+</header>
+
+<main id="view" class="view" role="main">
+  <div class="boot">
+    <div class="spinner" role="status" aria-label="Cargando"></div>
+  </div>
+</main>
+
+<nav class="tabbar" id="tabbar" role="navigation" hidden>
+  <a class="tab" href="#/generate" data-tab="generate">
+    <span class="tab__icon" aria-hidden="true">✦</span><span class="tab__label">Crear</span>
+  </a>
+  <a class="tab" href="#/album" data-tab="album">
+    <span class="tab__icon" aria-hidden="true">▦</span><span class="tab__label">Album</span>
+  </a>
+  <a class="tab" href="#/favorites" data-tab="favorites">
+    <span class="tab__icon" aria-hidden="true">♥</span><span class="tab__label">Favoritos</span>
+  </a>
+  <a class="tab" href="#/originals" data-tab="originals">
+    <span class="tab__icon" aria-hidden="true">◎</span><span class="tab__label">Mis fotos</span>
+  </a>
+  <a class="tab" href="#/settings" data-tab="settings">
+    <span class="tab__icon" aria-hidden="true">⚙</span><span class="tab__label">Ajustes</span>
+  </a>
+  <a class="tab" href="#/admin" data-tab="admin" id="tab-admin" hidden>
+    <span class="tab__icon" aria-hidden="true">◇</span><span class="tab__label">Admin</span>
+  </a>
+</nav>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="sheet-root"></div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+# =====================================================================
+#  SECRETS - never commit these
+# =====================================================================
+data/keystore.json          # API keys of Anthropic and fal.ai, in clear
+data/secret.key             # signs the session cookies
+*.key
+*.pem
+.env
+.env.*
+
+# =====================================================================
+#  PERSONAL DATA - photographs of real people and their measurements
+#
+#  The whole data/ tree is other people's private imagery: reference
+#  photographs, generated results, thumbnails, identity profiles and the
+#  account database.  None of it belongs in a repository, and once pushed
+#  it cannot be taken back.  input/ and sample/ are the client's own
+#  photographs and are excluded for the same reason.
+# =====================================================================
+data/
+input/
+sample/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Images anywhere outside the app's own interface assets
+*.jpg
+*.jpeg
+*.heic
+*.heif
+!frontend/icons/*.png
+!frontend/assets/**
+
+# =====================================================================
+#  Python
+# =====================================================================
+backend/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =====================================================================
+#  Editors and operating system
+# =====================================================================
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# =====================================================================
+#  Local scratch
+# =====================================================================
+*.log
+logs/
+tmp/
