@@ -766,7 +766,17 @@ def _aggregate_body(accepted: list[dict], thresholds: dict) -> dict:
             "dropped": int(dropped.get(name, 0)),
             # A band built on one or two usable photos is a guess.  It is still
             # reported, so the report page can show it, but it cannot reject.
-            "gated": bool(n >= min_n and name in GATED_METRICS),
+            # Nor can a band the cap had to narrow: rule 2 above says that past
+            # the cap the honest move is to stop gating, and until now "gated"
+            # did not actually record it.  It was not academic - with Nayane's
+            # 20 sources every gated band came out capped (shoulder asks for
+            # 2.5 * 0.1358 = 43% of a mean of 0.790 and is clipped to 12%), so
+            # the band was narrower than the very photographs it was learned
+            # from and rejected 12 of the 14 of her own untouched photographs
+            # it could judge - against 12 of 15 for the same photographs
+            # slimmed by 12%, which is no discrimination at all.
+            "gated": bool(n >= min_n and name in GATED_METRICS
+                          and tol <= abs(mean) * band_max),
             "band_capped": bool(tol > abs(mean) * band_max),
         }
     return out

@@ -1167,13 +1167,30 @@ def _apply_rect(img: np.ndarray, rect, aspect: float, meta: dict) -> np.ndarray:
 
 
 def _target_size(req: GenRequest, aspect, w: int, h: int) -> tuple[int, int]:
+    """The output box - which is a bound on the size, never a new shape.
+
+    ``req.width`` and ``req.height`` are read as a bounding box that the
+    picture is fitted inside, not as an exact canvas it is stretched onto.
+    Only one of the two parties knows the shape of what is being handed back
+    and it is not the caller: the caller knows the size tier it wants, this
+    module knows the crop it just made.  Obeying the pair literally is what
+    turned a 3:4 full body crop into 1536x1536 - a 33% horizontal stretch of
+    a real person, because the orchestrator sizes every request as
+    ``width=height=QUALITY_SIZES[quality]`` and that table is a longest side,
+    not an aspect ratio.  identity/verify.py measured the damage on run
+    run_c6e88e30ead34d7681d873c0 and was right to reject all three images:
+    +25.3% on the head ruler, +36.3% on the torso ruler, against tolerances
+    of 4%.  Fitting instead of stretching gives 1152x1536 from the same
+    request, which is the same tier and her own proportions.
+    """
     max_side = int(_QUALITY_MAX_SIDE.get(_key_of(req.quality), _DEFAULT_MAX_SIDE))
     max_side = int(min(max_side, MAX_SIDE))
     rw = int(req.width or 0)
     rh = int(req.height or 0)
     ratio = float(aspect) if aspect else (w / float(max(1, h)))
     if rw > 0 and rh > 0:
-        return _clamp_dim(rw), _clamp_dim(rh)
+        width = min(float(rw), float(rh) * ratio)
+        return _clamp_dim(width), _clamp_dim(width / ratio)
     if rw > 0:
         return _clamp_dim(rw), _clamp_dim(rw / ratio)
     if rh > 0:
@@ -1197,8 +1214,12 @@ def frame_image(img: np.ndarray, masks: dict, extra: dict, req: GenRequest,
         img = _apply_rect(img, _crop_rect(img, masks, framing, aspect), aspect, meta)
         meta["steps"].append("framing")
         meta["framing"] = framing
+    ch, cw = img.shape[:2]
     out = _resize_exact(img, tw, th)
     meta["size"] = [int(tw), int(th)]
+    # How much the picture was really reduced on the way out, which is the only
+    # honest measure of what the finishing sharpener has to put back.
+    meta["resample"] = round(float(max(tw, th)) / float(max(1, max(cw, ch))), 4)
     if max(tw, th) >= max(w, h) and not (req.width or req.height):
         meta["notes"].append(
             "La salida se limito al tamano de la foto original para no inventar detalle.")
@@ -1207,15 +1228,51 @@ def frame_image(img: np.ndarray, masks: dict, extra: dict, req: GenRequest,
 
 # --------------------------------------------------------------- 8 finishing
 
+# The finishing unsharp restores what the reduction cost, and nothing beyond it.
+# It used to apply a fixed 0.32 whatever the picture had been through, and
+# measured on the client's own photographs that left the fine band at the face
+# 10 to 21 per cent ABOVE her own - identity/verify._texture_loss reads
+# -0.104 (7580), -0.146 (7871), -0.213 (7880), -0.169 (8798), -0.115 (8825),
+# -0.142 (8898), -0.179 (8918), -0.177 (8944) - and on half of them the output
+# came back sharper than the photograph it was made from (8798 0.921 against
+# her 0.905 on the quality module's ruler, 8918 0.931 against 0.923).  That is
+# a beauty filter with the sign reversed: grain her camera never recorded, on a
+# person this engine promises only to transform.  The identity gate cannot
+# catch it, because SMOOTH_TEXTURE_LOSS_MAX only punishes the losing side, so
+# the engine has to not do it.  Scaling with the reduction keeps the sharpening
+# where it is earned: none at all when nothing was reduced, the full amount
+# only past a sixfold reduction.  At the tier this product ships (about 1.7x,
+# because _work_side already loads the source at roughly twice the output) it
+# lands near 0.04, the fine band comes back to -0.00..-0.05 of her own, and the
+# sharpness ruler barely moves: 8898 0.917 -> 0.897 against her own 0.918.
+SHARPEN_MAX = 0.32
+SHARPEN_FULL_REDUCTION = 6.0
+
+
+def _sharpen_amount(meta: dict) -> float:
+    """How much acutance the resize is allowed to hand back."""
+    factor = _as_float(meta.get("resample"), 1.0)
+    if factor <= 0.0 or factor >= 1.0:
+        return 0.0
+    reduction = 1.0 / factor
+    share = (reduction - 1.0) / (SHARPEN_FULL_REDUCTION - 1.0)
+    return SHARPEN_MAX * _clamp(share, 0.0, 1.0)
+
+
 def finish(img: np.ndarray, extra: dict, meta: dict) -> np.ndarray:
     vignette = _as_float(extra.get("vignette"), 0.0)
     if vignette > 0.01:
         img = _vignette(img, _clamp(vignette, 0.0, 0.75))
         meta["steps"].append("vignette")
         meta["vignette"] = round(float(vignette), 3)
+    amount = _sharpen_amount(meta)
+    if amount <= 0.005:
+        meta["skipped"].append("unsharp: la imagen no se redujo")
+        return img
     sigma = max(0.8, float(min(img.shape[:2])) * 0.0012)
-    out = _unsharp(img, amount=0.32, sigma=sigma, threshold=0.02)
+    out = _unsharp(img, amount=amount, sigma=sigma, threshold=0.02)
     meta["steps"].append("unsharp")
+    meta["unsharp"] = round(float(amount), 3)
     return out
 
 

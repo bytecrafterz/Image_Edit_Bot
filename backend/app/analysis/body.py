@@ -554,6 +554,21 @@ def _canonical_head(img, face, height: int, width: int):
     hands the model the same picture whatever surrounded it: the same length
     then varies 0.6% (max 1.9%) across the same crops.  Returns None when
     there is nothing to improve on.
+
+    The fit is not mirror-symmetric either: the same head measured on the
+    picture and on its mirror image came back 1.6% and 2.3% longer on two of
+    six photographs (8798 and 8898), and since the head is the unit every row
+    divides by, that alone moved the whole profile -2.1% and -2.8% - enough,
+    with the segmentation's own asymmetry on top, to make the paired check
+    reject 8898 mirrored, an untouched body, at 0.0405 against its 0.0400
+    limit.  Nothing about her changed, so the ruler must not move.  Measuring
+    the crop and its mirror and averaging the two lengths cannot prefer a
+    side: the same two numbers come out whichever way round the picture
+    arrives.  Measured over the six photographs, that takes the mirror from
+    -3.9% worst to -2.4%, and it also steadies the framings the ruler is
+    really for - a whole-picture 0.9 rescale 1.09% -> 0.33% worst, a crop to
+    the top 70% 1.48% -> 0.43%, resolution 1.29% -> 1.13% - while an 8% slim
+    still reads 6.8..10.0%.  It costs one more FaceMesh fit on a 640 px crop.
     """
     if not isinstance(img, np.ndarray) or img.ndim != 3 or img.size == 0:
         return None
@@ -581,15 +596,40 @@ def _canonical_head(img, face, height: int, width: int):
                           else cv2.INTER_AREA)
     try:
         from . import face as face_mod        # lazy: keeps body importable alone
-        again = face_mod.detect_face(crop)
     except Exception:                                 # noqa: BLE001
         return None
-    pts = _mesh_head(again, crop.shape[0], crop.shape[1])
-    if pts is None:
+    ch, cw = crop.shape[:2]
+    direct = None
+    lengths: list = []
+    for mirrored in (False, True):
+        view = cv2.flip(crop, 1) if mirrored else crop
+        try:
+            again = face_mod.detect_face(view)
+        except Exception:                             # noqa: BLE001
+            continue
+        pts = _mesh_head(again, ch, cw)
+        if pts is None:
+            continue
+        (tx, ty), (cx, cy) = pts
+        if mirrored:                     # read back into the crop's own frame
+            tx, cx = cw - 1 - tx, cw - 1 - cx
+        lengths.append(math.hypot(tx - cx, ty - cy))
+        if direct is None:
+            direct = ((tx, ty), (cx, cy))
+    if direct is None or not lengths:
         return None
-    sx = float(x1 - x0) / float(max(crop.shape[1], 1))
-    sy = float(y1 - y0) / float(max(crop.shape[0], 1))
-    (tx, ty), (cx, cy) = pts
+    (tx, ty), (cx, cy) = direct
+    span = math.hypot(tx - cx, ty - cy)
+    if span < 1e-6:
+        return None
+    # The chin is the origin of every row and both fits put it in the same
+    # place (within a pixel), so it is kept as fitted; only the length - the
+    # unit - is replaced by the mean of the two, stretching the forehead point
+    # along the line it already lies on.
+    k = (sum(lengths) / len(lengths)) / span
+    tx, ty = cx + (tx - cx) * k, cy + (ty - cy) * k
+    sx = float(x1 - x0) / float(max(cw, 1))
+    sy = float(y1 - y0) / float(max(ch, 1))
     return (x0 + tx * sx, y0 + ty * sy), (x0 + cx * sx, y0 + cy * sy)
 
 
@@ -620,14 +660,17 @@ def head_profile(mask, face, height: int, width: int, img=None) -> list:
     The rows that remain pair exactly against the source and still mean the
     same thing.  Nothing from the pose enters here.
 
-    Measured on the seven measurable photographs (scratchpad ruler_probe3.py):
-    re-measuring at 1300/1000/800 px against 1600 moves the median ratio 0.6%
-    (max 1.5%, 18 pairs); a 62% crop 0.7% (max 2.3%, five photographs); a 45%
-    crop 1.4% on the one photograph that keeps four rows - the others keep
-    0.7..1.8 heads of body below the chin, which is a headshot, and return [].
-    An 8% slim reads 7.9% (7.1..8.6%) and a 12% slim 12.0% (11.3..13.3%), so
-    the signal is at least five times the worst noise, through a reframe,
-    where the two rulers above have no signal at all.  One of the seven
+    Measured on the seven measurable photographs (scratchpad ruler_probe3.py,
+    with the mirror-averaged head unit of _canonical_head): re-measuring at
+    1300/1000/800 px against 1600 moves the median ratio 0.4% (max 1.1%, 18
+    pairs); a 62% crop 0.4% (max 1.1%, five photographs); a 45% crop 1.4% on
+    the one photograph that keeps four rows - the others keep 0.7..1.8 heads
+    of body below the chin, which is a headshot, and return [].  Mirroring the
+    picture, which changes nothing about her, moves it 2.4% at worst (six
+    photographs, scratchpad adv_head.py).  An 8% slim reads 8.0% (6.8..10.0%)
+    and a 12% slim 12.2% (11.4..13.9%), so the faintest slim reading is nearly
+    five times the loudest noise reading, through a reframe, where the two
+    rulers above have no signal at all.  One of the seven
     (7580, the head is a third of the frame) ends 1.7 heads below the chin
     and no body ruler can measure it.
 

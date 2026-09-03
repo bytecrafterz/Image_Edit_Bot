@@ -975,6 +975,7 @@ def _check_body(gen_body: dict, profile: dict,
     notes: list[str] = []           # reported but never penalised
     gated_total = 0
     gated_ok = 0
+    compared_bands = 0              # bands that had a value to judge, gated or not
     closeness: list[float] = []
 
     for metric, band in bands.items():
@@ -984,10 +985,30 @@ def _check_body(gen_body: dict, profile: dict,
         hi = _f((band or {}).get("hi"), None)
         if value is None or mean is None or lo is None or hi is None or abs(mean) < 1e-9:
             continue
+        compared_bands += 1
         # A band the profile itself marked ungated (too few usable photos to be
-        # anything but a guess) reports but never rejects.
+        # anything but a guess) reports but never rejects.  Neither can a band
+        # whose width had to be capped.  profile._aggregate_body asks for 2.5
+        # sigma of the scatter of her own photographs and then clips the answer
+        # at +/-12% of the mean, and its docstring already says that past the
+        # cap the honest move is to stop gating - the flag it wrote down,
+        # band_capped, was simply never read here.  It matters: in the stored
+        # profile every gated band is capped (shoulder_w_over_torso wants
+        # 2.5 * 0.1358 = 43% of a mean of 0.790 and gets 12%, so the band
+        # [0.696, 0.885] is narrower than the six photographs it was learned
+        # from, two of which - 0.954 and 0.611 - fall outside it).  Measured
+        # over her 24 originals as faithful q95 copies at 1200 px, this band
+        # rejected 12 of the 14 photographs it could judge, all of them her
+        # own and untouched, and 12 of 15 of the same photographs slimmed by
+        # 12%: a verdict that says the same thing whether or not the body was
+        # touched is not evidence about her body.  The paired test against the
+        # source photograph is the gate that works (0 false alarms over the 24,
+        # the 12% slim caught on every photograph it could judge); the band is
+        # the fallback for when there is no source to compare against, and
+        # there it must report what it sees without condemning her for it.
+        capped = bool((band or {}).get("band_capped", False))
         gated = (metric in GATED_METRICS and metric not in unreliable
-                 and bool((band or {}).get("gated", True)))
+                 and bool((band or {}).get("gated", True)) and not capped)
         if metric in corrected:
             # Pay for the yaw correction's own error before judging anyone.
             half = (hi - lo) / 2.0
@@ -1012,7 +1033,17 @@ def _check_body(gen_body: dict, profile: dict,
             notes.append(phrase + " (medida informativa, no penaliza)")
 
     if gated_total == 0:
-        detail = "No se pudieron medir proporciones comparables, comprobacion omitida."
+        # Two different silences, and telling her the wrong one is a small lie:
+        # nothing measurable in the picture, or measurements taken against a
+        # range too wide to judge them with.
+        if compared_bands:
+            detail = ("Proporciones medidas, pero tus fotos varian demasiado "
+                      "entre si para fijar un rango que pueda rechazar "
+                      "(%d medidas comparadas, se informan sin penalizar)."
+                      % compared_bands)
+        else:
+            detail = ("No se pudieron medir proporciones comparables, "
+                      "comprobacion omitida.")
         if notes:
             detail += " Observado: " + "; ".join(notes[:4]) + "."
         return _mk(name, 1.0, 1.0, True, detail), 1.0, False, []
