@@ -61,37 +61,62 @@ ANATOMY_SEVERITY_MAX = 0.6
 # only, since shrinking removes grain that exists while enlarging invents none.
 # What survives is the fraction of HER grain this engine kept, at her framing.
 #
-# The two lines below are read off that ratio, measured on cases built from her
-# own 24 photographs: her face at a known width, a known fraction of the fine
-# band deleted, saved as JPEG the way a result is.  Median measured loss:
+# Shrinking is itself a measurement, and it has to be the same measurement on
+# both sides.  The first version resized only the larger face and read the
+# other one as it came, and its zero was not zero: a faithful copy of her own
+# photograph (loaded at 1400 px, saved again as JPEG) read a loss of -0.23,
+# 23% MORE grain than the file it was made from, because the side left alone
+# kept its own resize and JPEG noise while the other side was box-filtered
+# clean.  The zero also moved with how far that side was shrunk - an exact 2:1
+# INTER_AREA passes far more near-Nyquist noise than a 0.44 weighted average -
+# reading -0.10 with the target at half the narrower face and +0.01 at 0.8 of
+# it.  So both faces are now brought to TEXTURE_MATCH_FACTOR of the narrower
+# one, which resamples both sides every time, and each side is first blurred
+# by a Gaussian of TEXTURE_PREFILTER pixels measured at the target scale
+# (sigma = TEXTURE_PREFILTER / k in its own pixels): the anti-alias is then
+# the same filter on both sides whatever pair of shrink factors the two
+# framings happen to produce.
 #
-#   face width     kept everything   -25% of band   -40% of band   -50%
-#   100 px             -0.02             0.13           0.22        0.27
-#   160 px             -0.02             0.17           0.29        0.36
-#   260 px             -0.02             0.20           0.32        0.39
-#   400 px             -0.01             0.19           0.29        0.37
+# The two lines below are read off that ratio, measured on cases built from
+# her own photographs: a faithful copy saved again as JPEG at four sizes, so
+# the pair of shrink factors varies, and the same photograph with a known
+# fraction of the fine band deleted (cv2.bilateralFilter 9/60/9, blended).
+# Measured loss, mean and [min..max] over 8 photographs:
 #
-# A faithful result reads zero at every framing and never exceeded 0.16 in 76
-# cases, so 0.25 rejects nothing that kept her grain while sitting under the
-# median of every deliberately smoothed population from 160 px up.  The 40%
-# cut is what FLUX Kontext was measured doing to her.  Below 0.15 nothing is
-# said at all; between the two the loss is reported so the texture step can act
-# on it, without throwing the picture away.
+#   faithful copy 1600 px    -0.015  [-0.032 .. 0.010]
+#   faithful copy 1300 px    -0.001  [-0.018 .. 0.021]
+#   faithful copy 1000 px     0.027  [-0.005 .. 0.065]
+#   faithful copy  800 px     0.036  [ 0.015 .. 0.081]
+#   -25% of the band          0.119  [ 0.068 .. 0.175]
+#   -50% of the band          0.214  [ 0.116 .. 0.301]
 #
-# The honest limit: on a face only 100 px wide the whole fine band is a couple
-# of pixels of JPEG noise, and a 40% cut reads 0.22 - under the line.  The gate
-# is deliberately the safety net and not the cure, because the cure already ran:
+# A faithful copy never exceeded 0.081 and a face with half its band erased
+# never read under 0.116, so 0.14 rejects nothing that kept her grain and
+# catches every half-erased face measured; the 40% FLUX Kontext was measured
+# deleting from her lies between those two populations.  Below 0.09 nothing
+# is said at all; between the two the loss is reported so the texture step can
+# act on it, without throwing the picture away.
+#
+# The honest limit: a 25% cut reads 0.12 on average - under the line - so a
+# quarter of her grain can go missing and only be reported.  The gate is
+# deliberately the safety net and not the cure, because the cure already ran:
 # the orchestrator puts her own grain back with generation/retouch.py before
-# anything is verified.  Rejecting a faithful full-length shot would charge her
-# for a regeneration she does not need, which is the trade this line is set on.
-SMOOTH_TEXTURE_LOSS_MAX = 0.25
-SMOOTH_TEXTURE_LOSS_MIN = 0.15
+# anything is verified.  Rejecting a faithful result would charge her for a
+# regeneration she does not need, which is the trade this line is set on.
+SMOOTH_TEXTURE_LOSS_MAX = 0.14
+SMOOTH_TEXTURE_LOSS_MIN = 0.09
+# Both faces are shrunk to this fraction of the narrower one, so that neither
+# side is ever the unresampled one; and each side is anti-aliased by this many
+# pixels at the target scale before its own INTER_AREA - see the note above.
+TEXTURE_MATCH_FACTOR = 0.8
+TEXTURE_PREFILTER = 0.5
 # Below this the source photograph carries so little grain of its own that the
 # ratio would be dividing noise by noise, and nothing is claimed either way.
 SMOOTH_TEXTURE_MIN_REF = 0.30
-# Severity is linear in that loss, so this constant IS the 35% loss expressed
-# as a severity; it is deliberately not ANATOMY_SEVERITY_MAX, which answers a
-# different question about broken hands and invented limbs.
+# Severity is linear in that loss, so this constant IS the loss at the line
+# (SMOOTH_TEXTURE_LOSS_MAX) expressed as a severity; it is deliberately not
+# ANATOMY_SEVERITY_MAX, which answers a different question about broken hands
+# and invented limbs.
 SMOOTH_SEVERITY_MAX = 0.45
 SMOOTH_SEVERITY_CAP = 0.95
 BODY_CONF_MIN = 0.5           # below this, measurements only inform, never gate
@@ -119,6 +144,56 @@ PAIRED_TOL_MAX = 0.16
 # The silhouette profile is compared as a whole, so it carries its own noise
 # entry rather than borrowing one from a single width.
 WIDTH_PROFILE_KEY = "width_profile"
+# The head-length profile is a different ruler and gets a floor of its own.
+# Everything above divides by torso length from two pose landmarks, and the
+# local engine re-frames: a 62% crop (head to just below the hips) moved the
+# width profile of an untouched photograph +10..+19.5%, so on a reframed
+# result that ruler reports the crop, not the body.  The head profile divides
+# by forehead-to-chin of the face mesh on rows hung from the chin, and the
+# generator keeps the face (similarity 0.99) while every slimming filter keeps
+# it too.  Measured on the seven measurable photographs (scratchpad
+# ruler_probe3.py): re-measuring the same picture at 1300/1000/800 px moved
+# its median ratio 0.6% (max 1.5%), the 62% crop 0.7% (max 2.3%), the 45%
+# crop 1.4%; an 8% slim read 7.9% (7.1..8.6%) and a 12% slim 12.0%
+# (11.3..13.3%).  4% sits above the worst noise seen with room to spare and
+# under half the smallest slim measured; the client's complaint was about
+# 12%.  The per-pair widening in _noise_aware_tol still applies on top of
+# this floor, capped by PAIRED_TOL_MAX like every other metric.
+HEAD_PROFILE_KEY = "head_profile"
+HEAD_TOL = 0.04
+# The width profile and the head profile read the very same mask, so the ratio
+# between their two medians is not about her width at all: it is how much the
+# torso unit (pose landmarks) moved against the head unit (face mesh) between
+# the two images.  On the same framing it barely moves - the width profile
+# scatters 1.1% (max 3.4%) and the head profile 0.6% (max 1.5%) across
+# resolutions, and a slim-down moves both by the same amount (8% and 12% slims
+# left the two at most 4.5% apart).  A reframe moves only the torso unit: a
+# 62% crop of an untouched photograph read the width profile +10..+19.5% while
+# the head profile stayed within 2.3%.  Above this shift the torso-length
+# rulers are not commensurate between the two images and abstain; the head
+# ruler, which needs no torso, carries the verdict.  Erring on the low side
+# costs nothing but the torso rulers on a pair the head ruler judges anyway;
+# erring high lets a reframe read as a wider body, which is what happened to
+# five of seven faithful crops before this rule.
+UNIT_SHIFT_MAX = 0.06
+# The pixel width measure_body stored for each width metric, so the paired
+# test can divide the raw width by the raw torso length on both sides.  The
+# yaw correction the metrics carry exists to compare one photograph with a
+# band built from others taken at other angles; between two images of the
+# same pose the foreshortening is the same on both sides and cancels, and
+# what the correction adds to a pair is only the scatter of the yaw estimate.
+# That scatter is not small: one untouched photograph read yaw 32.6 degrees at
+# 1600 px and 13.6 degrees at 1200 px, so one side was divided by cos(33) and
+# the other left alone, and shoulders, hips and bust came out 16..19%
+# narrower on a faithful copy while the raw ratios were 0.99, 0.96 and 1.00
+# and the head ruler read 1.000.
+_PX_WIDTH: dict[str, str] = {
+    "shoulder_w_over_torso": "shoulder_w",
+    "hip_w_over_torso": "hip_w",
+    "waist_w_over_torso": "waist_w",
+    "bust_w_over_torso": "bust_w",
+    "neck_w_over_torso": "neck_w",
+}
 # A difference the engine physically could not have caused is not evidence about
 # the body.  It must not reward the image either, so the check scores it in the
 # middle instead of dragging the run's score down with a measurement error.
@@ -461,7 +536,11 @@ def _measure_source(path: str, max_side: int) -> tuple[dict, int]:
     seg_s = _ok_dict(_safe(segment_mod.person_mask, img), "segmentacion no disponible")
     mask = seg_s.get("mask") if seg_s.get("ok") else None
     mask = mask if isinstance(mask, np.ndarray) else None
-    return _ok_dict(_safe(body_mod.measure_body, img, pose_s, mask),
+    # The face is what the head-length ruler hangs its rows from; without it
+    # measure_body returns the torso rulers only and the paired test loses the
+    # one profile that survives a reframe.
+    face_s = _ok_dict(_safe(face_mod.detect_face, img), "rostro no detectado")
+    return _ok_dict(_safe(body_mod.measure_body, img, pose_s, mask, face_s),
                     "medidas no disponibles"), side
 
 
@@ -473,23 +552,40 @@ def _source_body(brief: dict) -> tuple[dict, int]:
     only knows the path still gets the paired test, at the cost of one analysis.
     Returns the measurement and the resolution it was taken at; a measurement
     handed over in the brief reports 0, since its scale is not knowable here.
+
+    One exception to "nothing is measured twice".  The head-length profile did
+    not exist when most stored analyses were written, and a reading taken
+    without a face carries an empty one, so a handed-over measurement with no
+    head profile is read again from the photograph when the path is known.
+    An empty list cannot be told apart from a closeup where the ruler abstains
+    for good reason, and for such a source the second reading is one analysis
+    spent to learn that again; the alternative - trusting the empty list -
+    would switch the only reframe-proof ruler off, silently, for every source
+    photograph analysed before the ruler was built.
     """
     src = brief.get("source_body")
-    if isinstance(src, dict) and src.get("ok"):
-        return src, 0
     path = _source_path(brief)
+    if isinstance(src, dict) and src.get("ok"):
+        if src.get(HEAD_PROFILE_KEY) or not path:
+            return src, 0
     if not path:
         return {}, 0
     return _measure_source(path, VERIFY_MAX_SIDE)
 
 
 def _profile_ratio(gen_profile: Any, src_profile: Any) -> dict | None:
-    """Median width ratio between two silhouette profiles of the same torso.
+    """Median width ratio between two silhouette profiles of the same person.
 
-    Both profiles are lists of ``[t, width_over_torso]`` sampled at the same
-    fractions of torso height, so the pairing is exact and no interpolation is
-    needed.  The median rather than the mean, because one bad scanline - a hand
-    resting on a hip, a sleeve - should not carry the verdict.
+    Both profiles are lists of ``[position, width_over_unit]`` and the three
+    that measure_body returns share this one comparison: the width profile
+    (fractions of torso height, widths over torso length), the shape profile
+    (fractions of silhouette height, widths over that height) and the head
+    profile (head lengths below the chin, widths over head length).  Rows are
+    sampled at the same positions in both images, so the pairing is exact and
+    no interpolation is needed; rows present on one side only - a crop took
+    them - are simply left out.  The median rather than the mean, because one
+    bad scanline - a hand resting on a hip, a sleeve, a stray fragment of mask
+    - should not carry the verdict.
     """
     if not isinstance(gen_profile, (list, tuple)) or not isinstance(src_profile, (list, tuple)):
         return None
@@ -514,6 +610,29 @@ def _profile_ratio(gen_profile: Any, src_profile: Any) -> dict | None:
         return None
     return {"median": float(np.median(ratios)), "n": len(ratios),
             "spread": float(np.std(ratios))}
+
+
+def _paired_metric(body: dict, metric: str) -> float | None:
+    """One metric as the paired test reads it: raw width over raw torso.
+
+    Only for metrics measure_body kept - a width it discarded (a subject in
+    profile) stays discarded - and only where the pixel widths are on record;
+    anything else comes back as the stored metric.  See _PX_WIDTH for why the
+    yaw-corrected value is the wrong number to hand a paired comparison.
+    """
+    if not isinstance(body, dict):
+        return None
+    stored = _f((body.get("metrics") or {}).get(metric), None)
+    if stored is None:
+        return None
+    key = _PX_WIDTH.get(metric)
+    if key:
+        px = body.get("px") or {}
+        width = _f(px.get(key), None)
+        torso = _f(px.get("torso_len"), None)
+        if width is not None and torso is not None and width > 0.0 and torso > 1e-6:
+            return float(width) / float(torso)
+    return float(stored)
 
 
 def _clothing_changed(brief: dict) -> bool:
@@ -588,7 +707,7 @@ def _paired_noise(brief: dict, src_body: dict, gen_side: int,
         for sample, ok in zip(samples, trusted):
             if metric not in ok:
                 continue
-            value = _f((sample.get("metrics") or {}).get(metric), None)
+            value = _paired_metric(sample, metric)
             if value is not None and abs(value) > 1e-9:
                 values.append(float(value))
         if len(values) < 2:
@@ -598,18 +717,19 @@ def _paired_noise(brief: dict, src_body: dict, gen_side: int,
             continue
         noise[metric] = float(max(values) - min(values)) / abs(mean)
 
-    # The silhouette is compared as a median of ratios, so its noise is measured
-    # the same way it is used: one source reading against another, where the
-    # honest answer is exactly 1.0.
-    spreads: list[float] = []
-    for i in range(len(samples)):
-        for j in range(i + 1, len(samples)):
-            ratio = _profile_ratio(samples[j].get("width_profile"),
-                                   samples[i].get("width_profile"))
-            if ratio is not None:
-                spreads.append(abs(ratio["median"] - 1.0))
-    if spreads:
-        noise[WIDTH_PROFILE_KEY] = float(max(spreads))
+    # The silhouette profiles are compared as a median of ratios, so their
+    # noise is measured the same way they are used: one source reading against
+    # another, where the honest answer is exactly 1.0.  The head profile gets
+    # its own entry because it is a different ruler with a different scatter.
+    for key in (WIDTH_PROFILE_KEY, HEAD_PROFILE_KEY):
+        spreads: list[float] = []
+        for i in range(len(samples)):
+            for j in range(i + 1, len(samples)):
+                ratio = _profile_ratio(samples[j].get(key), samples[i].get(key))
+                if ratio is not None:
+                    spreads.append(abs(ratio["median"] - 1.0))
+        if spreads:
+            noise[key] = float(max(spreads))
     return noise
 
 
@@ -646,17 +766,25 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
     is why every metric is judged against a limit sized from the noise measured
     on this very pair instead of against a constant.
 
+    Three rulers take part.  The skeletal ratios and the width profile divide
+    by torso length, and both need the hips in frame; the head profile divides
+    by the length of her face and hangs its rows from the chin, so it is the
+    one that still pairs exactly when the engine re-framed the result to a half
+    body or a closeup - the case the other two either abstain on or, worse,
+    read as a wider body (see HEAD_TOL).  A result with no torso frame at all
+    is therefore still judged here whenever its head profile has rows to pair.
+
     Returns None when there is no usable source measurement, so the caller can
     fall back to the profile bands.
     """
-    if not (gen_body.get("ok") and isinstance(src_body, dict) and src_body.get("ok")):
+    if not (isinstance(src_body, dict) and src_body.get("ok")):
+        return None
+    if not (gen_body.get("ok") or gen_body.get(HEAD_PROFILE_KEY)):
         return None
 
     brf = brief if isinstance(brief, dict) else {}
     base_tol = _f(thresholds.get("paired_tol"), PAIRED_TOL)
     noise = _paired_noise(brf, src_body, gen_side, src_side)
-    gen_metrics = gen_body.get("metrics") or {}
-    src_metrics = src_body.get("metrics") or {}
     gen_usable = _usable(gen_body)
     src_usable = _usable(src_body)
 
@@ -667,14 +795,46 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
     too_noisy = False
     compared = 0
 
-    dressed_now = _clothing_changed(brf)
-    for metric in GATED_METRICS:
+    # A wool coat makes a person wider, and that is not the generator taking a
+    # liberty with her body.  When the request changed the clothes, the
+    # silhouette is expected to move, so the verdict rests on the skeletal
+    # ratios instead - shoulder and hip widths come from pose landmarks, which
+    # clothing barely shifts.  Gating the silhouette here would reject every
+    # jacket she ever asks for and teach her to distrust the check that exists
+    # to protect her.
+    dressed = _clothing_changed(brf)
+    prof_ratio = None if dressed else _profile_ratio(
+        gen_body.get(WIDTH_PROFILE_KEY), src_body.get(WIDTH_PROFILE_KEY))
+    head_ratio = None if dressed else _profile_ratio(
+        gen_body.get(HEAD_PROFILE_KEY), src_body.get(HEAD_PROFILE_KEY))
+    if dressed:
+        notes.append("Ropa distinta: la silueta no se compara, solo el esqueleto.")
+
+    # Before any torso-length ruler testifies, the two silhouette rulers must
+    # agree on the unit.  They read the same mask, so what is left when one
+    # median is divided by the other is how far the torso length moved against
+    # the head length between the two images - see UNIT_SHIFT_MAX.  When it
+    # moved, the picture was re-framed (or the pose changed), the torso rulers
+    # would report the framing as a body, and only the head ruler can judge.
+    reframed = False
+    unit_shift = 0.0
+    if prof_ratio is not None and head_ratio is not None \
+            and head_ratio["median"] > 1e-6:
+        unit_shift = abs(prof_ratio["median"] / head_ratio["median"] - 1.0)
+        reframed = unit_shift > UNIT_SHIFT_MAX
+    if reframed:
+        notes.append("Encuadre distinto: el torso mide un %d%% distinto respecto "
+                     "a tu cabeza, asi que las medidas sobre el torso no se "
+                     "comparan y cuenta la figura en cabezas."
+                     % int(round(unit_shift * 100.0)))
+
+    for metric in () if reframed else GATED_METRICS:
         # Waist and bust are read off the silhouette, so new clothes move them
         # for honest reasons; shoulders, hips and head come from the skeleton.
-        if dressed_now and metric in SILHOUETTE_METRICS:
+        if dressed and metric in SILHOUETTE_METRICS:
             continue
-        gen_val = _f(gen_metrics.get(metric), None)
-        src_val = _f(src_metrics.get(metric), None)
+        gen_val = _paired_metric(gen_body, metric)
+        src_val = _paired_metric(src_body, metric)
         if gen_val is None or src_val is None or abs(src_val) < 1e-9:
             continue
         if metric not in gen_usable or metric not in src_usable:
@@ -698,19 +858,7 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
     # all of them the same way, so the median ratio is a far steadier signal
     # than any single width - and a uniform slim-down is exactly the failure the
     # client experienced.
-    # A wool coat makes a person wider, and that is not the generator taking a
-    # liberty with her body.  When the request changed the clothes, the
-    # silhouette is expected to move, so the verdict rests on the skeletal
-    # ratios instead - shoulder and hip widths come from pose landmarks, which
-    # clothing barely shifts.  Gating the silhouette here would reject every
-    # jacket she ever asks for and teach her to distrust the check that exists
-    # to protect her.
-    dressed = _clothing_changed(brf)
-    prof_ratio = None if dressed else _profile_ratio(
-        gen_body.get("width_profile"), src_body.get("width_profile"))
-    if dressed:
-        notes.append("Ropa distinta: la silueta no se compara, solo el esqueleto.")
-    if prof_ratio is not None:
+    if prof_ratio is not None and not reframed:
         deviation = abs(prof_ratio["median"] - 1.0)
         tol, capped = _noise_aware_tol(base_tol, noise.get(WIDTH_PROFILE_KEY))
         widened = widened or tol > base_tol + 1e-9
@@ -725,6 +873,30 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
         else:
             notes.append("Silueta comparada en %d alturas del torso."
                          % prof_ratio["n"])
+
+    # The head-length profile: the same silhouette read on rows hung from the
+    # chin, in units of her own head.  Nothing from the pose enters it, so a
+    # result cropped to a half body or a closeup still pairs row for row with
+    # the source on whatever rows both keep, where the torso rulers above have
+    # already lost their unit.  It is clothing too, so the same rule applies -
+    # the ratio itself was measured above, where the unit shift needed it.
+    if head_ratio is not None:
+        deviation = abs(head_ratio["median"] - 1.0)
+        tol, capped = _noise_aware_tol(HEAD_TOL, noise.get(HEAD_PROFILE_KEY))
+        widened = widened or tol > HEAD_TOL + 1e-9
+        too_noisy = too_noisy or capped
+        compared += head_ratio["n"]
+        records.append((deviation, tol))
+        if deviation > tol:
+            pct = int(round(deviation * 100.0))
+            offenders.append(
+                "tu figura es un %d%% %s de arriba abajo (silueta medida en "
+                "%d alturas, en cabezas)"
+                % (pct, "mas estrecha" if head_ratio["median"] < 1.0
+                   else "mas ancha", head_ratio["n"]))
+        else:
+            notes.append("Figura comparada en %d alturas sobre el tamano de "
+                         "tu cabeza." % head_ratio["n"])
 
     if compared == 0:
         return None
@@ -946,19 +1118,31 @@ def _fine_at_face_px(img: np.ndarray, face: dict, target_px: float) -> float | N
     Only ever downwards.  Shrinking discards grain the sensor really recorded,
     a loss both sides of the comparison can be made to suffer equally;
     enlarging would invent none and the two readings would not be commensurate.
+
+    The anti-alias is applied by hand, before the resize and on every call,
+    because it is the part of resampling that decides how much near-Nyquist
+    noise survives: a Gaussian of TEXTURE_PREFILTER pixels at the target scale
+    is the same filter on both sides whatever each side's own shrink factor,
+    and INTER_AREA alone is not - measured in the note above
+    SMOOTH_TEXTURE_LOSS_MAX.
     """
     box = anomaly_mod.face_box_px(img, face)
     if not box:
         return None
     k = min(1.0, float(target_px) / box[2])
+    if k <= 0.0:
+        return None
+    work = _safe(cv2.GaussianBlur, img, (0, 0), TEXTURE_PREFILTER / k)
+    if not isinstance(work, np.ndarray) or work.size == 0:
+        return None
     if k < 0.995:
         wide = max(8, int(round(img.shape[1] * k)))
         high = max(8, int(round(img.shape[0] * k)))
-        small = _safe(cv2.resize, img, (wide, high), None, 0, 0, cv2.INTER_AREA)
+        small = _safe(cv2.resize, work, (wide, high), None, 0, 0, cv2.INTER_AREA)
         if not isinstance(small, np.ndarray) or small.size == 0:
             return None
-        img, box = small, [v * k for v in box]
-    band = _ok_dict(_safe(anomaly_mod.face_skin_texture, img, {"bbox": box}),
+        work, box = small, [v * k for v in box]
+    band = _ok_dict(_safe(anomaly_mod.face_skin_texture, work, {"bbox": box}),
                     "rostro no medible")
     return float(_f(band.get("fine"))) if band.get("ok") else None
 
@@ -970,9 +1154,10 @@ def _texture_loss(img: np.ndarray, face_d: dict, brief: dict) -> dict:
     says this image was made from, so the answer is about this person and this
     camera; a hard-coded amplitude would be about whoever the constant was
     measured on, and this product has more than one user.  Both faces are
-    reduced to the narrower of the two before either band is read, because over
-    one person's own photographs that width explains the reading almost by
-    itself.
+    reduced below the narrower of the two before either band is read, because
+    over one person's own photographs that width explains the reading almost
+    by itself - and reduced BOTH, so that neither side keeps a resampling noise
+    the other one lost.
     """
     out = {"ok": False, "loss": 0.0, "fine": 0.0, "ref": 0.0}
     src_path = _source_path(brief)
@@ -989,7 +1174,7 @@ def _texture_loss(img: np.ndarray, face_d: dict, brief: dict) -> dict:
     if not src_box:
         return out
 
-    target = min(gen_box[2], src_box[2])
+    target = TEXTURE_MATCH_FACTOR * min(gen_box[2], src_box[2])
     fine = _fine_at_face_px(img, face_d, target)
     ref = _fine_at_face_px(src_img, src_face, target)
     if fine is None or ref is None or ref < SMOOTH_TEXTURE_MIN_REF:
@@ -1049,8 +1234,8 @@ def _smoothing_verdict(image_path: str, img: np.ndarray, face_d: dict,
     out["failed"] = loss >= SMOOTH_TEXTURE_LOSS_MAX
     kept = 100.0 * max(1.0 - loss, 0.0)
     # Say the measured number and nothing more.  A rejection at the line means
-    # three quarters of her grain survived, so "casi ha desaparecido" would be
-    # us exaggerating to her about her own photograph.
+    # 86% of her grain survived, so "casi ha desaparecido" would be us
+    # exaggerating to her about her own photograph.
     if out["failed"]:
         out["detail"] = ("Te han suavizado la piel: el rostro solo conserva el "
                          "%.0f%% del grano de tu foto." % kept)
@@ -1214,7 +1399,7 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
     if person_arg is not None:
         masks.setdefault("person", person_arg)
 
-    body_d = _ok_dict(_safe(body_mod.measure_body, img, pose_d, person_arg),
+    body_d = _ok_dict(_safe(body_mod.measure_body, img, pose_d, person_arg, face_d),
                       "medidas no disponibles")
     skin_d = _ok_dict(_safe(skin_mod.skin_stats, img, pose_d, face_d), "piel no medible")
     qual_d = _ok_dict(_safe(quality_mod.assess_quality, img, str(image_path)),

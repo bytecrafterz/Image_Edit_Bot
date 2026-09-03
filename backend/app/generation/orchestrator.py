@@ -253,7 +253,12 @@ def analyse_original(original: dict) -> dict:
     seg = segment.person_mask(img)
     mask = seg.get("mask") if seg.get("ok") else None
     regions = segment.region_masks(img, pose_d, mask) or {}
-    body_d = body_mod.measure_body(img, pose_d, mask)
+    # The face goes in because the head-length body ruler hangs its rows from
+    # the chin of the mesh: this reading is cached and handed to the gate as
+    # source_body, and without it that ruler - the only one that survives the
+    # engine's reframing - would be missing from every pair and verify would
+    # have to measure the photograph a second time to get it.
+    body_d = body_mod.measure_body(img, pose_d, mask, face_d)
     report = {
         "ok": True,
         "shot_type": shot_mod.classify_shot(img, pose_d, face_d).get("shot_type"),

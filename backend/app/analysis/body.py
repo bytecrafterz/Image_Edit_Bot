@@ -32,6 +32,14 @@ YAW_SUSPECT_DEG = 15.0  # widths start shrinking measurably from here
 YAW_REJECT_DEG = 45.0   # ... and stop meaning anything here
 MIN_TORSO_PX = 24.0
 SHAPE_SAMPLES = 12      # heights sampled across the silhouette
+MESH_FOREHEAD = 10      # FaceMesh index at the top of the forehead
+MESH_CHIN = 152         # ... and at the tip of the chin
+HEAD_MIN_PX = 8.0       # a head shorter than this cannot divide anything
+HEAD_STEPS = tuple(1.0 + 0.25 * i for i in range(29))  # 1.0 .. 8.0 heads
+HEAD_MIN_ROWS = 4       # fewer rows than this is not a profile
+HEAD_EDGE_MARGIN = 0.25 # heads above the bottom edge where the mask is trusted
+HEAD_CROP_PAD = 0.5     # head box padding, in box sides, for the re-mesh
+HEAD_CROP_SIDE = 640    # the re-mesh always sees the head at this size
 
 WIDTH_METRICS = ("shoulder_w_over_torso", "hip_w_over_torso",
                  "waist_w_over_torso", "bust_w_over_torso",
@@ -511,12 +519,168 @@ def shape_profile(mask, n: int = SHAPE_SAMPLES) -> list:
     return out
 
 
-def measure_body(img_bgr, pose: dict, mask=None) -> dict:
+def _mesh_head(face, height: int, width: int):
+    """Forehead and chin of a mesh, in pixels: ((tx, ty), (cx, cy)) or None."""
+    mesh = face.get("mesh") if isinstance(face, dict) else None
+    try:
+        if mesh is None or len(mesh) < 468:
+            return None
+        top, chin = mesh[MESH_FOREHEAD], mesh[MESH_CHIN]
+        tx, ty = float(top[0]), float(top[1])
+        cx, cy = float(chin[0]), float(chin[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) for v in (tx, ty, cx, cy)):
+        return None
+    # The mesh arrives normalised; a pixel mesh is recognised by magnitude, as
+    # landmarks_px does, so it cannot be silently scaled twice.
+    if max(abs(tx), abs(ty), abs(cx), abs(cy)) <= 1.6:
+        tx, cx = tx * width, cx * width
+        ty, cy = ty * height, cy * height
+    return (tx, ty), (cx, cy)
+
+
+def _canonical_head(img, face, height: int, width: int):
+    """Re-mesh the head at a fixed size and return its forehead and chin.
+
+    FaceMesh fitted to the whole frame is not framing-independent: the same
+    face, same pixels, measured after the picture was cropped to a half body,
+    came back with a forehead-to-chin length 4.3% different on average and
+    10.3% at worst (seven photographs, 62% and 45% crops), while a resize of
+    the whole picture moved it about 1% (0.8% at 1300 px, 1.1% at 800).  The
+    face detector inside FaceMesh sees a letterboxed square of the frame, so
+    the frame's shape decides the region the landmark model is fitted to.
+    Cutting the head out with a fixed padding and showing it at a fixed size
+    hands the model the same picture whatever surrounded it: the same length
+    then varies 0.6% (max 1.9%) across the same crops.  Returns None when
+    there is nothing to improve on.
+    """
+    if not isinstance(img, np.ndarray) or img.ndim != 3 or img.size == 0:
+        return None
+    box = face.get("bbox") if isinstance(face, dict) else None
+    try:
+        x, y, bw, bh = (float(v) for v in box[:4])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not all(math.isfinite(v) for v in (x, y, bw, bh)) or bw < 8 or bh < 8:
+        return None
+    pad = HEAD_CROP_PAD * max(bw, bh)
+    x0 = int(max(0, round(x - pad)))
+    y0 = int(max(0, round(y - pad)))
+    x1 = int(min(width, round(x + bw + pad)))
+    y1 = int(min(height, round(y + bh + pad)))
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return None
+    crop = img[y0:y1, x0:x1]
+    ch, cw = crop.shape[:2]
+    scale = HEAD_CROP_SIDE / float(max(ch, cw))
+    if abs(scale - 1.0) > 1e-3:
+        crop = cv2.resize(crop, (max(1, int(round(cw * scale))),
+                                 max(1, int(round(ch * scale)))),
+                          interpolation=cv2.INTER_CUBIC if scale > 1.0
+                          else cv2.INTER_AREA)
+    try:
+        from . import face as face_mod        # lazy: keeps body importable alone
+        again = face_mod.detect_face(crop)
+    except Exception:                                 # noqa: BLE001
+        return None
+    pts = _mesh_head(again, crop.shape[0], crop.shape[1])
+    if pts is None:
+        return None
+    sx = float(x1 - x0) / float(max(crop.shape[1], 1))
+    sy = float(y1 - y0) / float(max(crop.shape[0], 1))
+    (tx, ty), (cx, cy) = pts
+    return (x0 + tx * sx, y0 + ty * sy), (x0 + cx * sx, y0 + cy * sy)
+
+
+def head_profile(mask, face, height: int, width: int, img=None) -> list:
+    """Body width in HEAD LENGTHS at rows hung from the chin, in head lengths.
+
+    The local engine re-frames: a full-body source comes back as a half body, a
+    closeup, a headshot.  Both rulers above break under exactly that.  The width
+    profile divides by torso length from two pose landmarks, and a crop that
+    removes the hips drags the hip landmark with it: a 62% crop (head to just
+    below the hips) moved it +10..+19.5% on seven untouched photographs.  The
+    shape profile divides by the silhouette's own height, which is precisely
+    what a crop shortens: +33..+53% on the same crop.  Neither can gate a
+    reframed picture, because the reframe itself reads as a fatter body.
+
+    What a crop cannot touch is the face.  The generator keeps it (identity
+    0.99) and slimming filters narrow the body and leave it alone, so the head
+    length - forehead (10) to chin (152) of the 468-point FaceMesh, re-fitted on
+    a fixed-size head crop, see _canonical_head - is the unit, the chin is the
+    origin, and the mask's full extent is read on the rows chin + s heads for
+    s = 1.0, 1.25, ..., 8.0.  Rows start one head below the chin because the
+    neck and shoulder rows carry hair and, in every slimming filter, the ramp
+    where the effect is still fading in.  A row that has left the frame is
+    simply absent, and so is a row within a quarter head of the bottom edge:
+    the segmentation flares where the body is cut, and the last row above a
+    cut misread by 5..27% on four of twelve crops when it lay within 0.18 head
+    of the edge, while rows a quarter head or more above it moved at most 3%.
+    The rows that remain pair exactly against the source and still mean the
+    same thing.  Nothing from the pose enters here.
+
+    Measured on the seven measurable photographs (scratchpad ruler_probe3.py):
+    re-measuring at 1300/1000/800 px against 1600 moves the median ratio 0.6%
+    (max 1.5%, 18 pairs); a 62% crop 0.7% (max 2.3%, five photographs); a 45%
+    crop 1.4% on the one photograph that keeps four rows - the others keep
+    0.7..1.8 heads of body below the chin, which is a headshot, and return [].
+    An 8% slim reads 7.9% (7.1..8.6%) and a 12% slim 12.0% (11.3..13.3%), so
+    the signal is at least five times the worst noise, through a reframe,
+    where the two rulers above have no signal at all.  One of the seven
+    (7580, the head is a third of the frame) ends 1.7 heads below the chin
+    and no body ruler can measure it.
+
+    Returns [[s, width_over_head], ...] or [] when the mesh has fewer than 468
+    points, the head is under 8 px, or fewer than 4 rows can be measured.
+    """
+    h, w = int(height), int(width)
+    if h < 1 or w < 1:
+        return []
+    pts = _mesh_head(face, h, w)
+    if pts is None:
+        return []
+    better = _canonical_head(img, face, h, w) if img is not None else None
+    if better is not None:
+        pts = better
+    (tx, ty), (cx, cy) = pts
+    head = math.hypot(tx - cx, ty - cy)
+    if head < HEAD_MIN_PX:
+        return []
+    sil = _as_mask(mask, h, w)
+    if sil is None:
+        return []
+    body = sil > 0
+    y_max = h - 1 - HEAD_EDGE_MARGIN * head
+
+    out: list = []
+    for s in HEAD_STEPS:
+        yf = cy + s * head
+        y = int(round(yf))
+        if y < 0 or y >= h or yf > y_max:
+            continue
+        cols = np.flatnonzero(body[y])
+        if cols.size < 2:
+            continue
+        # A row that reaches a side of the frame has no width, only a lower
+        # bound, and a slim-down cannot move the end that is already off the
+        # picture: on the one photograph with an arm leaving the frame those
+        # rows read -2.4% under an 8% slim, the rows clear of the edge -8%.
+        if int(cols[0]) <= 0 or int(cols[-1]) >= w - 1:
+            continue
+        extent = float(cols[-1] - cols[0])
+        if extent <= 0.0:
+            continue
+        out.append([round(s, 2), round(extent / head, 5)])
+    return out if len(out) >= HEAD_MIN_ROWS else []
+
+
+def measure_body(img_bgr, pose: dict, mask=None, face=None) -> dict:
     """Measure one photograph. Every metric is a ratio against torso length."""
     out = {"ok": False, "shot_type": "unknown", "metrics": {}, "px": {},
            "confidence": 0.0, "reason": "", "unreliable": [],
            "reliability": {}, "corrected": [], "width_profile": [],
-           "shape_profile": [],
+           "shape_profile": [], "head_profile": [],
            "yaw_estimate": 0.0}
 
     if not isinstance(img_bgr, np.ndarray) or img_bgr.ndim < 2 or img_bgr.size == 0:
@@ -524,6 +688,12 @@ def measure_body(img_bgr, pose: dict, mask=None) -> dict:
         return out
     h, w = img_bgr.shape[:2]
     img = img_bgr if img_bgr.ndim == 3 else cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+
+    # The head-length ruler needs no pose, so it is filled in before the pose
+    # gate: a closeup reframe hides the hips, the torso frame fails, and the
+    # early returns below would otherwise throw away the one ruler that was
+    # built to survive exactly that picture.
+    out["head_profile"] = head_profile(mask, face, h, w, img)
 
     if not isinstance(pose, dict) or not pose.get("ok"):
         out["reason"] = "sin pose detectada"
@@ -748,6 +918,10 @@ def measure_body(img_bgr, pose: dict, mask=None) -> dict:
     # anywhere in it.  Measured spread on an unchanged photo is 1.0% against a
     # 12.5% signal, where the landmark ratios manage 12.6% against 12.8%.
     out["shape_profile"] = shape_profile(sil if sil is not None else mask)
+    # Same silhouette as the shape profile.  Only the colour fallback changes
+    # anything here; a provided mask was already measured above the pose gate.
+    if sil_src == "colour":
+        out["head_profile"] = head_profile(sil, face, h, w, img)
     out["ok"] = bool(out["metrics"])
     out["confidence"] = round(_clamp(conf, 0.0, 1.0), 3) if out["ok"] else 0.0
     out["reason"] = "; ".join(notes) if notes else ""
