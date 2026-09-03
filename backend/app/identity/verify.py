@@ -14,9 +14,11 @@ actually read, naming what changed and by how much.
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Any
 
+import cv2
 import numpy as np
 
 from ..analysis import anomaly as anomaly_mod
@@ -32,6 +34,66 @@ from .profile import DEFAULT_THRESHOLDS, GATED_METRICS, usable_metrics
 VERIFY_MAX_SIDE = 1600
 QUALITY_MIN = 0.45
 ANATOMY_SEVERITY_MAX = 0.6
+
+# --- oversmoothed skin -------------------------------------------------------
+# The defect the client actually came here with: "it removes any retouching and
+# manipulates the image to look exactly like her".  A generator keeps her shape
+# and her colour - face similarity stays at 0.99 - and quietly deletes the band
+# that makes a photograph a photograph: pores, fine lines, the grain her camera
+# recorded.  It is judged apart from the rest of the anatomy, with its own
+# threshold, for one reason: every phone camera smooths a face too, so the same
+# measurement means "her camera" on a photograph she took and "the robot
+# retouched her" on a generated one.  Only the caller knows which, so only the
+# generative context is gated - see _smoothing_verdict.
+#
+# What is compared is a RATIO between two measurements of the same person,
+# never a stored amplitude.  The fine band is not a property of skin: over her
+# 24 photographs it tracks how wide the face happens to be, Pearson r = 0.89 -
+# the same cheek reads 0.71 at 130 px and 3.09 at 540 px, because grain the
+# sensor recorded at one pixel is simply not there once the face is 100 px
+# across.  Comparing a result against a fixed amplitude therefore measures
+# framing: built from her own photographs, a fixed reference of 1.09 rejected
+# 12 of 24 perfectly faithful full-length results (100 px face) and caught 0 of
+# 17 closeups with 40% of the grain deliberately deleted (260 px face).
+#
+# So the reference is her own source photograph, and both images are shrunk
+# until their faces are the same width before either is measured - downwards
+# only, since shrinking removes grain that exists while enlarging invents none.
+# What survives is the fraction of HER grain this engine kept, at her framing.
+#
+# The two lines below are read off that ratio, measured on cases built from her
+# own 24 photographs: her face at a known width, a known fraction of the fine
+# band deleted, saved as JPEG the way a result is.  Median measured loss:
+#
+#   face width     kept everything   -25% of band   -40% of band   -50%
+#   100 px             -0.02             0.13           0.22        0.27
+#   160 px             -0.02             0.17           0.29        0.36
+#   260 px             -0.02             0.20           0.32        0.39
+#   400 px             -0.01             0.19           0.29        0.37
+#
+# A faithful result reads zero at every framing and never exceeded 0.16 in 76
+# cases, so 0.25 rejects nothing that kept her grain while sitting under the
+# median of every deliberately smoothed population from 160 px up.  The 40%
+# cut is what FLUX Kontext was measured doing to her.  Below 0.15 nothing is
+# said at all; between the two the loss is reported so the texture step can act
+# on it, without throwing the picture away.
+#
+# The honest limit: on a face only 100 px wide the whole fine band is a couple
+# of pixels of JPEG noise, and a 40% cut reads 0.22 - under the line.  The gate
+# is deliberately the safety net and not the cure, because the cure already ran:
+# the orchestrator puts her own grain back with generation/retouch.py before
+# anything is verified.  Rejecting a faithful full-length shot would charge her
+# for a regeneration she does not need, which is the trade this line is set on.
+SMOOTH_TEXTURE_LOSS_MAX = 0.25
+SMOOTH_TEXTURE_LOSS_MIN = 0.15
+# Below this the source photograph carries so little grain of its own that the
+# ratio would be dividing noise by noise, and nothing is claimed either way.
+SMOOTH_TEXTURE_MIN_REF = 0.30
+# Severity is linear in that loss, so this constant IS the 35% loss expressed
+# as a severity; it is deliberately not ANATOMY_SEVERITY_MAX, which answers a
+# different question about broken hands and invented limbs.
+SMOOTH_SEVERITY_MAX = 0.45
+SMOOTH_SEVERITY_CAP = 0.95
 BODY_CONF_MIN = 0.5           # below this, measurements only inform, never gate
 YAW_BAND_SLACK = 1.4          # extra tolerance for a yaw-corrected width
 PAIRED_TOL = 0.08             # floor for the shape change vs the source photo
@@ -232,6 +294,28 @@ def _is_generative(brief: dict) -> bool:
         if value is not None:
             return bool(value)
     return True
+
+
+def _is_source_photograph(image_path: str, brief: dict) -> bool:
+    """Is the file being verified the very photograph the brief points at?
+
+    A photograph she took is not something the robot produced, whatever the
+    engine flag says, and the smoothing every phone applies to it must never be
+    charged to the generator.  This is the case the calibration harness runs -
+    a real photograph handed in as both source and result - and the case the
+    old severity cap existed to protect.
+    """
+    src = _source_path(brief)
+    if not src or not image_path:
+        return False
+    try:
+        if os.path.exists(src) and os.path.exists(image_path) \
+                and os.path.samefile(src, str(image_path)):
+            return True
+    except OSError:
+        pass
+    return (os.path.normcase(os.path.abspath(src))
+            == os.path.normcase(os.path.abspath(str(image_path))))
 
 
 def _source_had_face(brief: dict) -> bool:
@@ -848,13 +932,172 @@ def _check_skin(gen_skin: dict, profile: dict,
     return check, _clamp01(similarity), True
 
 
-def _check_anatomy(anomalies: dict, defects: list[dict]) -> tuple[dict, float, bool]:
+def _smooth_severity(loss: float) -> float:
+    """A texture loss expressed as a severity, linear through the rejection."""
+    if loss <= 0.0:
+        return 0.0
+    scaled = SMOOTH_SEVERITY_MAX * loss / max(SMOOTH_TEXTURE_LOSS_MAX, 1e-6)
+    return round(min(scaled, SMOOTH_SEVERITY_CAP), 3)
+
+
+def _fine_at_face_px(img: np.ndarray, face: dict, target_px: float) -> float | None:
+    """Fine band of the cheek with the face first brought down to target_px.
+
+    Only ever downwards.  Shrinking discards grain the sensor really recorded,
+    a loss both sides of the comparison can be made to suffer equally;
+    enlarging would invent none and the two readings would not be commensurate.
+    """
+    box = anomaly_mod.face_box_px(img, face)
+    if not box:
+        return None
+    k = min(1.0, float(target_px) / box[2])
+    if k < 0.995:
+        wide = max(8, int(round(img.shape[1] * k)))
+        high = max(8, int(round(img.shape[0] * k)))
+        small = _safe(cv2.resize, img, (wide, high), None, 0, 0, cv2.INTER_AREA)
+        if not isinstance(small, np.ndarray) or small.size == 0:
+            return None
+        img, box = small, [v * k for v in box]
+    band = _ok_dict(_safe(anomaly_mod.face_skin_texture, img, {"bbox": box}),
+                    "rostro no medible")
+    return float(_f(band.get("fine"))) if band.get("ok") else None
+
+
+def _texture_loss(img: np.ndarray, face_d: dict, brief: dict) -> dict:
+    """How much of HER OWN grain this image kept, measured at one face width.
+
+    {"ok", "loss", "fine", "ref"}.  The reference is the photograph the brief
+    says this image was made from, so the answer is about this person and this
+    camera; a hard-coded amplitude would be about whoever the constant was
+    measured on, and this product has more than one user.  Both faces are
+    reduced to the narrower of the two before either band is read, because over
+    one person's own photographs that width explains the reading almost by
+    itself.
+    """
+    out = {"ok": False, "loss": 0.0, "fine": 0.0, "ref": 0.0}
+    src_path = _source_path(brief)
+    if not src_path:
+        return out
+    gen_box = anomaly_mod.face_box_px(img, face_d)
+    if not gen_box:
+        return out
+    src_img = _safe(loader.load_image, src_path, VERIFY_MAX_SIDE)
+    if not isinstance(src_img, np.ndarray) or src_img.size == 0:
+        return out
+    src_face = _ok_dict(_safe(face_mod.detect_face, src_img), "rostro no detectado")
+    src_box = anomaly_mod.face_box_px(src_img, src_face) if src_face.get("ok") else []
+    if not src_box:
+        return out
+
+    target = min(gen_box[2], src_box[2])
+    fine = _fine_at_face_px(img, face_d, target)
+    ref = _fine_at_face_px(src_img, src_face, target)
+    if fine is None or ref is None or ref < SMOOTH_TEXTURE_MIN_REF:
+        return out
+    out["ok"] = True
+    out["fine"] = round(fine, 4)
+    out["ref"] = round(ref, 4)
+    out["loss"] = round(1.0 - fine / ref, 4)
+    return out
+
+
+def _smoothing_verdict(image_path: str, img: np.ndarray, face_d: dict,
+                       brief: dict, defects: list[dict]) -> dict:
+    """What an oversmoothed face means for THIS image, given who made it.
+
+    Returns {"failed", "severity", "loss", "detail"} and, when a generator did
+    it, writes the measured loss into the defect list so the texture repair has
+    a box to work on.
+
+    Two measurements are involved and they answer different questions.  The
+    scan's ratio - facial skin against the rest of her skin in the same frame -
+    is reported, never gated: measured over her own 24 photographs it fires on
+    8 of them (a bare arm in daylight carries far more fine energy than a
+    cheek), and over 11 FLUX results it fires on 1, so on its own it would
+    reject her real photographs and miss the retouching.  The gate uses the
+    absolute band instead, compared with what her camera actually records.
+    """
+    out = {"failed": False, "severity": 0.0, "loss": None, "detail": ""}
+    existing = next((d for d in defects if d.get("type") == "oversmoothed_skin"),
+                    None)
+
+    # Her camera, not the robot: report it and leave the image alone.  This is
+    # the whole reason the detector used to cap itself.
+    if not _is_generative(brief) or _is_source_photograph(image_path, brief):
+        if existing is not None:
+            out["detail"] = ("La piel sale suavizada, pero la ha suavizado la "
+                             "camara y no el robot: se informa, no se rechaza.")
+        return out
+
+    band = _texture_loss(img, face_d, brief)
+    if not band.get("ok"):
+        # Nothing measured is never a failure; the scan's own report survives.
+        # No source photograph means no reference, and without a reference this
+        # gate stays quiet rather than borrowing somebody else's skin.
+        return out
+
+    fine = _f(band.get("fine"))
+    ref = _f(band.get("ref"))
+    loss = _f(band.get("loss"))
+    out["loss"] = round(loss, 3)
+    if loss < SMOOTH_TEXTURE_LOSS_MIN:
+        return out
+
+    severity = _smooth_severity(loss)
+    out["severity"] = severity
+    out["failed"] = loss >= SMOOTH_TEXTURE_LOSS_MAX
+    kept = 100.0 * max(1.0 - loss, 0.0)
+    if out["failed"]:
+        out["detail"] = ("Te han suavizado la piel: la textura real casi ha "
+                         "desaparecido, el rostro conserva el %.0f%% del grano "
+                         "de tus fotos." % kept)
+    else:
+        out["detail"] = ("La piel sale mas lisa que en tus fotos: conserva el "
+                         "%.0f%% del grano." % kept)
+
+    detail = ("piel suavizada por el generador: el rostro conserva el %.0f%% "
+              "del grano de su foto de origen (%.2f frente a %.2f, medidos con "
+              "el rostro al mismo tamano)" % (kept, fine, ref))
+    # A defect without a box cannot be repaired locally, so fall back to the
+    # normalised face box before giving up on the cheaper fix.
+    bbox = _int_bbox(existing.get("bbox") if existing else None) \
+        or _int_bbox(face_d.get("bbox"))
+    if not bbox:
+        norm = face_d.get("bbox_norm")
+        if isinstance(norm, (list, tuple)) and len(norm) == 4:
+            h, w = img.shape[:2]
+            bbox = _int_bbox([_f(norm[0]) * w, _f(norm[1]) * h,
+                              _f(norm[2]) * w, _f(norm[3]) * h])
+    if existing is None:
+        # The scan misses this in almost every real case, so the measurement
+        # that did see it has to carry the defect itself - otherwise the repair
+        # step is never asked to put the grain back.
+        defects.append({"type": "oversmoothed_skin", "where": "face",
+                        "bbox": bbox, "severity": severity,
+                        "repairable": True, "detail": detail})
+    elif severity > _f(existing.get("severity")):
+        existing["severity"] = severity
+        existing["detail"] = detail
+        existing["repairable"] = True
+        if bbox:
+            existing["bbox"] = bbox
+    return out
+
+
+def _check_anatomy(anomalies: dict, defects: list[dict],
+                   smoothing: dict | None = None) -> tuple[dict, float, bool]:
     name = "anatomy"
-    if not anomalies.get("ok"):
+    smooth = smoothing if isinstance(smoothing, dict) else {}
+    if not anomalies.get("ok") and not smooth.get("failed"):
         return (_mk(name, 0.0, ANATOMY_SEVERITY_MAX, True,
                     "No se pudo revisar la anatomia, comprobacion omitida."), 1.0, False)
-    worst = max([_f(d.get("severity")) for d in defects], default=0.0)
-    passed = worst < ANATOMY_SEVERITY_MAX
+    # Oversmoothed skin has already been judged, in context, by
+    # _smoothing_verdict; the anatomical threshold applies to the rest.
+    others = [d for d in defects if d.get("type") != "oversmoothed_skin"]
+    worst = max([_f(d.get("severity")) for d in others], default=0.0)
+    smooth_sev = _f(smooth.get("severity"))
+    failed = bool(smooth.get("failed"))
+    passed = worst < ANATOMY_SEVERITY_MAX and not failed
     if not defects:
         detail = "Sin anomalias anatomicas detectadas."
     else:
@@ -862,8 +1105,14 @@ def _check_anatomy(anomalies: dict, defects: list[dict]) -> tuple[dict, float, b
         parts = ["%s (%s)" % (DEFECT_ES.get(d["type"], d["type"]),
                               _severity_es(_f(d.get("severity")))) for d in listed]
         detail = "Se detectaron %d problemas: %s." % (len(defects), ", ".join(parts))
-    return (_mk(name, worst, ANATOMY_SEVERITY_MAX, passed, detail),
-            _clamp01(1.0 - worst), True)
+    if smooth.get("detail"):
+        detail = smooth["detail"] + " " + detail
+    value = smooth_sev if failed else worst
+    threshold = SMOOTH_SEVERITY_MAX if failed else ANATOMY_SEVERITY_MAX
+    check = _mk(name, value, threshold, passed, detail)
+    if failed:
+        check["fail_es"] = "te han suavizado la piel"
+    return check, _clamp01(1.0 - max(worst, smooth_sev)), True
 
 
 def _check_quality(qual: dict) -> tuple[dict, float, bool]:
@@ -922,7 +1171,7 @@ def _summary(passed: bool, checks: list[dict], repairable: list[dict],
     for check in checks:
         if check["passed"]:
             continue
-        reason = FAIL_ES.get(check["name"], check["name"])
+        reason = str(check.get("fail_es") or FAIL_ES.get(check["name"], check["name"]))
         if check["name"] == "body_proportions" and body_offenders:
             reason += " (" + body_offenders[0] + ")"
         reasons.append(reason)
@@ -993,7 +1242,10 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
     else:
         body_check, body_score, body_done, offenders = _check_body(body_d, prof, brf)
     skin_check, skin_score, skin_done = _check_skin(skin_d, prof, thresholds)
-    anat_check, anat_score, anat_done = _check_anatomy(anom_d, scan_defects)
+    # Smoothing is decided before the anatomy check reads the defects, because
+    # it is the one defect whose meaning depends on who produced the pixels.
+    smoothing = _smoothing_verdict(str(image_path), img, face_d, brf, scan_defects)
+    anat_check, anat_score, anat_done = _check_anatomy(anom_d, scan_defects, smoothing)
     qual_check, qual_score, qual_done = _check_quality(qual_d)
 
     for chk, chk_score, computed in ((face_check, face_score, face_done),

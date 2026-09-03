@@ -31,6 +31,7 @@ BUST_T = 0.22
 YAW_SUSPECT_DEG = 15.0  # widths start shrinking measurably from here
 YAW_REJECT_DEG = 45.0   # ... and stop meaning anything here
 MIN_TORSO_PX = 24.0
+SHAPE_SAMPLES = 12      # heights sampled across the silhouette
 
 WIDTH_METRICS = ("shoulder_w_over_torso", "hip_w_over_torso",
                  "waist_w_over_torso", "bust_w_over_torso",
@@ -460,11 +461,62 @@ def _limb_crosses(lm: dict, frame: dict, b_scan: float, half_w: float) -> bool:
 
 # ------------------------------------------------------------------- public
 
+def shape_profile(mask, n: int = SHAPE_SAMPLES) -> list:
+    """Body width at n heights, measured against the silhouette's own height.
+
+    This is the ruler the proportion check should be using, and the reason is
+    arithmetic rather than taste.  Every other metric in this module divides by
+    TORSO LENGTH, taken from two pose landmarks - and a difference of two jittery
+    points is the noisiest denominator available.  Re-measuring one untouched
+    photograph at different resolutions moves those ratios by 12.6% (shoulders)
+    and 13.8% (hips), while a real 12% slim-down moves them 12.8%.  Signal and
+    noise are the same size, so the gate is blind: it cannot tell a slimmed
+    picture from a re-encoded one.
+
+    The silhouette is a region, not a pair of points, so its extent barely moves:
+    the same sweep gives 1.0% spread (3.0% at the worst height) against the same
+    12.5% signal.  Twelve times the discrimination, from the same pixels.
+
+    Returns [[t, width_over_height], ...] with t the fraction of the way down the
+    figure, or [] when the mask cannot support the measurement.  Nothing from the
+    pose enters here on purpose.
+    """
+    m = mask
+    if m is None or not isinstance(m, np.ndarray) or m.size == 0:
+        return []
+    if m.ndim == 3:
+        m = m[:, :, 0]
+    body = m > 127 if m.dtype != np.bool_ else m
+    rows = np.flatnonzero(body.any(axis=1))
+    if rows.size < 20:
+        return []
+    top, bottom = int(rows[0]), int(rows[-1])
+    height = float(bottom - top)
+    if height < 20.0:
+        return []
+
+    out: list = []
+    for index in range(1, int(n) + 1):
+        y = int(top + height * index / (n + 1))
+        if y < 0 or y >= body.shape[0]:
+            continue
+        cols = np.flatnonzero(body[y])
+        if cols.size < 2:
+            continue
+        # Full extent at this height: the outline is what a slim-down moves.
+        width = float(cols[-1] - cols[0])
+        if width <= 0.0:
+            continue
+        out.append([round(index / (n + 1), 3), round(width / height, 5)])
+    return out
+
+
 def measure_body(img_bgr, pose: dict, mask=None) -> dict:
     """Measure one photograph. Every metric is a ratio against torso length."""
     out = {"ok": False, "shot_type": "unknown", "metrics": {}, "px": {},
            "confidence": 0.0, "reason": "", "unreliable": [],
            "reliability": {}, "corrected": [], "width_profile": [],
+           "shape_profile": [],
            "yaw_estimate": 0.0}
 
     if not isinstance(img_bgr, np.ndarray) or img_bgr.ndim < 2 or img_bgr.size == 0:
@@ -692,6 +744,10 @@ def measure_body(img_bgr, pose: dict, mask=None) -> dict:
     # comparable with the profile and may be gated with a wider tolerance.
     out["corrected"] = [n for n in corrected if n in out["metrics"]]
     out["width_profile"] = profile
+    # The stable ruler: silhouette width against silhouette height, no landmark
+    # anywhere in it.  Measured spread on an unchanged photo is 1.0% against a
+    # 12.5% signal, where the landmark ratios manage 12.6% against 12.8%.
+    out["shape_profile"] = shape_profile(sil if sil is not None else mask)
     out["ok"] = bool(out["metrics"])
     out["confidence"] = round(_clamp(conf, 0.0, 1.0), 3) if out["ok"] else 0.0
     out["reason"] = "; ".join(notes) if notes else ""

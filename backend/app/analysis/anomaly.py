@@ -45,6 +45,27 @@ SEVERITY_WEIGHT = {
 HAND_MIN_PX = 170.0
 HAND_MIN_TORSO_FRAC = 0.26
 
+# Oversmoothed skin: what the measured face/body texture ratio means.
+# A face carrying 45% of the fine texture of the same person's other skin is
+# where the difference first becomes visible; at 20% the grain is essentially
+# gone.  Severity is the position between those two, and it is only a
+# measurement: this file no longer decides what happens next, because the
+# consequence depends on who made the image - every phone camera smooths a
+# face, so the same number means "her camera" on a photograph she took and
+# "the robot retouched her" on a generated one.  identity/verify.py knows
+# which, and gates accordingly.
+SMOOTH_RATIO_TRIGGER = 0.45
+SMOOTH_RATIO_SEVERE = 0.20
+
+# Fine-band measurement of facial skin, used by the caller to compare a result
+# with the photographs the person actually took.  The face is scaled to a
+# common width first so the number means the same thing on a closeup and on a
+# full-length shot, and the band is the one a beauty filter destroys first:
+# pores, fine lines, camera grain.
+FACE_TEXTURE_REF_PX = 520.0
+_FINE_SIGMA = 1.4
+_MID_SIGMA = 5.0
+
 # MediaPipe Hands topology.
 _DIGITS = {
     "thumb": (1, 2, 3, 4),
@@ -654,21 +675,125 @@ def _texture_defects(small, person_s, masks_s: dict, scale: float) -> list[dict]
         body_e = _median_in(fine, body_skin)
         if face_e is not None and body_e is not None and body_e > 2.0:
             ratio = face_e / body_e
-            if ratio < 0.45:
+            if ratio < SMOOTH_RATIO_TRIGGER:
                 fb = cv2.boundingRect(face_m)
                 box = [fb[0] / scale, fb[1] / scale, fb[2] / scale, fb[3] / scale]
-                # Capped below the severity that rejects an image on purpose.
-                # Every modern phone smooths facial skin in its own pipeline, so
-                # this fires on plenty of genuine, untouched photographs - three
-                # of this client's own twenty-four.  It is worth reporting and
-                # worth repairing, but on its own it is not evidence that a
-                # generator did something, and it must not throw the image away.
+                # Report what was measured, at its real size.  The old code
+                # capped this at 0.55 so that it could never reject an image,
+                # which made the worst case - a face with no grain left at all -
+                # indistinguishable from a mild one and silently threw away the
+                # only number the caller could have judged.  The cap is gone;
+                # the reason it existed lives in identity/verify.py, which knows
+                # whether a camera or a generator produced these pixels.
+                span = max(SMOOTH_RATIO_TRIGGER - SMOOTH_RATIO_SEVERE, 1e-6)
+                sev = 0.20 + 0.75 * (SMOOTH_RATIO_TRIGGER - ratio) / span
                 defects.append(_defect(
                     "oversmoothed_skin", "face", box,
-                    _clamp((0.45 - ratio) / 0.45, 0.2, 0.55), True,
-                    "la piel del rostro tiene %.0f%% de la textura del resto"
-                    % (100.0 * ratio)))
+                    _clamp(sev, 0.2, 0.95), True,
+                    "la piel del rostro conserva el %.0f%% de la textura del "
+                    "resto de la piel (ratio %.2f)" % (100.0 * ratio, ratio)))
     return defects
+
+
+# ------------------------------------------------- facial texture, absolute
+
+def face_box_px(img_bgr, face: dict) -> list[float]:
+    """[x, y, w, h] of the detected face in pixels, or [] when unusable.
+
+    Kept apart because two callers need the same box and must not disagree
+    about it: the texture measurement below, and identity/verify.py, which has
+    to shrink one image until its face is as wide as another's before the two
+    bands can be compared at all.
+    """
+    if not isinstance(img_bgr, np.ndarray) or img_bgr.ndim != 3 or img_bgr.size == 0:
+        return []
+    h, w = img_bgr.shape[:2]
+    box = face.get("bbox") if isinstance(face, dict) else None
+    vals: list[float] = []
+    if isinstance(box, (list, tuple)) and len(box) == 4:
+        try:
+            vals = [float(t) for t in box]
+        except (TypeError, ValueError):
+            vals = []
+    if len(vals) != 4 or vals[2] <= 1 or vals[3] <= 1:
+        norm = face.get("bbox_norm") if isinstance(face, dict) else None
+        if isinstance(norm, (list, tuple)) and len(norm) == 4:
+            try:
+                nx, ny, nw, nh = (float(t) for t in norm)
+                vals = [nx * w, ny * h, nw * w, nh * h]
+            except (TypeError, ValueError):
+                vals = []
+    if len(vals) != 4 or not all(math.isfinite(t) for t in vals):
+        return []
+    if vals[2] < 24.0 or vals[3] < 24.0:
+        return []
+    return vals
+
+
+def face_skin_texture(img_bgr, face: dict,
+                      ref_px: float = FACE_TEXTURE_REF_PX) -> dict:
+    """Fine-band amplitude of facial skin, on a face scaled to a common width.
+
+    The within-image ratio above answers "is her face smoother than her arms".
+    This answers a different question: "how much grain does this face carry at
+    all".  The cheek band is used - below the eyes, inside the middle of the
+    face - because it is skin and nothing else: no eyelashes, no lips, no
+    hairline, so what is measured is pores and camera grain rather than
+    features.
+
+    {"ok", "fine", "mid", "face_px", "reason"}.
+
+    ``fine`` is NOT an absolute property of a person's skin and must never be
+    compared against a stored constant.  Scaling the cheek to ``ref_px`` puts
+    the band at one scale, but it cannot put back grain the sensor never
+    resolved: measured over one person's 24 photographs ``fine`` tracks
+    ``face_px`` with a Pearson r of 0.89, running from 0.71 on a face 130 px
+    wide to 3.09 on the same skin at 540 px.  Two readings mean something only
+    when both faces were the same width to begin with, which is why
+    ``face_px`` comes back with the number - the caller has to match it.
+    """
+    out = {"ok": False, "fine": 0.0, "mid": 0.0, "face_px": 0.0, "reason": ""}
+    if not isinstance(img_bgr, np.ndarray) or img_bgr.ndim != 3 or img_bgr.size == 0:
+        out["reason"] = "imagen invalida"
+        return out
+    h, w = img_bgr.shape[:2]
+    vals = face_box_px(img_bgr, face)
+    if not vals:
+        out["reason"] = "sin rostro medible"
+        return out
+    fx, fy, fw, fh = vals
+
+    x0 = int(_clamp(fx + 0.18 * fw, 0, w - 2))
+    x1 = int(_clamp(fx + 0.82 * fw, x0 + 2, w))
+    y0 = int(_clamp(fy + 0.45 * fh, 0, h - 2))
+    y1 = int(_clamp(fy + 0.80 * fh, y0 + 2, h))
+    patch = img_bgr[y0:y1, x0:x1]
+    if patch.size == 0 or min(patch.shape[:2]) < 8:
+        out["reason"] = "sin rostro medible"
+        return out
+
+    scale = float(ref_px) / fw
+    if abs(scale - 1.0) > 0.01:
+        patch = cv2.resize(patch, None, fx=scale, fy=scale,
+                           interpolation=cv2.INTER_CUBIC if scale > 1
+                           else cv2.INTER_AREA)
+    if min(patch.shape[:2]) < 12:
+        out["reason"] = "rostro demasiado pequeno"
+        return out
+
+    skin = skin_mask_ycrcb(patch) > 0
+    # The mask is a filter, not a decision: when it finds too little skin the
+    # cheek crop is used whole rather than reporting nothing.
+    if int(np.count_nonzero(skin)) < 400:
+        skin = np.ones(patch.shape[:2], bool)
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    blur_fine = cv2.GaussianBlur(gray, (0, 0), _FINE_SIGMA)
+    blur_mid = cv2.GaussianBlur(gray, (0, 0), _MID_SIGMA)
+    out["fine"] = round(float(np.std((gray - blur_fine)[skin])), 4)
+    out["mid"] = round(float(np.std((blur_fine - blur_mid)[skin])), 4)
+    out["face_px"] = round(float(fw), 1)
+    out["ok"] = True
+    return out
 
 
 def _border_defects(small, person_s, scale: float) -> list[dict]:

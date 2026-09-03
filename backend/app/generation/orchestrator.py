@@ -44,6 +44,7 @@ from ..safety import consent as consent_mod
 from ..safety import guard as guard_mod
 from ..services import billing, jobs, storage
 from . import learning, planner, prompt as prompt_mod, repair as repair_mod
+from . import retouch as retouch_mod
 from . import router as router_mod
 
 log = logging.getLogger("photorobot.robot")
@@ -123,6 +124,76 @@ def _is_generative_provider(provider) -> bool:
     except Exception:                                     # noqa: BLE001
         return True
     return bool(getattr(caps, "generative", True))
+
+
+TEXTURE_NOTE = ("Se devolvio la textura real de la piel: el motor la habia "
+                "suavizado y se ha vuelto a aplicar la de su foto.")
+
+
+def _smoothed_skin(image_path: str) -> str:
+    """Which detector, if any, says the engine sanded her skin.  '' if none.
+
+    Both detectors compare facial skin against the rest of the skin in the
+    same frame, which catches a beauty filter and is blind to a model that
+    smooths the whole picture evenly - and that is what these engines do: on
+    the client's own samples the fine band is 40% down and neither of them
+    fires.  So they are read as a positive signal and never as a veto.  The
+    question "is anything actually missing" can only be answered against her
+    photograph, and it is, inside ``restore_skin_texture``, which measures the
+    deficit and changes nothing at all when there is none.
+    """
+    from ..analysis import (anomaly as anomaly_mod, face as face_mod,
+                            pose as pose_mod, quality as quality_mod,
+                            segment as segment_mod)
+    try:
+        img = loader.load_image(image_path, max_side=1600)
+        face_d = face_mod.detect_face(img)
+        qual = quality_mod.assess_quality(img, image_path, face_d)
+        if qual.get("beauty_filter_suspected"):
+            return "filtro de belleza"
+        if qual.get("beauty_ratio") is not None:
+            # It measured and said no.  The anomaly scan reads the same
+            # comparison, so paying for a pose, a segmentation and a full
+            # scan to be told the same thing would only slow every image
+            # down; verify_image runs that scan afterwards regardless.
+            return ""
+        pose_d = pose_mod.detect_pose(img)
+        regions = segment_mod.region_masks(img, pose_d, None) or {}
+        scan = anomaly_mod.scan_anomalies(img, pose_d, face_d, regions)
+        for defect in (scan.get("defects") or []):
+            if defect.get("type") == "oversmoothed_skin":
+                return "oversmoothed_skin"
+    except Exception as exc:                              # noqa: BLE001
+        log.debug("Deteccion de suavizado fallida: %s", exc)
+    return ""
+
+
+def _restore_texture(run_id: str, image_path: str, source_path: str) -> dict:
+    """Put her own skin grain back on a generated file, in place.
+
+    Returns what happened, for the attempt row and the ficha.  It never
+    raises and it never loses the picture: the module writes only when the
+    transfer succeeded, and the write itself is atomic, so a failure of any
+    kind leaves exactly the file the provider returned - already paid for.
+    """
+    signal = _smoothed_skin(image_path)
+    try:
+        got = retouch_mod.restore_skin_texture(image_path, source_path,
+                                               image_path)
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("Restauracion de textura fallida: %s", exc)
+        return {"aplicada": False, "motivo": str(exc)[:120], "senal": signal}
+
+    record = {"aplicada": bool(got.get("ok")),
+              "motivo": str(got.get("reason") or "")[:160],
+              "senal": signal,
+              "ganancia": round(float(got.get("gain") or 1.0), 3),
+              "zonas": int(got.get("regions") or 0)}
+    if got.get("ok"):
+        _plan_note(run_id, TEXTURE_NOTE)
+        log.info("Textura devuelta (x%.2f) en %s", record["ganancia"],
+                 image_path)
+    return record
 
 
 def _plan_note(run_id: str, note: str) -> None:
@@ -798,6 +869,19 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             if not settled:
                 billing.release(hold)
 
+        # The engine keeps her shape and her colour and sands off the band
+        # underneath: her pores, her fine lines, the grain her camera really
+        # recorded.  Give it back from her own photograph before anything is
+        # measured, so the verdict, the album and the file she downloads are
+        # all the same picture.  Only when this engine invents pixels - a
+        # compositor cannot have removed a texture it never touched.
+        if checked["generative"] and original and original.get("path"):
+            batch.detail("Devolviendo la textura de la piel")
+            # Recorded whether or not it changed anything: "se midio y no
+            # hacia falta" is an answer she is entitled to read.
+            merged["textura"] = _restore_texture(run_id, result.image_path,
+                                                 original["path"])
+
         batch.detail("Revisando la imagen %d" % (index + 1))
         verdict = verify_mod.verify_image(result.image_path, profile, checked)
         defects = verdict.get("repairable_defects") or []
@@ -1044,6 +1128,14 @@ def build_report(run_id: str) -> dict:
 
     models = sorted({a["provider"] + (":" + a["model"] if a["model"] else "")
                      for a in attempts if a.get("provider")})
+    # What the robot gave back, not only what it threw away: how many results
+    # got her real skin grain returned, and by how much on average.  It rides
+    # on params_json, which every attempt already carries, so the ficha gains
+    # it without a migration.
+    restored = [(a.get("params") or {}).get("textura") for a in attempts]
+    restored = [t for t in restored if isinstance(t, dict) and t.get("aplicada")]
+    ganancia = (round(sum(float(t.get("ganancia") or 1.0) for t in restored)
+                      / len(restored), 3) if restored else None)
     # Routing warnings written during the run: which requested changes the
     # chosen engine was unable to make.  She reads them next to the cost.
     avisos = [n for n in ((run.get("plan") or {}).get("notes") or [])
@@ -1066,6 +1158,8 @@ def build_report(run_id: str) -> dict:
                                      / len(accepted), 4) if accepted else None),
         "modelos": models,
         "avisos": avisos,
+        "textura_restaurada": len(restored),
+        "textura_ganancia": ganancia,
         "defectos_detectados": detected,
         "motivos_descarte": [
             {"variante": a["variant_index"], "intento": a["attempt_no"],
