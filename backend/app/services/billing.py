@@ -23,16 +23,6 @@ import time
 from .. import db
 from ..config import SETTINGS
 
-# Rough price of one finished image per quality tier, used for estimates and
-# for translating a balance into "about N more photos".
-TIER_PRICE_USD = {
-    "draft": 0.0,
-    "preview": 0.012,
-    "standard": 0.035,
-    "high": 0.055,
-    "max": 0.09,
-}
-
 # Providers that cost nothing never gate anything.
 FREE_PROVIDERS = {"local", "heuristic", ""}
 
@@ -82,7 +72,7 @@ def all_balances(user_id: str) -> dict:
             "spent_today": spent_since(user_id, provider, _day_start()),
             "spent_30d": spent_since(user_id, provider, time.time() - 30 * 86400),
             "status": _status(bal),
-            "photos_left": photos_left(bal, "standard"),
+            "photos_left": photos_left(bal, "standard", user_id, provider),
         }
     out["local"] = {"balance": None, "spent_today": 0.0, "spent_30d": 0.0,
                     "status": "free", "photos_left": None}
@@ -100,15 +90,55 @@ def _status(bal: float) -> str:
     return "ok"
 
 
-def photos_left(bal: float, quality: str = "standard") -> int | None:
-    price = TIER_PRICE_USD.get(quality, TIER_PRICE_USD["standard"])
+def _image_price(quality: str, user_id: str | None = None,
+                 provider: str | None = None) -> float:
+    """One image of this tier, priced by the engine that would really make it.
+
+    There used to be a table here - 0.055 USD for 'high' - and it was wrong in
+    both directions: fal bills 0.040 for Kontext and 0.080 for Kontext [max],
+    so the balance gate reserved money nobody would spend and the top-up advice
+    was built on a number no invoice ever carried.  The price now comes from
+    the provider's own estimate_cost, measured on a request built exactly like
+    the one the run would send, including her photograph's shape - the cheapest
+    tiers are billed per megapixel, and a square guess is not her 3:4.
+    Returns 0.0 when the engine that would run is free, and the callers read
+    that as "no limit", which is what a free engine really means.
+    """
+    from ..generation import router as router_mod
+
+    size = None
+    if user_id:
+        row = db.q1("SELECT width, height FROM originals WHERE user_id=? AND "
+                    "deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+                    (user_id,))
+        if row and row["width"] and row["height"]:
+            size = [int(row["width"]), int(row["height"])]
+    prefer = provider or (router_mod.pinned_provider(user_id) if user_id else None)
+    try:
+        # Priced as the work this product exists to do: a change only a
+        # generative engine can make.  A plan that merely swaps the background
+        # runs free on the local engine, and the estimate screen says so for
+        # that plan - but a balance page that quoted 0 USD for every tier would
+        # be telling her that clothes, pose and hair are free, which they are
+        # not, and it is the balance page that has to warn her before zero.
+        return float(router_mod.price_per_image(
+            quality, prefer, source_size=size,
+            changes=router_mod.GENERATIVE_CHANGES))
+    except Exception:                                          # noqa: BLE001
+        return 0.0
+
+
+def photos_left(bal: float, quality: str = "standard",
+                user_id: str | None = None,
+                provider: str | None = None) -> int | None:
+    price = _image_price(quality, user_id, provider)
     if price <= 0:
         return None
     return max(0, int(bal / price))
 
 
 def price_of_next_image(user_id: str, quality: str) -> float:
-    return float(TIER_PRICE_USD.get(quality, TIER_PRICE_USD["standard"]))
+    return _image_price(quality, user_id)
 
 
 def recommended_topup(user_id: str, provider: str) -> float:
@@ -315,7 +345,7 @@ def recharge(user_id: str, provider: str, amount_usd: float, note: str = "") -> 
     )
     return {
         "provider": provider, "amount_usd": amount, "balance": after,
-        "photos_left": photos_left(after, "standard"),
+        "photos_left": photos_left(after, "standard", user_id, provider),
         "message": ("Anotado. Este registro solo refleja el saldo que ya has "
                     "anadido en la web de %s: la aplicacion nunca cobra nada por "
                     "su cuenta." % provider),
@@ -354,21 +384,24 @@ def check_and_raise_alerts(user_id: str) -> list[dict]:
         if bal <= 0:
             continue                       # zero is reported by the spend gate
         topup = recommended_topup(user_id, provider)
-        left = photos_left(bal, "standard")
+        left = photos_left(bal, "standard", user_id, provider)
+        # No price means the engine that would run charges nothing, so "para
+        # unas 0 fotos mas" would be exactly backwards: say nothing instead.
+        photos = (", para unas %d fotos mas" % left) if left else ""
         if bal < limits.critical_balance_usd:
             alert = raise_alert(
                 user_id, "low_balance", "critical",
                 "Saldo casi agotado en %s" % provider,
-                "Te quedan %.2f USD en %s, para unas %d fotos mas. Recarga unos "
-                "%.0f USD cuando puedas." % (bal, provider, left or 0, topup),
+                "Te quedan %.2f USD en %s%s. Recarga unos "
+                "%.0f USD cuando puedas." % (bal, provider, photos, topup),
                 provider=provider, balance=bal, topup=topup, photos_left=left)
         elif bal < limits.low_balance_usd:
             alert = raise_alert(
                 user_id, "low_balance", "warning",
                 "Saldo bajo en %s" % provider,
-                "Te quedan %.2f USD en %s, para unas %d fotos mas. Cuando bajes de "
+                "Te quedan %.2f USD en %s%s. Cuando bajes de "
                 "ahi el robot se detendra y te avisara."
-                % (bal, provider, left or 0),
+                % (bal, provider, photos),
                 provider=provider, balance=bal, topup=topup, photos_left=left)
         else:
             alert = None

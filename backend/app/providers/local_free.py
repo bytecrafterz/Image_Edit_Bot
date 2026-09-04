@@ -62,7 +62,11 @@ _QUALITY_MAX_SIDE = {
     "draft": 640, "preview": 768, "standard": 1024, "high": 1536, "max": 2048,
 }
 
-_FRAMING_ASPECT = {
+# Width over height of each framing the catalogue offers.  Public because the
+# router asks the same question for the PAID engines: fal turns width/height
+# into an aspect_ratio string, so whoever builds the request has to know the
+# shape the chosen framing implies or the model reframes the person for us.
+FRAMING_ASPECT = {
     "portrait_full": 3.0 / 4.0,
     "portrait_half": 4.0 / 5.0,
     "portrait_closeup": 4.0 / 5.0,
@@ -1175,9 +1179,12 @@ def _target_size(req: GenRequest, aspect, w: int, h: int) -> tuple[int, int]:
     and it is not the caller: the caller knows the size tier it wants, this
     module knows the crop it just made.  Obeying the pair literally is what
     turned a 3:4 full body crop into 1536x1536 - a 33% horizontal stretch of
-    a real person, because the orchestrator sizes every request as
-    ``width=height=QUALITY_SIZES[quality]`` and that table is a longest side,
-    not an aspect ratio.  identity/verify.py measured the damage on run
+    a real person, back when the orchestrator sized every request as
+    ``width=height=QUALITY_SIZES[quality]``: a longest side table read as if
+    it were an aspect ratio.  The size now comes from
+    generation/router.request_geometry, which carries her real shape, and this
+    fit is what keeps a mistaken pair from stretching her again.
+    identity/verify.py measured the damage on run
     run_c6e88e30ead34d7681d873c0 and was right to reject all three images:
     +25.3% on the head ruler, +36.3% on the torso ruler, against tolerances
     of 4%.  Fitting instead of stretching gives 1152x1536 from the same
@@ -1206,7 +1213,7 @@ def frame_image(img: np.ndarray, masks: dict, extra: dict, req: GenRequest,
     """Step 7: crop to the requested framing, then resize to the tier size."""
     h, w = img.shape[:2]
     framing = _key_of(extra.get("framing"))
-    aspect = _FRAMING_ASPECT.get(framing)
+    aspect = FRAMING_ASPECT.get(framing)
     if framing and aspect is None:
         meta["unsupported"].append("framing:%s" % framing)
     tw, th = _target_size(req, aspect, w, h)

@@ -81,10 +81,22 @@ across +/- 25 degrees of yaw.
 
 ### `analysis/body.py`
 ```python
-def measure_body(img_bgr, pose: dict, mask: np.ndarray | None = None) -> dict
+def measure_body(img_bgr, pose: dict, mask=None, face=None) -> dict
 # {"ok", "shot_type", "metrics": {name: float}, "px": {...raw pixel values...},
-#  "confidence": 0..1, "reason": str}
+#  "confidence": 0..1, "reason": str, "unreliable": [str],
+#  "width_profile": [[t, w_over_torso], ...],   # 9 heights of the torso
+#  "shape_profile": [[t, w_over_width], ...],
+#  "head_profile":  [[s, w_over_head], ...]}    # needs face= , else []
+
+def head_profile(mask, face, height: int, width: int, img=None) -> list
 ```
+`head_profile` hangs rows from the chin every 0.25 head lengths (1.0..8.0) and
+divides each row's silhouette width by the length of her own head, so the
+numbers do not change when the picture is re-framed. It abstains (returns `[]`)
+when the face mesh is missing, the head is under 8 px, fewer than 4 rows survive,
+or a row touches a side border. Passing `img=` lets it re-measure the head on a
+fixed-size crop, averaged with its mirror; without it the whole-frame mesh is
+used and carries the framing drift.
 `metrics` — **all normalised by torso length**, never by image size, and never
 shoulder-over-hip alone (a uniform slim-down leaves that ratio unchanged; this
 is the exact failure the client experienced):
@@ -179,7 +191,10 @@ Returns the **IdentityProfile** stored across the `profiles` columns:
               "ready_for_body_check": bool, "missing": [str], "advice": [str]},
  "face":  {"descriptor": [64 floats], "descriptor_std": [...],
            "n": int, "yaw_range": [min,max]},
- "body":  {metric: {"mean": f, "std": f, "n": int, "lo": f, "hi": f}},
+ "body":  {metric: {"mean": f, "std": f, "n": int, "lo": f, "hi": f,
+                    "spread": f, "dropped": int,
+                    "gated": bool,        # may this band reject on its own?
+                    "band_capped": bool}},# the +/-12% cap had to narrow it
  "skin":  {"lab_mean": [...], "lab_std": [...], "ita_deg": f, "n": int},
  "hair":  {"lab_mean": [...], "length": "short"|"medium"|"long", "n": int},
  "marks": [{"type":"tattoo","region":str,"bbox_norm":[..],"seen_in":int}],
@@ -188,7 +203,10 @@ Returns the **IdentityProfile** stored across the `profiles` columns:
  "sources": [{"path":str,"sha256":str,"shot_type":str}]
 }
 ```
-`lo`/`hi` are the accepted band: `mean ± max(tol_floor*mean, sigma*std)`.
+`lo`/`hi` are the accepted band: `mean ± max(tol_floor*mean, sigma*std)`,
+clipped to `± BAND_MAX_REL` (12%) of the mean. When that cap bites, the band is
+narrower than the photographs it was learned from, so `band_capped` is True and
+`gated` is False: the metric is reported but never rejects.
 **Originals can be deleted afterwards** — the profile alone is sufficient.
 
 ### `identity/verify.py`
@@ -209,10 +227,24 @@ Returns the **Verdict**:
 Check names and default weights:
 `identity_face` .30, `body_proportions` .25, `skin_tone` .15,
 `anatomy` .20, `quality` .10.
-A run of `body_proportions` compares every metric present in **both** the
-generated image and the profile; the check fails if any *gated* metric falls
-outside its band. Gated metrics: `shoulder_w_over_torso`, `hip_w_over_torso`,
-`waist_w_over_torso`, `bust_w_over_torso`, `head_h_over_torso`.
+`body_proportions` prefers the **paired** comparison: when `brief["source_path"]`
+is known, the generated image is measured against that same photograph instead of
+against the population band. Three rulers are compared, each as a median ratio:
+the skeletal metrics, the silhouette `width_profile`/`shape_profile` (9 heights of
+the torso), and `head_profile` — the figure measured at up to 29 heights below the
+chin in units of her own head length, which is the only ruler that survives a
+reframe (`HEAD_TOL` 0.04, `PAIRED_TOL` 0.08 widened by the measured pair noise up
+to `PAIRED_TOL_MAX` 0.16; the torso rulers abstain when the torso unit has moved
+against the head unit by more than `UNIT_SHIFT_MAX` 0.06, i.e. the framing changed).
+When the brief changes the clothing, the torso rulers stand down (a coat moves
+them for honest reasons) and `head_profile` is read **one-sided**: a figure that
+came back wider is reported and excused, a figure that came back narrower still
+rejects, because no garment in the catalogue removes volume.
+Only when no source photograph can be measured does it fall back to the population
+band, and there the check fails if a *gated* metric falls outside its band. Gated
+metrics: `shoulder_w_over_torso`, `hip_w_over_torso`, `waist_w_over_torso`,
+`bust_w_over_torso`, `head_h_over_torso` — each of them only while its band is not
+`band_capped`.
 
 ---
 

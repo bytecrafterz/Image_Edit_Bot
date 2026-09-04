@@ -10,13 +10,35 @@ uploaded to a third party bucket and no file ever outlives the request.
 
 Prices are per generated image in USD and are used for the budget gate before
 the call and for the ledger after it, so they must stay honest.
+
+MODO ENSAYO (PHOTOROBOT_FAL_REPLAY).  The whole paid path could only be walked
+by paying for it: the 15 fal images this installation owns cost 0.040-0.080 USD
+each, and every plumbing defect found so far - the 1:1 box, the three different
+prices for one image, a hold that was not the bill - only became visible after
+the invoice.  When that environment variable names a readable folder of images,
+``generate`` (and therefore ``inpaint``) builds the real payload, then copies
+one of those files to out_path and answers with a GenResult shaped exactly like
+a paid one instead of opening a socket: same endpoint, same cost from
+``estimate_cost``, plus ``replay`` markers in ``meta``.  It exists so the
+client's key works the first time, and so a rehearsal costs nothing.
+
+It is NOT a fallback for a missing key.  The FAL_KEY check runs BEFORE it and
+stays a hard error: an installation with no key has to fail loudly rather than
+hand back invented images that look bought.  It cannot switch itself on either -
+with the variable unset this file behaves exactly as it did - and if the
+variable is set but the folder is unusable the request fails instead of going to
+the network, because a rehearsal with a mistyped path must never end up
+spending real money.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import logging
+import os
 import random
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -43,6 +65,18 @@ QUEUE_BASE = "https://queue.fal.run"
 # "knobs" declares which request fields the endpoint actually accepts.  Sending
 # an unknown field is a 422 on some fal endpoints, so the payload builder only
 # emits what is listed here.
+#
+# "out_max_side" is the longest side of the file the endpoint HANDS BACK, which
+# is not the same question.  The Kontext family has no size knob at all - the
+# only shape control it exposes is aspect_ratio - and it answers with about one
+# megapixel: the 21 fal images this installation has produced are 1024x1024
+# without exception.  So a tier cannot buy pixels here, only fidelity, and
+# nothing in the codebase may promise 1536 or 2048 for a Kontext render.
+# Bringing the file back up afterwards is not a fix either: measured over her
+# seven measurable photographs, local_free.upscale from 768x1024 to 1152x1536
+# moved the mean texture loss of identity/verify._texture_loss from +0.018 to
+# +0.050 - worse on five of the seven, up to +0.107 on IMG_7580 - because the
+# unsharp it uses is not her grain.
 MODELS: dict[str, dict[str, Any]] = {
     # Identity work: Kontext edits the photograph it is given instead of
     # re-imagining the person, which is what keeps the face and the body honest.
@@ -51,6 +85,7 @@ MODELS: dict[str, dict[str, Any]] = {
         "price_usd": 0.040,
         "per_megapixel": False,
         "knobs": ("image", "guidance", "seed", "aspect"),
+        "out_max_side": 1024,
         "notes": "FLUX.1 Kontext [pro]: edicion guiada, conserva los rasgos.",
     },
     "identity_multi": {
@@ -58,6 +93,7 @@ MODELS: dict[str, dict[str, Any]] = {
         "price_usd": 0.040,
         "per_megapixel": False,
         "knobs": ("images", "guidance", "seed", "aspect"),
+        "out_max_side": 1024,
         "notes": "Kontext multi: acepta fotos de referencia de la persona.",
     },
     "identity_max": {
@@ -65,6 +101,7 @@ MODELS: dict[str, dict[str, Any]] = {
         "price_usd": 0.080,
         "per_megapixel": False,
         "knobs": ("image", "guidance", "seed", "aspect"),
+        "out_max_side": 1024,
         "notes": "Kontext [max]: la entrega final, mas fiel y mas cara.",
     },
     "inpaint": {
@@ -72,6 +109,7 @@ MODELS: dict[str, dict[str, Any]] = {
         "price_usd": 0.050,
         "per_megapixel": False,
         "knobs": ("image", "mask", "steps", "guidance", "seed"),
+        "out_max_side": 1024,
         "notes": "FLUX.1 Fill [pro]: repinta solo la zona blanca de la mascara.",
     },
     "img2img": {
@@ -107,6 +145,14 @@ _POLL_CAP = 5.0
 
 # A 403 from fal can mean "bad key" or "exhausted balance"; the body decides.
 _BALANCE_WORDS = ("balance", "credit", "quota", "exhausted", "billing")
+
+# Rehearsal mode.  One environment variable, read on every call so a rehearsal
+# can be turned on and off without restarting the server, and named after the
+# product so it cannot collide with anything else in the process.
+REPLAY_ENV = "PHOTOROBOT_FAL_REPLAY"
+_REPLAY_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+_REPLAY_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".png": "image/png", ".webp": "image/webp"}
 
 _ASPECTS = ((21 / 9, "21:9"), (16 / 9, "16:9"), (4 / 3, "4:3"), (3 / 2, "3:2"),
             (1.0, "1:1"), (2 / 3, "2:3"), (3 / 4, "3:4"), (9 / 16, "9:16"),
@@ -162,6 +208,58 @@ def _encode(path: str, max_side: int, mask: bool = False) -> tuple[str, tuple[in
                             retryable=False, code="bad_input") from exc
     payload = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:{mime};base64,{payload}", (width, height)
+
+
+def replay_dir() -> Path | None:
+    """The rehearsal folder, or None - which is the normal, paying case.
+
+    Public so the rehearsal script and the report can say, in one place and
+    without duplicating the rule, whether what is running is an ensayo.
+    """
+    raw = (os.environ.get(REPLAY_ENV) or "").strip().strip('"')
+    return Path(raw).expanduser() if raw else None
+
+
+def _replay_files(folder: Path) -> list[Path]:
+    """The images available to replay, sorted so a run is reproducible.
+
+    Anything wrong with the folder raises instead of returning an empty list.
+    Falling through to the network here would be the one unacceptable outcome:
+    somebody mistypes the path while rehearsing and the "free" run bills six
+    Kontext calls at 0.040-0.080 USD each.
+    """
+    try:
+        files = sorted(path for path in folder.iterdir()
+                       if path.is_file()
+                       and path.suffix.lower() in _REPLAY_SUFFIXES)
+    except OSError as exc:
+        raise ProviderError(
+            "MODO ENSAYO: no se puede leer la carpeta %s indicada en %s (%s). "
+            "No se llama a fal.ai para no gastar por error."
+            % (folder, REPLAY_ENV, exc), retryable=False,
+            code="replay_bad_dir") from exc
+    if not files:
+        raise ProviderError(
+            "MODO ENSAYO: la carpeta %s no contiene ninguna imagen (%s). "
+            "No se llama a fal.ai para no gastar por error."
+            % (folder, ", ".join(_REPLAY_SUFFIXES)), retryable=False,
+            code="replay_empty_dir")
+    return files
+
+
+def _replay_pick(files: list[Path], req: GenRequest, out: Path) -> Path:
+    """Which file answers this request: stable, and different per variant.
+
+    Keyed on the destination name and the seed, both of which the orchestrator
+    already varies per variant and per retry, so six variants get six different
+    pictures and the same rehearsal twice gives the same six.  A digest rather
+    than hash() because hash() is salted per process and would make two
+    identical rehearsals disagree.
+    """
+    key = "%s|%s|%s" % (out.name, getattr(req, "seed", None),
+                        getattr(req, "operation", ""))
+    digest = hashlib.sha1(key.encode("utf-8")).digest()
+    return files[int.from_bytes(digest[:4], "big") % len(files)]
 
 
 def _body_text(resp: httpx.Response) -> str:
@@ -241,12 +339,19 @@ class FalProvider(ImageProvider):
             upscale=False,
             text2img=True,
             identity_reference=True,
+            # max_side is what it ACCEPTS; out_max_side is what comes back.
+            # The two differ here and saying so is the only way the estimate
+            # can stop selling a 1536 px "alta" that arrives at 1024 px.
             max_side=2048,
+            out_max_side=int(self._spec(self.forced or DEFAULT_ROLE)
+                             .get("out_max_side") or 0),
             needs_key=True,
             key_name="FAL_KEY",
             cost_per_image_usd=float(self._spec(DEFAULT_ROLE)["price_usd"]),
             notes="fal.ai: edicion sobre la foto real, inpainting por zona y "
-                  "referencias de identidad. Precio por imagen segun modelo.",
+                  "referencias de identidad. Precio por imagen segun modelo. "
+                  "Devuelve alrededor de 1 megapixel (1024 px de lado largo) "
+                  "en cualquier calidad: se paga fidelidad, no tamano.",
         )
 
     def available(self) -> bool:
@@ -345,8 +450,17 @@ class FalProvider(ImageProvider):
             payload["seed"] = int(req.seed) & 0x7FFFFFFF
         if "size" in knobs and req.width and req.height:
             payload["image_size"] = {"width": int(req.width), "height": int(req.height)}
-        if "aspect" in knobs and req.width and req.height:
-            payload["aspect_ratio"] = _aspect_ratio(int(req.width), int(req.height))
+        if "aspect" in knobs:
+            # Her photographs are 2316x3088 - 3:4 - and Kontext reframes to
+            # whatever ratio it is told, so a wrong one here crops or squeezes
+            # her body before any check can see it.  The caller's box wins; when
+            # it did not send one, the source photograph's own shape does, and
+            # only a request with no picture at all falls back to a square.
+            size = meta.get("source_size") or []
+            width = int(req.width or (size[0] if len(size) == 2 else 0))
+            height = int(req.height or (size[1] if len(size) == 2 else 0))
+            if width and height:
+                payload["aspect_ratio"] = _aspect_ratio(width, height)
 
         return payload, meta
 
@@ -449,6 +563,68 @@ class FalProvider(ImageProvider):
                                 retryable=False, code="io") from exc
         return len(payload)
 
+    # --------------------------------------------------------- modo ensayo
+
+    def _replay(self, folder: Path, role: str, req: GenRequest, out: Path,
+                started: float, payload: dict, meta: dict) -> GenResult:
+        """Answer this request from a folder of images, without the network.
+
+        The payload has already been built by the caller and is handed in on
+        purpose: encoding her photograph, applying the EXIF rotation, choosing
+        the aspect ratio and refusing an unreadable file are the parts of the
+        paid path most likely to be wrong, so a rehearsal that skipped them
+        would rehearse nothing.  What is skipped is exactly the three HTTP
+        calls - submit, poll, download - and the money they cost.
+        """
+        endpoint = str(self._spec(role)["endpoint"])
+        chosen = _replay_pick(_replay_files(folder), req, out)
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(chosen, out)
+        except OSError as exc:
+            raise ProviderError("MODO ENSAYO: no se pudo copiar %s a %s: %s"
+                                % (chosen.name, out, exc),
+                                retryable=False, code="io") from exc
+
+        # Reported like the real thing, because the checks downstream read
+        # these numbers: a Kontext render comes back at about one megapixel
+        # whatever aspect_ratio was asked for, and the rehearsal has to show
+        # that same gap between what was ordered and what arrived.
+        meta["replay"] = True
+        meta["replay_file"] = chosen.name
+        meta["replay_dir"] = str(folder)
+        meta["bytes"] = out.stat().st_size
+        # The type of the file that was really copied, not of the name it was
+        # copied to: the bytes are the source's, and a PNG saved as v0_a1.jpg
+        # would be announced as a JPEG by anything reading the extension.
+        meta["content_type"] = _REPLAY_TYPES.get(chosen.suffix.lower(),
+                                                 "image/jpeg")
+        if payload.get("aspect_ratio"):
+            meta["aspect_ratio"] = payload["aspect_ratio"]
+        try:
+            with Image.open(out) as img:
+                meta["width"], meta["height"] = img.size
+        except (OSError, ValueError) as exc:
+            raise ProviderError(
+                "MODO ENSAYO: %s no es una imagen legible (%s)."
+                % (chosen.name, exc), retryable=False, code="bad_image") from exc
+        # Loud on purpose and on every call: an ensayo that goes unnoticed is
+        # an installation that thinks it has tested the paid path.
+        log.warning("MODO ENSAYO fal (%s): no se llama a la red. %s -> %s, "
+                    "endpoint que se habria usado %s, coste simulado %.4f USD.",
+                    REPLAY_ENV, chosen.name, out.name, endpoint,
+                    self.estimate_cost(req))
+        return GenResult(
+            ok=True,
+            image_path=str(out),
+            provider=self.name,
+            model=endpoint,
+            cost_usd=self.estimate_cost(req),
+            latency_ms=int((time.monotonic() - started) * 1000),
+            seed=req.seed,
+            meta=meta,
+        )
+
     # ------------------------------------------------------------ generate
 
     def generate(self, req: GenRequest, out_path: str | Path) -> GenResult:
@@ -465,6 +641,16 @@ class FalProvider(ImageProvider):
         started = time.monotonic()
         deadline = started + _OVERALL_TIMEOUT
         payload, meta = self._payload(role, req)
+
+        # The rehearsal branch, and the only one: after the key check, so a
+        # missing key still fails loudly, and after the payload, so everything
+        # that can be exercised offline has been.  With PHOTOROBOT_FAL_REPLAY
+        # unset this is one dictionary lookup and the code below is untouched.
+        rehearsal = replay_dir()
+        if rehearsal is not None:
+            return self._replay(rehearsal, role, req, out, started, payload,
+                                meta)
+
         headers = {
             "Authorization": f"Key {key}",
             "Content-Type": "application/json",
@@ -510,3 +696,22 @@ class FalProvider(ImageProvider):
             seed=seed,
             meta=meta,
         )
+
+    # ------------------------------------------------------------- upscale
+
+    def upscale(self, req: GenRequest, out_path: str | Path) -> GenResult:
+        """Refused, in rehearsal exactly as in production.
+
+        There is no upscale endpoint in MODELS, capabilities() says
+        ``upscale=False`` and the router therefore never sends this work here,
+        so no network call exists to replace: replaying a success would be a
+        rehearsal that passes where the client's key would fail, which is the
+        one thing this mode must never do.  Written out rather than inherited
+        because the base class answers in English and this message is read by
+        the user.  If fal ever gains an upscale endpoint, add the role to
+        MODELS and the rehearsal covers it for free through ``generate``.
+        """
+        raise ProviderError(
+            "fal.ai no ofrece un modelo de ampliacion en esta configuracion; "
+            "la ampliacion la hace el motor local.",
+            retryable=False, code="unsupported")

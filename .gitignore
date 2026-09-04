@@ -1,8 +1,15 @@
 # =====================================================================
 #  SECRETS - never commit these
 # =====================================================================
-data/keystore.json          # API keys of Anthropic and fal.ai, in clear
-data/secret.key             # signs the session cookies
+# git does NOT accept a comment after a pattern: the '#' only starts a
+# comment at the beginning of the line, so 'data/keystore.json  # ...' was
+# a pattern that matched nothing (verified with git check-ignore).  The two
+# files were saved only by the data/ and *.key rules further down; written
+# properly they are excluded by their own name as well.
+# API keys of Anthropic and fal.ai, in clear:
+data/keystore.json
+# signs the session cookies:
+data/secret.key
 *.key
 *.pem
 .env

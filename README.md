@@ -55,7 +55,7 @@ construyeron el perfil, y se compara con **la propia foto de origen**.
 | Comprobación | Qué mide | Peso |
 |---|---|---|
 | `identity_face` | firma geométrica y fotométrica del rostro (64 valores) | 30% |
-| `body_proportions` | anchos sobre la longitud del torso, y el perfil de silueta a 9 alturas | 25% |
+| `body_proportions` | anchos sobre la longitud del torso, el perfil de silueta a 9 alturas del torso y el perfil de figura a hasta 29 alturas medidas en cabezas | 25% |
 | `skin_tone` | croma a*/b* con tolerancia adaptada a tu propia variación | 15% |
 | `anatomy` | manos, dedos, extremidades, personas de más, texturas fundidas | 20% |
 | `quality` | nitidez, exposición, contraste, ruido | 10% |
@@ -84,10 +84,10 @@ reproducen con:
 python scripts\calibrate_identity.py --paired --measurable-only
 ```
 
-Resultado actual sobre las fotos reales: **0% de falsas alarmas** y **60% de
-detección** de un adelgazamiento del 6%, 12% y 18%, disparando siempre la
-comprobación correcta. El límite hoy no es el método: es que faltan fotos de
-cuerpo entero (ver más abajo).
+Resultado actual sobre las fotos reales: **0% de falsas alarmas** y una
+detección neta del **83% / 100% / 83%** para un adelgazamiento del 6%, 12% y
+18%, disparando siempre la comprobación correcta. El límite hoy no es el
+método: es que faltan fotos de cuerpo entero (ver más abajo).
 
 ---
 
@@ -156,6 +156,17 @@ punta sin gastar un céntimo, y para el uso gratuito.
 
 Las claves se añaden en **Ajustes → Claves de IA**. Se guardan en el servidor, se
 validan al guardarlas, y **nunca se devuelven al navegador**.
+
+**Antes de poner la clave de pago, lee
+[docs/PROCESAR_CON_CLAVE.md](docs/PROCESAR_CON_CLAVE.md)**: cómo se añade, qué
+enseña la pantalla de coste y qué se gasta de verdad por imagen, qué nivel de
+calidad elegir, qué mide el robot en cada imagen y qué hace cuando algo falla —
+con los números medidos sobre las imágenes de pago que ya hay compradas. Incluye
+el ensayo completo del camino de pago que **no gasta nada**:
+
+```powershell
+backend\.venv\Scripts\python.exe scripts\rehearse_paid.py
+```
 
 ---
 
@@ -294,6 +305,9 @@ backend\.venv\Scripts\python.exe scripts\calibrate_identity.py --paired --measur
 
 # Importar una carpeta de fotos y medir el perfil
 backend\.venv\Scripts\python.exe scripts\import_nayane.py
+
+# Ensayo completo del camino de pago (clave falsa, red cerrada, coste 0 USD)
+backend\.venv\Scripts\python.exe scripts\rehearse_paid.py
 ```
 
 ---

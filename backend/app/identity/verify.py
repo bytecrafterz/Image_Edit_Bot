@@ -203,6 +203,21 @@ NON_GENERATIVE_SCORE = 0.75
 # skeleton and survive a change of outfit.
 SILHOUETTE_METRICS = ("waist_w_over_torso", "bust_w_over_torso")
 
+# Measurements of how WIDE she is.  They matter apart from the rest because
+# fabric is worn on top of a person: every garment in the catalogue adds bulk
+# and none removes any, so one of these coming back LARGER may be the coat that
+# was asked for, while one coming back SMALLER cannot be.  The skeleton is not
+# the refuge it looks like either - MediaPipe places the shoulder and hip points
+# by looking through the clothing, and over her own 24 photographs, same body in
+# different outfits and poses, they swing +/-39% (shoulders) and +/-24% (hips).
+# Judged on both sides at the 8-16% limits used here, a real jacket is rejected
+# as a changed body; judged on one side, a slim-down still is not, because
+# nothing she can put on makes her narrower.  Lengths are deliberately absent:
+# no garment lengthens an arm, so those keep both sides.
+WIDTH_METRICS = ("shoulder_w_over_torso", "hip_w_over_torso",
+                 "waist_w_over_torso", "bust_w_over_torso",
+                 "neck_w_over_torso")
+
 CHECK_WEIGHTS: dict[str, float] = {
     "identity_face": 0.30,
     "body_proportions": 0.25,
@@ -790,6 +805,10 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
 
     offenders: list[str] = []
     notes: list[str] = []
+    # Widths a new garment is allowed to have grown; reported together
+    # at the end so the sentence reads as one fact and not as a list of
+    # near-misses.
+    excused_widths: list[str] = []
     records: list[tuple[float, float]] = []   # (deviation, limit applied to it)
     widened = False
     too_noisy = False
@@ -797,18 +816,34 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
 
     # A wool coat makes a person wider, and that is not the generator taking a
     # liberty with her body.  When the request changed the clothes, the
-    # silhouette is expected to move, so the verdict rests on the skeletal
-    # ratios instead - shoulder and hip widths come from pose landmarks, which
-    # clothing barely shifts.  Gating the silhouette here would reject every
-    # jacket she ever asks for and teach her to distrust the check that exists
-    # to protect her.
+    # silhouette is expected to move outwards, so the width profile stands
+    # down and the skeletal ratios carry the verdict - shoulder and hip widths
+    # come from pose landmarks, which clothing barely shifts.  Gating the
+    # silhouette both ways here would reject every jacket she ever asks for and
+    # teach her to distrust the check that exists to protect her.
+    # New clothes can only ADD fabric over her body: every garment in the
+    # catalogue is something worn on top of the skin and not one of them takes
+    # anything away, so a figure that comes back WIDER may be the jacket, while
+    # a figure that comes back NARROWER cannot be.  The head-length ruler is
+    # therefore kept when the request changed the clothes and judged one-sided,
+    # instead of being switched off - switching it off is what let the paid
+    # engine slim her unnoticed.  Measured on her own two source photographs
+    # delivered the way the engine delivers them (square crop to 1024, no
+    # generator in the loop) the median of that ruler moves 0.008 and 0.012;
+    # the same photographs compressed by a known factor read 0.032 at x0.97,
+    # 0.058 at x0.94 and 0.105 at x0.90, so the existing HEAD_TOL floor of 0.04
+    # sits between honest delivery and a real slim-down and needs no new
+    # constant.  The width profile stays off: it divides by torso length and a
+    # coat moves it for honest reasons at every height.
     dressed = _clothing_changed(brf)
+    head_one_sided = dressed
     prof_ratio = None if dressed else _profile_ratio(
         gen_body.get(WIDTH_PROFILE_KEY), src_body.get(WIDTH_PROFILE_KEY))
-    head_ratio = None if dressed else _profile_ratio(
+    head_ratio = _profile_ratio(
         gen_body.get(HEAD_PROFILE_KEY), src_body.get(HEAD_PROFILE_KEY))
     if dressed:
-        notes.append("Ropa distinta: la silueta no se compara, solo el esqueleto.")
+        notes.append("Ropa distinta: la ropa nueva puede ensancharte, asi que "
+                     "solo se te compara por si el motor te ha estrechado.")
 
     # Before any torso-length ruler testifies, the two silhouette rulers must
     # agree on the unit.  They read the same mask, so what is left when one
@@ -844,12 +879,23 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
         tol, capped = _noise_aware_tol(base_tol, noise.get(metric))
         widened = widened or tol > base_tol + 1e-9
         too_noisy = too_noisy or capped
-        compared += 1
-        records.append((deviation, tol))
+        # The same one-sided rule the head-length figure gets below, and for the
+        # same reason - see WIDTH_METRICS.  An excused widening counts as
+        # nothing rather than as a pass: a jacket allowed to widen her is not
+        # evidence that her shape survived, and letting it score would print
+        # "tus proporciones se mantienen" on the strength of a ruler that was
+        # never allowed to fail.
+        excused = dressed and ratio > 1.0 and metric in WIDTH_METRICS
+        if not excused:
+            compared += 1
+            records.append((deviation, tol))
         if deviation <= tol:
             continue
         label, down, up = METRIC_ES.get(metric, (metric, "menor", "mayor"))
         pct = int(round(deviation * 100.0))
+        if excused:
+            excused_widths.append("%s un %d%% %s" % (label, pct, up))
+            continue
         offenders.append("%s un %d%% %s que en tu foto original"
                          % (label, pct, down if ratio < 1.0 else up))
 
@@ -885,9 +931,21 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
         tol, capped = _noise_aware_tol(HEAD_TOL, noise.get(HEAD_PROFILE_KEY))
         widened = widened or tol > HEAD_TOL + 1e-9
         too_noisy = too_noisy or capped
-        compared += head_ratio["n"]
-        records.append((deviation, tol))
-        if deviation > tol:
+        # A widening the new clothes can explain is reported and not held
+        # against the image.  It is also not evidence that her shape survived,
+        # so it counts as nothing: neither a compared measurement nor a record.
+        # Otherwise an excused jacket would score as a passing measurement and
+        # the caller would print "tus proporciones se mantienen" on the
+        # strength of a ruler that was never allowed to fail.
+        excused = head_one_sided and head_ratio["median"] > 1.0
+        if not excused:
+            compared += head_ratio["n"]
+            records.append((deviation, tol))
+        if deviation > tol and excused:
+            notes.append("Sales un %d%% mas ancha de arriba abajo, pero eso lo "
+                         "puede hacer la ropa que pediste: se informa y no "
+                         "rechaza la imagen." % int(round(deviation * 100.0)))
+        elif deviation > tol:
             pct = int(round(deviation * 100.0))
             offenders.append(
                 "tu figura es un %d%% %s de arriba abajo (silueta medida en "
@@ -898,7 +956,9 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
             notes.append("Figura comparada en %d alturas sobre el tamano de "
                          "tu cabeza." % head_ratio["n"])
 
-    if compared == 0:
+    # No measurement, or none that was allowed to fail, means this test has
+    # nothing to say and the caller must fall back to the population bands.
+    if compared == 0 or not records:
         return None
 
     # After the noise correction the limits are no longer all the same, so the
@@ -935,6 +995,10 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
     else:
         detail = ("Cambiaron tus proporciones respecto a la foto original: %s."
                   % "; ".join(offenders[:4]))
+    if excused_widths:
+        notes.append("La ropa que pediste puede ensancharte, asi que no se "
+                     "rechaza la imagen por eso: %s."
+                     % "; ".join(excused_widths[:4]))
     if widened:
         notes.append("Limite ajustado al ruido de medicion de esta pareja.")
     if too_noisy:

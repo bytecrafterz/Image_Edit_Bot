@@ -44,9 +44,9 @@ cuando estaban intactas.
 
 | adelgazamiento | detección neta | falsas alarmas |
 |---|---|---|
-| 6 %  | 60 % | **0 %** |
-| 12 % | 60 % | **0 %** |
-| 18 % | 60 % | **0 %** |
+| 6 %  | 83 % (5 de 6) | **0 %** |
+| 12 % | 100 % (6 de 6) | **0 %** |
+| 18 % | 83 % (5 de 6) | **0 %** |
 
 Y lo más importante: **el 100% de esas detecciones las dispara la comprobación de
 proporciones corporales**, no otra por casualidad. El control acierta por el
@@ -60,9 +60,10 @@ decisiones del código:
 | estado | falsas alarmas | detección real |
 |---|---|---|
 | Primera versión | 60 % | 0 % (la comprobación de proporciones no llegaba a dispararse nunca) |
-| Versión actual | 0 % | 60 % |
+| Con la comparación contra la foto de origen | 0 % | 60 % |
+| Versión actual (regla de la cabeza) | 0 % | 83 % / 100 % / 83 % |
 
-Cuatro correcciones, todas motivadas por una medición:
+Cinco correcciones, todas motivadas por una medición:
 
 1. **Bandas contaminadas por la postura.** Las bandas se construían con medidas
    que el propio medidor había marcado como poco fiables (un brazo cruzando la
@@ -98,6 +99,16 @@ Cuatro correcciones, todas motivadas por una medición:
    torso en vez de dos, y se compara el perfil completo, porque un adelgazamiento
    uniforme mueve las nueve en el mismo sentido.
 
+5. **Una regla que no depende del encuadre: su propia cabeza.** El torso deja de
+   servir en cuanto la imagen se reencuadra, porque el propio torso cambia de
+   tamaño en el cuadro. La figura se mide también en alturas contadas desde la
+   barbilla en unidades de **la longitud de su cabeza** (`head_profile`, hasta 29
+   alturas), medida sobre un recorte de tamaño fijo y promediada con su espejo
+   para que no prefiera un lado. Medido: 0,4 % de variación al cambiar la
+   resolución, 0,4 % al recortar al 62 % del cuadro y 2,4 % en el peor espejo,
+   frente al 8 % que se lee cuando alguien la estrecha un 8 %. Es lo que permite
+   juzgar un reencuadre, donde antes no había control ninguno.
+
 ---
 
 ## Limitación honesta, y es importante
@@ -122,10 +133,10 @@ detección suba bastante, porque la limitación actual es de datos, no de métod
 ## Cómo leer la salida
 
 ```
-Falsas alarmas (fotos reales rechazadas):   0.0%  (0 de 5)
-Base para la deteccion neta: 5 fotos aceptadas sin tocar
-Deteccion NETA del adelgazamiento del 12%:  60.0%  (3 de 5)   [DEBIL]
-   de las cuales por proporciones corporales: 3
+Falsas alarmas (fotos reales rechazadas):   0.0%  (0 de 6)
+Base para la deteccion neta: 6 fotos aceptadas sin tocar
+Deteccion NETA del adelgazamiento del 12%: 100.0%  (6 de 6)   [OK]
+   de las cuales por proporciones corporales: 6
 ```
 
 * Si **falsas alarmas** sube, el sistema tirará fotos buenas y cada una cuesta
@@ -140,6 +151,9 @@ Umbrales relevantes, todos en un sitio:
 | constante | archivo | valor | qué hace |
 |---|---|---|---|
 | `PAIRED_TOL` | `identity/verify.py` | 0.08 | cambio máximo de forma frente a la foto de origen |
+| `HEAD_TOL` | `identity/verify.py` | 0.04 | lo mismo, con la regla que no depende del encuadre (en cabezas) |
+| `SMOOTH_TEXTURE_LOSS_MAX` | `identity/verify.py` | 0.14 | grano de piel perdido a partir del cual se rechaza |
+| `SMOOTH_TEXTURE_LOSS_MIN` | `identity/verify.py` | 0.09 | grano de piel perdido a partir del cual se informa |
 | `BAND_MAX_REL` | `identity/profile.py` | 0.12 | anchura máxima de una banda de población |
 | `GATE_MIN_SAMPLES` | `identity/profile.py` | 3 | fotos necesarias antes de que una medida pueda rechazar |
 | `ANATOMY_SEVERITY_MAX` | `identity/verify.py` | 0.6 | gravedad a partir de la cual un defecto rechaza |

@@ -90,6 +90,12 @@ class Capabilities:
     # remote generative provider behaves exactly as before.
     generative: bool = True
     max_side: int = 2048
+    # Longest side of the file the provider really HANDS BACK, when that is
+    # smaller than what it accepts.  0 means "the same as max_side".  It exists
+    # because fal's Kontext endpoints take a 2048 px photograph and answer with
+    # about one megapixel whatever the quality tier charged for, and a tier that
+    # cannot say so is selling pixels that never arrive.
+    out_max_side: int = 0
     needs_key: bool = True
     key_name: str = ""
     cost_per_image_usd: float = 0.0

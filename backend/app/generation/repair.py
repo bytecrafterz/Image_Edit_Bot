@@ -321,8 +321,17 @@ def repair(image_path: str, defects: list[dict], brief: dict, profile: dict,
             result["rounds"] += 1
             try:
                 res = provider.inpaint(req, str(cand_path))
-            except InsufficientBalance:
+            except InsufficientBalance as exc:
                 # A hard stop: the orchestrator must alert, never keep trying.
+                # But the zones painted BEFORE the account ran dry were billed
+                # by fal exactly like the ones that were kept, and raising
+                # threw ``result`` away with them: measured with a provider
+                # that dies on the second zone, 0.0500 USD of real spending
+                # reached nobody - up to 0.1000 USD with the three zones
+                # MAX_REGIONS allows.  It is the same defect the reverted
+                # repairs had, so the number travels on the exception and the
+                # caller settles it before it stops the run.
+                exc.cost_usd = result["cost_usd"]
                 result["notes"].append("Sin saldo en el proveedor: se detiene "
                                        "la reparacion.")
                 raise

@@ -156,7 +156,12 @@ def main() -> int:
     if body:
         print("\nProporciones medidas (banda aceptada):")
         for name, band in body.items():
-            gate = "PUEDE RECHAZAR" if band.get("gated") else "solo informativa"
+            # Un perfil guardado antes de que "gated" recogiera el tope de
+            # la banda dice gated=True aunque la banda venga recortada, y
+            # verify no la deja rechazar.  Se lee igual que alli.
+            gate = ("PUEDE RECHAZAR"
+                    if band.get("gated") and not band.get("band_capped")
+                    else "solo informativa")
             span = 100 * (band["hi"] - band["lo"]) / 2 / abs(band["mean"]) \
                 if band.get("mean") else 0
             print(f"   {name:26s} {band['mean']:.3f}  "

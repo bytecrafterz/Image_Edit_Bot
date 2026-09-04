@@ -588,26 +588,52 @@ def restore_skin_texture(generated_path, source_path, out_path,
     # 25% loss on the cheek into 2% over the body, and nothing gets repaired.
     union = np.zeros((height_g, width_g), np.uint8)
     keep: list[tuple] = []
+    # The largest deficit measured on a region that could NOT be paired.  The
+    # amplitudes are read before the correspondence test purely so this number
+    # exists; nothing else about the loop changed, and a region that fails the
+    # test is skipped exactly as before.
+    unverified = 0.0
     for name, region in candidates:
         region = cv2.bitwise_and(region, cover)
         selected = _interior(region, interocular)
         if int(np.count_nonzero(selected)) < MIN_REGION_PX:
-            continue
-        match = _correspondence(mid_gen, mid_src, selected)
-        if match < MIN_CORRESPONDENCE:
-            # She asked for another outfit, so this is not her arm any more.
             continue
         here_gen = _std_in(band_gen, selected)
         here_src = _std_in(band_src, selected)
         if here_src < 1e-3 or here_gen < 1e-6:
             continue
         deficit = 1.0 - (here_gen / here_src)
+        match = _correspondence(mid_gen, mid_src, selected)
+        if match < MIN_CORRESPONDENCE:
+            # She asked for another outfit, so this is not her arm any more.
+            unverified = max(unverified, deficit)
+            continue
         if deficit <= MIN_DEFICIT:
             continue
         keep.append((name, region, selected, match, deficit, here_gen, here_src))
         union = cv2.bitwise_or(union, region)
 
     if not keep:
+        # Two very different silences used to say the same sentence, and one of
+        # them was a lie told to her about her own photograph.  Measured over
+        # the fifteen paid FLUX files on disk (scratchpad k2_why.py): the module
+        # declines on nine, and on seven of those her own face failed the
+        # correspondence test carrying a measured deficit of 37, 58, 60, 60,
+        # 62, 64 and 65%.  On five of those seven the gate's
+        # own ruler reads 17.7 to 19.9% of her grain gone, over its 14%
+        # rejection line.  Telling her "the image already keeps your skin
+        # texture" there contradicts what this very function just measured.  So
+        # that sentence is now reserved for the case it describes - every region
+        # paired and none of them missing anything - and a frame whose skin
+        # could not be paired says so instead.  Neither branch touches a pixel:
+        # blending a band that failed the correspondence test is still refused.
+        if unverified > MIN_DEFICIT:
+            return _result(False, generated_path,
+                           "no se pudo comprobar tu piel contra tu foto en esta "
+                           "imagen (le falta hasta un %d%% de grano, pero no "
+                           "coincide lo suficiente para devolverselo): se deja "
+                           "tal cual" % int(round(unverified * 100.0)),
+                           gain=1.0, aligned=True, regions=0)
         # Exactly the case the client is paying for us NOT to touch: the
         # engine kept her skin, so adding grain would be our own retouch.
         return _result(False, generated_path,

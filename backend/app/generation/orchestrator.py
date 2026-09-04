@@ -55,9 +55,6 @@ _cancelled: set[str] = set()
 # read-modify-write of one column: without this lock one of the notes is lost.
 _notes_lock = threading.Lock()
 
-QUALITY_SIZES = {"draft": 512, "preview": 768, "standard": 1024,
-                 "high": 1536, "max": 2048}
-
 
 # ------------------------------------------------------------------- helpers
 
@@ -98,16 +95,11 @@ def _clear_cancel(run_id: str) -> None:
 def _default_provider(user_id: str) -> str | None:
     """The engine the user pinned in Ajustes, or None for 'decide tu'.
 
-    Stored as the ``default_provider`` user setting; 'auto' and an absent row
-    both mean no preference, which is what the router already understands as
-    'choose for me'.  Reading it here is what makes the setting real: until
-    now every preview ignored it.
+    The read lives in the router, next to the code that acts on it, because the
+    balance page has to price the same engine this run will use: two readers of
+    one setting is how a screen ends up quoting an engine that never runs.
     """
-    row = db.q1("SELECT value_json FROM user_settings WHERE user_id=? "
-                "AND key='default_provider'", (user_id,))
-    value = db.loads(row["value_json"], "") if row else ""
-    name = str(value or "").strip().lower()
-    return None if name in ("", "auto") else name
+    return router_mod.pinned_provider(user_id)
 
 
 def _is_generative_provider(provider) -> bool:
@@ -364,6 +356,13 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     pinned = _default_provider(user["id"])
     if pinned:
         plan["provider"] = pinned
+    # The shape of her photograph travels with the plan, because the estimate
+    # has to build the same request the run will send and the size is part of
+    # it: her 2316x3088 is a 3:4, and asking any engine for a square instead is
+    # what cropped or squeezed her body in every paid image so far.
+    plan["source_path"] = original["path"]
+    plan["source_size"] = [int(original.get("width") or 0),
+                           int(original.get("height") or 0)]
 
     estimate = router_mod.estimate_run_cost(plan, quality or "preview")
     balances = billing.all_balances(user["id"])
@@ -381,6 +380,20 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     aviso = str(estimate.get("aviso") or "")
     if aviso and aviso not in warnings:
         warnings.append(aviso)
+
+    # Same reasoning for the pixels: 'alta' buys a more faithful model, not a
+    # bigger file, and she is told which one she is buying before she pays.
+    aviso_res = str(estimate.get("aviso_resolucion") or "")
+    if aviso_res and aviso_res not in warnings:
+        warnings.append(aviso_res)
+
+    # And the ceiling.  The estimate is what a run costs when it goes well; a
+    # run that keeps being rejected pays for every retry and every repainted
+    # zone, and on 2026-09-03 one draft variant settled 0.2687 USD against a
+    # 0.0084 USD quote.  Both numbers now reach the screen she decides on.
+    aviso_coste = str(estimate.get("aviso_coste") or "")
+    if aviso_coste and aviso_coste not in warnings:
+        warnings.append(aviso_coste)
 
     db.execute(
         "INSERT INTO runs(id,user_id,original_id,profile_id,mode,status,"
@@ -721,7 +734,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     batch is here for the two things that are not private to one image - the
     decision to stop, and the money that several images are spending at once.
     """
-    from ..providers.base import GenRequest, InsufficientBalance, ProviderError
+    from ..providers.base import InsufficientBalance, ProviderError
 
     index = int(variant.get("index", 0))
     choices = variant.get("choices") or {}
@@ -750,16 +763,39 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             negative = negative + ", " + ", ".join(sorted(set(extra_negatives)))
         merged = {**built.get("params", {}), **params}
 
+        # Build the image BEFORE choosing who makes it and what it costs.  A
+        # provider reads the request to pick its model - source, references,
+        # mask, size - so a request built afterwards is a different request,
+        # and pricing that one is how the estimate, the reservation and the
+        # invoice came to disagree about the same photograph.  Her own shape
+        # comes from the original row; a chosen framing overrides it, because
+        # a 9:16 story really is a different picture.
+        hints = _local_hints(choices)
+        request = router_mod.build_request(
+            "generate", quality,
+            prompt=built["prompt"], negative_prompt=negative,
+            source_path=original["path"],
+            source_size=[int(original.get("width") or 0),
+                         int(original.get("height") or 0)],
+            framing=hints.get("framing") or choices,
+            seed=seed + attempt_no - 1,
+            strength=float(merged.get("strength", 0.5)),
+            guidance=float(merged.get("guidance", 4.0)),
+            steps=int(merged.get("steps", 28)),
+            identity_weight=float(merged.get("identity_weight", 0.85)),
+            extra=hints,
+        )
+
         # The router needs both halves of the question: who she prefers, and
         # what she actually asked to change.  Without the second half a free
         # engine that cannot change clothes or pose wins on price and
         # produces images that could never have satisfied the request.
         provider, model, why = router_mod.choose_provider(
             "generate", quality, budget_usd=None, prefer=prefer,
-            changes=choices)
+            changes=choices, request=request)
         unsupported = router_mod.unsupported_changes(provider, choices)
-        price = provider.estimate_cost(GenRequest(prompt=built["prompt"],
-                                                  quality=quality))
+        # Priced on the object that is about to be sent, and on nothing else.
+        price = provider.estimate_cost(request)
         # The decision travels with the attempt row - params_json already
         # exists, so the ficha gains it without a migration - and a warning
         # is written once onto the run's plan notes, which the report reads
@@ -777,18 +813,6 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         checked = dict(brief)
         checked["generative"] = _is_generative_provider(provider)
 
-        side = QUALITY_SIZES.get(quality, 768)
-        request = GenRequest(
-            prompt=built["prompt"], negative_prompt=negative,
-            source_path=original["path"], reference_paths=[original["path"]],
-            quality=quality, seed=seed + attempt_no - 1,
-            strength=float(merged.get("strength", 0.5)),
-            guidance=float(merged.get("guidance", 4.0)),
-            steps=int(merged.get("steps", 28)),
-            identity_weight=float(merged.get("identity_weight", 0.85)),
-            width=side, height=side,
-            extra=_local_hints(choices),
-        )
         target = out_dir / f"v{index}_a{attempt_no}.jpg"
 
         # Reserve, do not merely ask.  "Can I afford this?" is only true
@@ -893,11 +917,35 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
 
         if (not verdict.get("passed") and defects
                 and SETTINGS.limits.max_repair_rounds and not batch.aborted()):
-            # A repair is one more call to the provider, so it is held and
-            # settled like one.  A refusal here only skips the repair: the
+            # A repair is more calls to the provider, so it is held and
+            # settled like them.  A refusal here only skips the repair: the
             # image in hand is already paid for and deserves its verdict, and
-            # the next generation is where the run really stops.
-            repair_gate = billing.reserve(user["id"], provider.name, price,
+            # the next generation is where the run really stops.  It is priced
+            # as what it is - an inpaint on the fill endpoint, 0.050 USD where
+            # a Kontext edit is 0.040 - through the same builder, carrying the
+            # real identity references the repair sends.  Reserving the
+            # generation price instead was the same defect as the estimate: a
+            # hold that is not the bill.
+            #
+            # And a repair is not ONE call: repair() repaints each failing
+            # region separately, up to repair.MAX_REGIONS of them, and the
+            # provider charges for every one.  In the rehearsal of 2026-09-03
+            # two regions billed 0.100 USD against a 0.050 USD hold - twice
+            # what the gate had approved - and the run settled 0.600 USD with
+            # only 0.550 USD ever reserved.  So the ceiling is reserved and the
+            # truth is settled: over-reserving costs nothing (the hold lives
+            # for one call) while under-reserving lets a run spend money the
+            # balance gate refused.  Defects merge into regions, so their count
+            # is the upper bound on the calls.
+            repair_price = provider.estimate_cost(router_mod.build_request(
+                "inpaint", quality, source_path=result.image_path,
+                reference_paths=[original["path"]],
+                source_size=[int(original.get("width") or 0),
+                             int(original.get("height") or 0)],
+                framing=hints.get("framing") or choices))
+            repair_calls = max(1, min(repair_mod.MAX_REGIONS, len(defects)))
+            repair_gate = billing.reserve(user["id"], provider.name,
+                                          repair_price * repair_calls,
                                           ref=f"{run_id}:v{index}:repair")
             repair_settled = False
             try:
@@ -907,17 +955,52 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                     fixed = {}
                 else:
                     batch.detail("Corrigiendo %s" % _defect_label(defects))
-                    fixed = repair_mod.repair(result.image_path, defects, brief,
-                                              profile, provider, str(target))
-                if fixed.get("ok"):
-                    repaired += 1
-                    repair_cost = float(fixed.get("cost_usd") or 0.0)
+                    try:
+                        fixed = repair_mod.repair(result.image_path, defects,
+                                                  brief, profile, provider,
+                                                  str(target))
+                    except InsufficientBalance as exc:
+                        # The account ran dry in the middle of the repair.  The
+                        # zones painted before that are already on fal's
+                        # invoice - 0.0500 USD measured with a provider that
+                        # dies on the second of two zones, 0.1000 USD with the
+                        # three MAX_REGIONS allows - so they are settled here
+                        # before the run stops, exactly like a reverted
+                        # repaint.  Then the same hard stop the generation
+                        # side does: alert her, halt the batch, and do not let
+                        # the other variants keep asking a dry account.
+                        spent = float(getattr(exc, "cost_usd", 0.0) or 0.0)
+                        if spent > 0.0:
+                            cost += spent
+                            billing.settle(user["id"], provider.name,
+                                           repair_gate["hold_id"], spent,
+                                           ref=f"{run_id}:v{index}:repair",
+                                           note="reparacion")
+                            repair_settled = True
+                        billing.raise_alert(user["id"], "zero_balance",
+                                            "critical",
+                                            "Sin saldo en %s" % provider.name,
+                                            str(exc), provider=provider.name)
+                        batch.stop(str(exc))
+                        return {"accepted": False, "cost": cost,
+                                "attempts": attempts, "repaired": repaired,
+                                "stopped": True, "reason": str(exc)}
+                # The provider charges for a repaint that was reverted exactly
+                # like one that was kept, so what is settled is what it really
+                # cost - not only the repairs that worked.  Settling on
+                # ``ok`` alone dropped 0.050 USD of a 0.650 USD rehearsal from
+                # the ledger on 2026-09-03: her balance page would drift from
+                # fal's own dashboard by every repair the scanner rejected.
+                repair_cost = float(fixed.get("cost_usd") or 0.0)
+                if repair_cost > 0.0:
                     cost += repair_cost
                     billing.settle(user["id"], provider.name,
                                    repair_gate["hold_id"], repair_cost,
                                    ref=f"{run_id}:v{index}:repair",
                                    note="reparacion")
                     repair_settled = True
+                if fixed.get("ok"):
+                    repaired += 1
                     verdict = verify_mod.verify_image(fixed.get("image_path")
                                                       or result.image_path,
                                                       profile, checked)
@@ -994,6 +1077,14 @@ def _store_image(user: dict, run_id: str, original: dict, profile: dict,
     except Exception:                                     # noqa: BLE001
         thumb = None
     info = loader.image_info(path)
+    # An image produced in a rehearsal must never be mistakable for one that
+    # was bought.  The provider is the only one that knows: it says so in its
+    # own meta when it answered from the replay folder instead of the network
+    # (providers/fal, MODO ENSAYO), and that mark is written beside the choices
+    # so the album row carries it for the life of the file.
+    meta = {"choices": choices, "seed": result.seed}
+    if (getattr(result, "meta", None) or {}).get("replay"):
+        meta["ensayo"] = True
     db.execute(
         "INSERT INTO images(id,user_id,run_id,attempt_id,original_id,profile_id,"
         "kind,path,thumb_path,width,height,bytes,sha256,provider,model,cost_usd,"
@@ -1005,7 +1096,7 @@ def _store_image(user: dict, run_id: str, original: dict, profile: dict,
          int(info.get("bytes") or 0), str(info.get("sha256") or ""),
          result.provider, result.model, float(result.cost_usd or 0.0),
          float(verdict.get("score") or 0.0), db.dumps(verdict),
-         db.dumps({"choices": choices, "seed": result.seed}), db.now()),
+         db.dumps(meta), db.now()),
     )
     return image_id
 
