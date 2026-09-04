@@ -114,6 +114,21 @@ def _image_price(quality: str, user_id: str | None = None,
         if row and row["width"] and row["height"]:
             size = [int(row["width"]), int(row["height"])]
     prefer = provider or (router_mod.pinned_provider(user_id) if user_id else None)
+    # A run sends her other photographs with every generation, and that choice
+    # halves the price of the top tiers (identity_multi 0.040 USD against
+    # identity_max 0.080 USD), so the balance page has to price the call the
+    # run will really make.  It only asks whether such a run is possible - a
+    # built profile and enough photographs - never which photographs, because
+    # that is a measurement and this is a price.
+    references = 0
+    if user_id:
+        ready = db.q1("SELECT 1 AS ok FROM profiles WHERE user_id=? AND "
+                      "deleted_at IS NULL AND status='ready' LIMIT 1",
+                      (user_id,))
+        count = db.q1("SELECT COUNT(*) AS n FROM originals WHERE user_id=? AND "
+                      "deleted_at IS NULL", (user_id,))
+        if ready and int((count or {})["n"] or 0) >= router_mod.REFERENCE_COUNT:
+            references = router_mod.REFERENCE_COUNT - 1
     try:
         # Priced as the work this product exists to do: a change only a
         # generative engine can make.  A plan that merely swaps the background
@@ -122,7 +137,7 @@ def _image_price(quality: str, user_id: str | None = None,
         # be telling her that clothes, pose and hair are free, which they are
         # not, and it is the balance page that has to warn her before zero.
         return float(router_mod.price_per_image(
-            quality, prefer, source_size=size,
+            quality, prefer, source_size=size, references=references,
             changes=router_mod.GENERATIVE_CHANGES))
     except Exception:                                          # noqa: BLE001
         return 0.0

@@ -40,10 +40,140 @@ SEVERITY_WEIGHT = {
     "border_artifact": 0.40,
 }
 
-# Below this size a hand cannot support digit-ratio geometry; the flags it
-# produces are landmark noise rather than deformity.  See the hand detector.
-HAND_MIN_PX = 170.0
-HAND_MIN_TORSO_FRAC = 0.26
+# ------------------------------------------------------------ hand rulers
+#
+# Every number below is a ratio between two things measured in the SAME
+# picture, on a crop scaled so the hand is always HAND_CANON_PX across.  That
+# is not decoration: the previous version measured digit lengths in raw pixels
+# and its verdict moved with the load size, which makes it unable to gate
+# anything.  Measured 2026-09-04 on this client's own 24 photographs, the worst
+# hand read severity 0.40 at max_side 1024 and 0.57 at 1600 (IMG_8825), and two
+# others went the other way, 0.28 at 1024 down to 0.00 at 1600 (IMG_8798).
+# Same pixels, same hand, three different answers.
+#
+# A hand is judgeable when it occupies enough of the FRAME - a fraction, which
+# no resize can change - rather than enough pixels.  0.055 of the diagonal is
+# where her own hands stop resolving fingers at all: her judgeable hands run
+# 0.06 to 0.26 of the diagonal at every load size tested.
+HAND_CANON_PX = 256.0
+HAND_JUDGE_FRAC = 0.055
+
+# The melted hand: the one failure this corpus actually contains, and the only
+# one anything here can reject.  The fine grain of the hand skin is compared
+# with the fine grain of the same arm in the same crop at the same zoom, so
+# lens, camera, light and load size all divide out.
+#
+# Measured through this exact code path: 61 readings of her own hands (her 24
+# photographs at max_side 768, 1024 and 1600, plus 10 re-encoded controls) never
+# fall below 0.845, and their fifth percentile is 0.909.  Hands melted on
+# purpose on copies of those same photographs reach 0.251, and 10 of the 44
+# readable hands in the 26 generated images on disk sit below 0.60 - which is
+# the client's complaint, measured.
+#
+# Reporting starts at 0.82, just under her worst real hand, and the severity
+# only reaches the 0.60 that rejects an image at 0.62: 36% below anything her
+# own photographs have ever produced, at any load size.  That margin is the
+# instruction "do not make it oversensitive" written as a number.
+HAND_MELT_REPORT = 0.82
+HAND_MELT_SEVERE = 0.49
+
+# Digit length over palm length in MediaPipe's metric 3D frame, which is what
+# the 2D ratios should always have been: it is immune to foreshortening, where
+# the 2D ones are not - her own untouched IMG_7880 measures a 2D palm aspect of
+# 17.42 (7.9x outside the old bound) simply because the hand is edge-on, while
+# its 3D reading is an unremarkable 1.77.  The bounds are human anatomy with
+# roughly 40% of margin on her measured envelope (thumb 0.78-1.15, index
+# 0.44-1.06, middle 0.60-1.19, ring 0.51-0.93, pinky 0.35-0.89), because the
+# next user's hands are not hers and the envelope must not be fitted to one
+# person.
+HAND_DIGIT_BOUNDS_3D = {
+    "thumb": (0.55, 1.60),
+    "index": (0.32, 1.45),
+    "middle": (0.42, 1.60),
+    "ring": (0.34, 1.35),
+    "pinky": (0.22, 1.25),
+}
+# Above this the 3D palm fit itself has collapsed - a palm cannot be five times
+# longer than it is wide - so the reading is unusable rather than damning.  Her
+# hands read 1.38-3.12; a generated hand a person can see is fine reads 6.29.
+HAND_ASPECT_UNRELIABLE = 4.6
+
+# A wrist with no recognised hand on it is only a missing hand when there is
+# nothing there.  Measured on her photographs, all 7 of the wrists that used to
+# be reported as "missing" have 0.75-1.00 skin in the disc just beyond them:
+# the hand is in the picture, the model simply did not name it.
+LIMB_SKIN_PRESENT = 0.35
+
+# How much of the forearm patch has to actually be arm before the grain ruler
+# above is allowed to divide by it.
+#
+# The melt ruler is hand grain over ARM grain, and it was proved invariant to
+# the load size.  It is not invariant to the FRAME: the arm patch is placed
+# from the pose landmarks, and the pose is fitted to whatever shape of picture
+# arrives.  Her own IMG_8918, untouched and merely cropped at the sides to 72%
+# of its width - her whole body still in frame, not one pixel of her hand or
+# arm changed - moved that patch off her forearm.  Skin inside the disc fell
+# from 88% to 38%, the grain it measured was a lace bodice and a wall instead
+# of her arm, the ratio fell from 1.85 to 0.47, and the image was REJECTED with
+# "la mano conserva el 47% de la textura fina del brazo: dedos fundidos o
+# borrados" at severity 0.95, on a hand that is perfect.
+#
+# Over 161 hand readings - her 24 photographs under five framings, plus the
+# whole broken-hand truth set - only six patches fall under 60% skin, and four
+# of those are 0% (no patch at all, already reported as unjudged).  The two
+# real ones are both that reframe of IMG_8918, at 0.385 and 0.577; the next
+# reading up anywhere in the corpus is 0.666.  The limit sits in that gap: 56%
+# above the reading that produced the false rejection and 10% below the
+# faintest honest one.
+#
+# It costs almost nothing that was working.  Every melted hand the ruler
+# rejects - 6 of 15 in the truth set - is measured against a patch over 80%
+# skin, so the guard removes 0 of those at any limit up to 0.80, and on the
+# paid images on disk it changes exactly one verdict.
+#
+# That one verdict is the reason this guard matters most, not an argument
+# against it.  data/final/nayane_final.jpg was being REJECTED at severity 0.95
+# for "la mano conserva el 10% de la textura fina del brazo".  In that image
+# she is wearing a long sleeved shirt buttoned at the cuff, and the patch the
+# ruler divided by contains 1.1% and 0.0% skin: it sits on the sleeve.  That
+# number was hand grain over WOVEN COTTON grain, and cotton at that scale
+# carries far more fine energy than skin, so the ratio had to come out low
+# whatever the hand looked like.  It was never a measurement of her hand.
+#
+# Nothing in the calibration corpus could show this: all 24 of her photographs
+# are bare armed, and the broken-hand set is built on them.  Half the wardrobe
+# is not - blazer, camisa, abrigo, gabardina, chaqueta de cuero, jersey, traje
+# and esmoquin all cover the forearm - so without this guard every long sleeved
+# outfit she orders is a hand the ruler calls melted.
+#
+# A hand whose reference cannot be trusted is now reported as unjudged, and the
+# verdict tells her which hands nobody checked and to look at them herself.
+# That is the honest answer, and it is the one the check already knows how to
+# give.
+ARM_PATCH_SKIN_MIN = 0.60
+
+# ------------------------------------------------------------ face rulers
+#
+# A face turned away from the camera is asymmetric in projection, and the old
+# code handled that with an on/off guard at balance 0.78.  Her IMG_8949 lands on
+# that edge: balance 0.739 at max_side 768, 0.782 at 1024, 0.692 at 1600, so at
+# 1024 alone it was called "rasgos asimetricos" at severity 0.90 - a rejection,
+# on her own photograph, decided by the resize.  The guard is now a slope
+# instead of a step: the asymmetry a turn explains grows with the turn.  Over
+# her 24 photographs at three sizes the worst honest case needs a slope of 1.30
+# (asym 0.383 at turn 0.218); the slope used is 2.2, and for the vertical drift
+# 0.60 against a worst honest 0.274.
+FACE_ASYM_BASE = 0.10
+FACE_ASYM_TURN = 2.2
+FACE_DRIFT_BASE = 0.055
+FACE_DRIFT_TURN = 0.60
+# Past this much turn the projection dominates and nothing here can be read.
+FACE_BALANCE_MIN = 0.35
+# One eye is legitimately smaller than the other the moment the head turns:
+# hers read down to 0.280 when turned and never below 0.662 when near frontal,
+# so the eye check only speaks about a near-frontal face.
+FACE_EYE_FRONTAL = 0.85
+FACE_EYE_RATIO = 0.55
 
 # Oversmoothed skin: what the measured face/body texture ratio means.
 # A face carrying 45% of the fine texture of the same person's other skin is
@@ -74,15 +204,9 @@ _DIGITS = {
     "ring": (13, 14, 15, 16),
     "pinky": (17, 18, 19, 20),
 }
-# Digit length over palm length, with bounds wide enough that foreshortening
-# alone never trips them - only real deformity does.
-_DIGIT_BOUNDS = {
-    "thumb": (0.30, 1.50),
-    "index": (0.30, 1.35),
-    "middle": (0.32, 1.45),
-    "ring": (0.30, 1.35),
-    "pinky": (0.20, 1.10),
-}
+# The views one hand is measured from.  A landmark set that survives a mirror,
+# a small rotation and a change of scale is one the pixels support; one that
+# does not is a guess, and a guess must not reject a paid image.
 
 # Face mesh: mirror pairs and the midline.
 _MESH_PAIRS = ((33, 263), (133, 362), (61, 291), (70, 300), (234, 454),
@@ -126,14 +250,6 @@ def _poly_area(pts) -> float:
         x2, y2 = pts[(i + 1) % n]
         total += x1 * y2 - x2 * y1
     return abs(total) / 2.0
-
-
-def _ccw(a, b, c) -> bool:
-    return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
-
-
-def _segments_cross(a, b, c, d) -> bool:
-    return (_ccw(a, c, d) != _ccw(b, c, d)) and (_ccw(a, b, c) != _ccw(a, b, d))
 
 
 def _dist(a, b) -> float:
@@ -196,68 +312,260 @@ def _median_in(values, mask):
 
 # ------------------------------------------------------------------- hands
 
-def _hand_geometry(pts) -> dict:
-    """Everything measurable about one detected hand, in pixels."""
-    wrist = pts[0]
-    palm_len = _dist(wrist, pts[9])
-    palm_w = _dist(pts[5], pts[17])
-    out = {"palm_len": palm_len, "palm_w": palm_w, "flags": [], "extended": 0}
-    if palm_len < 6.0 or palm_w < 4.0:
-        out["flags"].append("degenerate")
-        return out
+def _world_ratios(world) -> dict | None:
+    """Digit length over palm length in the metric 3D frame, plus palm aspect.
 
+    This is the same question the old pixel geometry asked, asked where the
+    answer means something.  Measured on her 24 photographs at three load
+    sizes, one hand's 2D digit ratios ranged over a factor of eight between
+    sizes (IMG_8918 read 2.28 at 768 and 8.51 at 1024 for the same index
+    finger) while its 3D ratios moved by 0.1 or less.
+    """
+    if world is None or len(world) < 21:
+        return None
+    palm = _dist3(world[0], world[9])
+    if palm < 1e-9:
+        return None
+    out = {}
     for name, chain in _DIGITS.items():
-        length = sum(_dist(pts[a], pts[b]) for a, b in zip(chain, chain[1:]))
-        ratio = length / palm_len
-        lo, hi = _DIGIT_BOUNDS[name]
-        if ratio < lo or ratio > hi:
-            out["flags"].append("digit_%s_%.2f" % (name, ratio))
-
-    # A distal phalanx longer than the proximal one is not a human hand.
-    broken = 0
-    for name in ("index", "middle", "ring", "pinky"):
-        a, b, c, d = _DIGITS[name]
-        s1, s2, s3 = _dist(pts[a], pts[b]), _dist(pts[b], pts[c]), _dist(pts[c], pts[d])
-        if s1 > 1e-6 and (s3 > 1.5 * s1 or s2 > 1.4 * s1):
-            broken += 1
-    if broken >= 2:
-        out["flags"].append("phalanx_order")
-
-    # Extended-finger count.  A closed fist legitimately counts zero, so the
-    # count is only evidence when the hand is open in the first place.
-    reach = []
-    for name in ("index", "middle", "ring", "pinky"):
-        mcp, pip, _dip, tip = _DIGITS[name]
-        reach.append(_dist(pts[tip], wrist) / palm_len)
-        if _dist(pts[tip], wrist) > 1.12 * _dist(pts[pip], wrist):
-            out["extended"] += 1
-    if _dist(pts[4], pts[17]) > 1.10 * _dist(pts[2], pts[17]):
-        out["extended"] += 1
-    out["openness"] = sum(reach) / max(len(reach), 1)
-    if out["openness"] > 1.45 and out["extended"] != 5:
-        out["flags"].append("finger_count_%d" % out["extended"])
-
-    # Crossing finger axes only mean something on an open hand: curled fingers
-    # legitimately fold over each other.
-    if out["openness"] > 1.30:
-        axes = [(pts[_DIGITS[n][0]], pts[_DIGITS[n][3]])
-                for n in ("index", "middle", "ring", "pinky")]
-        for i in range(len(axes)):
-            for j in range(i + 1, len(axes)):
-                if _segments_cross(axes[i][0], axes[i][1], axes[j][0], axes[j][1]):
-                    out["flags"].append("axes_cross")
-                    break
-            if "axes_cross" in out["flags"]:
-                break
-
-    area = _poly_area([pts[i] for i in (0, 5, 9, 13, 17)])
-    fill = area / max(palm_len * palm_w, 1e-6)
-    aspect = palm_len / max(palm_w, 1e-6)
-    if fill < 0.20 or fill > 1.05:
-        out["flags"].append("palm_area_%.2f" % fill)
-    if aspect < 0.45 or aspect > 2.20:
-        out["flags"].append("palm_aspect_%.2f" % aspect)
+        out[name] = sum(_dist3(world[a], world[b])
+                        for a, b in zip(chain, chain[1:])) / palm
+    out["aspect"] = palm / max(_dist3(world[5], world[17]), 1e-9)
     return out
+
+
+def _dist3(a, b) -> float:
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+
+def _hand_views(crop):
+    """One hand seen six ways, with the map that puts each back in the crop."""
+    h, w = crop.shape[:2]
+    out = [(crop, lambda p: p)]
+    out.append((cv2.flip(crop, 1),
+                lambda p: np.stack([w - 1 - p[:, 0], p[:, 1]], 1)))
+    for ang in (-12.0, 12.0):
+        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
+        turned = cv2.warpAffine(crop, M, (w, h), flags=cv2.INTER_CUBIC,
+                                borderMode=cv2.BORDER_REPLICATE)
+        Mi = cv2.invertAffineTransform(M)
+        out.append((turned,
+                    lambda p, Mi=Mi: np.c_[p, np.ones(len(p))] @ Mi.T))
+    for zoom in (0.75, 1.3):
+        sized = cv2.resize(crop, None, fx=zoom, fy=zoom,
+                           interpolation=cv2.INTER_AREA if zoom < 1
+                           else cv2.INTER_CUBIC)
+        out.append((sized, lambda p, zoom=zoom: p / zoom))
+    return out
+
+
+def _fine_energy(gray, mask) -> float | None:
+    """Amplitude of the pore-and-grain band inside a mask."""
+    if mask is None or int(np.count_nonzero(mask)) < 64:
+        return None
+    band = np.abs(gray - cv2.GaussianBlur(gray, (0, 0), 1.4))
+    sel = band[mask > 0]
+    return float(np.median(sel)) if sel.size >= 64 else None
+
+
+def _canonical_hand(img_bgr, pts, box, detector, forearm) -> dict:
+    """Measure one hand at a fixed size, from six views, against its own arm.
+
+    Returns what the picture supports rather than what one detection claimed:
+    the 3D digit ratios agreed on across the views, how far the landmarks moved
+    between them, and the grain of the hand skin over the grain of the forearm
+    in the same crop.
+    """
+    out = {"n_views": 0, "g3": None, "spread": None, "melt": None, "zoom": 0.0}
+    h, w = img_bgr.shape[:2]
+    span = max(box[2], box[3])
+    pad = 0.5 * span
+    x0 = int(_clamp(box[0] - pad, 0, w - 2))
+    y0 = int(_clamp(box[1] - pad, 0, h - 2))
+    x1 = int(_clamp(box[0] + box[2] + pad, x0 + 2, w))
+    y1 = int(_clamp(box[1] + box[3] + pad, y0 + 2, h))
+    crop = img_bgr[y0:y1, x0:x1]
+    if crop.size == 0 or min(crop.shape[:2]) < 16:
+        return out
+    zoom = float(_clamp(HAND_CANON_PX / max(span, 1e-6), 0.25, 8.0))
+    big = np.ascontiguousarray(cv2.resize(
+        crop, None, fx=zoom, fy=zoom,
+        interpolation=cv2.INTER_CUBIC if zoom > 1 else cv2.INTER_AREA))
+    out["zoom"] = round(zoom, 2)
+
+    seen, ratios = [], []
+    for view, inverse in _hand_views(big):
+        found = _read_hands(detector, view, 0.0, 0.0)
+        if not found:
+            continue
+        best = max(found, key=lambda f: f["score"])
+        seen.append(inverse(np.asarray(best["pts"], np.float64)))
+        got = _world_ratios(best.get("world"))
+        if got:
+            ratios.append(got)
+    out["n_views"] = len(seen)
+    if len(seen) >= 2:
+        stack = np.stack(seen)
+        median = np.median(stack, axis=0)
+        reach = max(float(np.ptp(median[:, 0])), float(np.ptp(median[:, 1])), 1e-6)
+        out["spread"] = round(float(np.median(
+            np.linalg.norm(stack - median[None], axis=2) / reach)), 4)
+    if ratios:
+        out["g3"] = {k: float(np.median([r[k] for r in ratios]))
+                     for k in ratios[0]}
+
+    # Grain of the hand against grain of the arm it is attached to.
+    local = (np.asarray(pts, np.float64) - np.array([x0, y0])) * zoom
+    gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    skin = skin_mask_ycrcb(big)
+    hull = np.zeros(big.shape[:2], np.uint8)
+    cv2.fillConvexPoly(hull, cv2.convexHull(local.astype(np.int32)), 255)
+    hand_e = _fine_energy(gray, cv2.bitwise_and(hull, skin))
+    arm_e = None
+    if forearm is not None:
+        fx = (forearm[0] - x0) * zoom
+        fy = (forearm[1] - y0) * zoom
+        disc = np.zeros(big.shape[:2], np.uint8)
+        cv2.circle(disc, (int(fx), int(fy)), int(0.25 * HAND_CANON_PX), 255, -1)
+        on_arm = cv2.bitwise_and(disc, skin)
+        area = float(cv2.countNonZero(disc))
+        # The denominator has to BE an arm.  When the pose puts this disc on a
+        # bodice or on the wall, the grain measured there is not her arm's and
+        # the ratio is not about her hand - see ARM_PATCH_SKIN_MIN.
+        covered = (float(cv2.countNonZero(on_arm)) / area) if area > 0 else 0.0
+        out["arm_skin"] = round(covered, 3)
+        if covered >= ARM_PATCH_SKIN_MIN:
+            arm_e = _fine_energy(gray, on_arm)
+    if hand_e is not None and arm_e is not None and arm_e > 1e-6:
+        out["melt"] = round(hand_e / arm_e, 3)
+    return out
+
+
+def _hand_side(hand: dict) -> str:
+    label = str(hand.get("label") or "")
+    return "left_hand" if label.startswith("left") else (
+        "right_hand" if label.startswith("right") else "hand")
+
+
+def _nearest_arm(hand, wrists: dict):
+    """The forearm patch belonging to this hand, or None if the pose lost it."""
+    best, gap = None, 1e18
+    for info in wrists.values():
+        d = _dist(hand["pts"][0], info["pt"])
+        if d < gap:
+            gap, best = d, info
+    return best["arm"] if best else None
+
+
+def _judge_hands(img_bgr, hands, wrists, torso, h, w, detector,
+                 unjudged) -> list[dict]:
+    """One verdict per hand, from rulers that cannot move with the load size."""
+    defects: list[dict] = []
+    # A hand running off the edge of the frame is the commonest thing in a
+    # phone selfie - the hand holding the phone - and it is unjudgeable, not
+    # deformed: the fingers that would make the geometry add up are simply not
+    # in the picture.  Treating those as defects produced six false "mano
+    # deformada" verdicts at severity up to 0.95 on her own photographs.
+    edge_x, edge_y = 0.02 * w, 0.02 * h
+    diag = math.hypot(w, h)
+    for hand in hands:
+        pts = hand["pts"]
+        box = _box_from_points(pts, 0.12 * max(_dist(pts[0], pts[9]), 8.0), w, h)
+        if not box or min(box[2], box[3]) < 12:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        truncated = (min(xs) <= edge_x or max(xs) >= w - edge_x
+                     or min(ys) <= edge_y or max(ys) >= h - edge_y)
+        got = _canonical_hand(img_bgr, pts, box, detector,
+                              _nearest_arm(hand, wrists))
+        where = _hand_side(hand)
+
+        # The grain ruler runs first and runs on every hand, whatever the model
+        # made of it.  It has to: a hand melted badly enough stops being
+        # re-findable at all, so anything ordered behind a "could we measure
+        # this" test would let exactly the worst hands through - which is what
+        # the first cut of this file did, reporting the melted hands of
+        # run_ecbc8543 as merely unjudged.  It needs no landmarks, only the box
+        # they gave and a patch of the arm.
+        melt = got["melt"]
+        if melt is None:
+            _note_unjudged(unjudged, hand, box,
+                           "sin piel del brazo con la que comparar la textura")
+        elif melt < HAND_MELT_REPORT:
+            reach = max(HAND_MELT_REPORT - HAND_MELT_SEVERE, 1e-6)
+            sev = (HAND_MELT_REPORT - melt) / reach
+            defects.append(_defect(
+                "hand_malformed", where, box, _clamp(sev, 0.15, 0.95), True,
+                "la mano conserva el %d%% de la textura fina del brazo: dedos "
+                "fundidos o borrados" % int(round(100.0 * melt))))
+
+        # Everything from here down counts fingers, and counting fingers needs
+        # the whole hand, resolved.  Being cut by the edge of the frame stops
+        # only that: the hand holding the phone in a selfie is not deformed, it
+        # is half absent, and treating it as deformed produced six false "mano
+        # deformada" verdicts on her own photographs.  The grain ruler above
+        # does not care, and must not be put behind this test - the worst hand
+        # in the whole corpus, the one delivered in nayane_final.jpg with 10% of
+        # the grain of its own arm, is a hand that touches the bottom edge.
+        if truncated:
+            _note_unjudged(unjudged, hand, box, "sale del encuadre")
+            continue
+
+        # Finger geometry also needs fingers that are actually resolved.  How
+        # much of the frame the hand occupies survives any resize; how many
+        # pixels it happens to have does not, which is the whole difference
+        # between this check and the pixel floor it replaces.
+        frac = max(box[2], box[3]) / max(diag, 1e-6)
+        if frac < HAND_JUDGE_FRAC:
+            _note_unjudged(unjudged, hand, box,
+                           "demasiado pequena en el encuadre para medirle los "
+                           "dedos (%.1f%% de la imagen, hace falta %.1f%%)"
+                           % (100.0 * frac, 100.0 * HAND_JUDGE_FRAC))
+            continue
+        if got["n_views"] < 2:
+            # The pixels stop supporting the skeleton as soon as the crop is
+            # mirrored or turned a little.  That happens on a melted hand - the
+            # grain ruler above has already had its say - and it also happens on
+            # her own closed fists (IMG_8918 at all three sizes), so here it
+            # names the hand instead of condemning it.
+            _note_unjudged(unjudged, hand, box,
+                           "no se pudo volver a medir en primer plano")
+            continue
+
+        g3 = got["g3"]
+        if not g3:
+            _note_unjudged(unjudged, hand, box, "sin geometria 3D medible")
+        elif g3.get("aspect", 0.0) > HAND_ASPECT_UNRELIABLE:
+            _note_unjudged(unjudged, hand, box,
+                           "la palma no se pudo reconstruir en 3D")
+        else:
+            worst, name, value = 0.0, "", 0.0
+            for digit, (lo, hi) in HAND_DIGIT_BOUNDS_3D.items():
+                got_v = g3.get(digit)
+                if got_v is None or got_v <= 1e-6:
+                    continue
+                excess = max(got_v / hi - 1.0, lo / got_v - 1.0)
+                if excess > worst:
+                    worst, name, value = excess, digit, got_v
+            if worst > 0.0:
+                defects.append(_defect(
+                    "hand_malformed", where, box,
+                    _clamp(0.30 + 1.6 * worst, 0.30, 0.90), True,
+                    "el dedo %s mide %.2f veces la palma, fuera de lo que "
+                    "puede medir una mano" % (name, value)))
+    return defects
+
+
+def _note_unjudged(sink: list | None, hand: dict, box, why: str) -> None:
+    """Record a hand the geometry could not honestly judge."""
+    if sink is None:
+        return
+    label = str(hand.get("label") or "")
+    where = "left_hand" if label.startswith("left") else (
+        "right_hand" if label.startswith("right") else "hand")
+    sink.append({"where": where, "reason": why,
+                 "bbox": [int(round(t)) for t in box] if box else []})
 
 
 def _read_hands(detector, img_bgr, ox: float, oy: float) -> list[dict]:
@@ -266,11 +574,15 @@ def _read_hands(detector, img_bgr, ox: float, oy: float) -> list[dict]:
     res = detector.process(rgb)
     out = []
     lms = getattr(res, "multi_hand_landmarks", None) or []
+    worlds = getattr(res, "multi_hand_world_landmarks", None) or []
     handed = getattr(res, "multi_handedness", None) or []
     for i, hand in enumerate(lms):
         pts = [(ox + p.x * w, oy + p.y * h) for p in hand.landmark]
         if len(pts) < 21:
             continue
+        world = None
+        if i < len(worlds):
+            world = [(p.x, p.y, p.z) for p in worlds[i].landmark]
         label, score = "", 0.0
         if i < len(handed):
             try:
@@ -280,11 +592,45 @@ def _read_hands(detector, img_bgr, ox: float, oy: float) -> list[dict]:
                 pass
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
-        out.append({"pts": pts, "label": label, "score": score, "centre": (cx, cy)})
+        out.append({"pts": pts, "label": label, "score": score,
+                    "centre": (cx, cy), "world": world})
     return out
 
 
-def _hand_defects(img_bgr, lm: dict, frame, h: int, w: int) -> list[dict]:
+def _hand_defects(img_bgr, lm: dict, frame, h: int, w: int,
+                  unjudged: list | None = None) -> list[dict]:
+    """Hands that are wrong, plus - in ``unjudged`` - hands nobody could judge.
+
+    What this can and cannot do, measured rather than assumed.  The truth set
+    was her own 24 photographs (56 hand readings at max_side 768, 1024 and
+    1600, plus 10 re-encoded controls), against 37 hands broken on purpose on
+    copies of those same photographs - a finger erased, a sixth finger grafted
+    on, a finger stretched to 1.9x, a finger bent 70 degrees at the joint, the
+    fingers melted into a mitten - every one of them looked at at high zoom
+    before it was called broken, and the ones whose damage landed on a finger
+    that was hidden anyway were thrown out rather than labelled.
+
+    THE MELTED HAND IS CAUGHT.  Hand grain over arm grain never drops below
+    0.880 on a real hand and reaches 0.208 on a melted one; that is the ruler
+    that rejects, and it needs 0.52 to do it.
+
+    A SIXTH FINGER, A MISSING FINGER AND A BENT FINGER ARE NOT CAUGHT, and no
+    threshold here can be moved to catch them.  MediaPipe fits a plausible
+    skeleton over the damage and reports it with confidence 0.99: a hand with
+    a finger grafted onto it reads 3D digit ratios of 0.87/0.91/0.84 against
+    her own 0.82/0.91/0.82.  It is not a resolution problem - the same test at
+    native 3088 px, where the hands are 96-320 px wide, gives the same answer.
+    Landmark spread across six views of the same crop does not separate them
+    either (her hands 0.004-0.054, broken hands 0.003-0.033, complete overlap),
+    nor does a silhouette fingertip count, which cannot even find the hand
+    outline: the arm, the thigh and a beige wall are all the same colour.
+
+    So those hands are reported and not rejected, which is exactly the client's
+    instruction: do not be oversensitive, do not throw away paid images.  What
+    must never happen again is the silence - the second paid image of the day
+    was delivered under "Sin anomalias anatomicas detectadas" with both hands
+    melted - so a hand nobody could measure leaves its name in ``unjudged``.
+    """
     if mp is None:
         return []
     torso = frame["torso"] if frame else 0.12 * max(h, w)
@@ -294,7 +640,14 @@ def _hand_defects(img_bgr, lm: dict, frame, h: int, w: int) -> list[dict]:
         if p is not None and p[3] >= 0.5:
             el = lm.get(side + "_elbow")
             forearm = _dist((p[0], p[1]), (el[0], el[1])) if el and el[3] >= 0.4 else 0.0
-            wrists[side] = {"pt": (p[0], p[1]),
+            towards = None
+            if el is not None and el[3] >= 0.4 and forearm > 8.0:
+                # a patch of the arm, close enough to the hand to share its
+                # light and its focus, which is what the grain is compared to
+                towards = (0.65 * p[0] + 0.35 * el[0], 0.65 * p[1] + 0.35 * el[1])
+            wrists[side] = {"pt": (p[0], p[1]), "arm": towards,
+                            "elbow": (el[0], el[1]) if el is not None and el[3] >= 0.4
+                            else None,
                             "forearm": forearm if forearm > 8.0 else 0.35 * torso}
 
     defects: list[dict] = []
@@ -322,60 +675,23 @@ def _hand_defects(img_bgr, lm: dict, frame, h: int, w: int) -> list[dict]:
                     if all(_dist(found["centre"], hd["centre"]) > 0.25 * torso
                            for hd in hands):
                         hands.append(found)
+
+            defects.extend(_judge_hands(img_bgr, hands, wrists, torso, h, w,
+                                        detector, unjudged))
     except Exception:                                 # noqa: BLE001
         return []
 
-    # A hand running off the edge of the frame is the commonest thing in a phone
-    # selfie - the hand holding the phone - and it is unjudgeable, not deformed:
-    # the fingers that would make the geometry add up are simply not in the
-    # picture.  Measured on this client's own 24 untouched photographs, treating
-    # those as defects produced six false "mano deformada" verdicts at severity
-    # up to 0.95, which would have thrown away good images and paid to remake
-    # them.  Truncated hands are skipped, and the caller is told why.
-    edge_x, edge_y = 0.02 * w, 0.02 * h
-    for hand in hands:
-        pts = hand["pts"]
-        box = _box_from_points(pts, 0.12 * max(_dist(pts[0], pts[9]), 8.0), w, h)
-        if not box or min(box[2], box[3]) < 12:
-            continue
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        truncated = (min(xs) <= edge_x or max(xs) >= w - edge_x
-                     or min(ys) <= edge_y or max(ys) >= h - edge_y)
-        if truncated:
-            continue
-        geo = _hand_geometry(pts)
-        flags = geo["flags"]
-        if not flags:
-            continue
-        strong = any(f.startswith(("digit_", "phalanx", "axes_cross")) for f in flags)
-        if not strong and len(flags) < 2:
-            continue
-
-        # Confidence in hand geometry scales with how many pixels the hand
-        # occupies.  A digit-length ratio is a quotient of two short distances,
-        # so on a hand 70 px across a two-pixel landmark error is a 30% error in
-        # the ratio, and every distant hand looks deformed.  On this client's
-        # untouched photographs that produced six confident "deformed hand"
-        # verdicts at severity up to 0.95, all of them wrong.  Small hands are
-        # still reported - they stay below the severity that rejects an image,
-        # so the information survives without costing a regeneration.
-        hand_px = float(min(box[2], box[3]))
-        floor_px = max(HAND_MIN_PX, HAND_MIN_TORSO_FRAC * torso) if torso > 1 else HAND_MIN_PX
-        size_conf = _clamp(hand_px / max(floor_px, 1.0), 0.0, 1.0)
-
-        where = "left_hand" if hand["label"].startswith("left") else (
-            "right_hand" if hand["label"].startswith("right") else "hand")
-        severity = _clamp(0.45 + 0.13 * len(flags), 0.45, 0.92)
-        if hand["score"] >= 0.9 and strong:
-            severity = min(0.95, severity + 0.05)
-        severity = _clamp(severity * size_conf, 0.15, 0.95)
-        defects.append(_defect(
-            "hand_malformed", where, box, severity, True,
-            "geometria de mano fuera de rango: " + ", ".join(flags[:4])))
-
-    # More hands than wrists means a limb was invented.
-    if wrists and len(hands) > len(wrists):
+    # More hands than a person has means a limb was invented.  The comparison
+    # used to be against the number of WRISTS the pose reported, and that is a
+    # visibility count, not an anatomy count: her own IMG_8841, cropped at the
+    # sides to 72% of its width, gave the pose one confident wrist while
+    # MediaPipe found both of her hands, and the image was rejected for
+    # "extremidad de mas" at severity 0.75 with both hands present and correct.
+    # Two hands can never be one too many, so the floor is two.  Over 456
+    # verifications of her own photographs this rule fired exactly once, on
+    # that crop, and it fires zero times on the 144 readings of the broken-hand
+    # truth set - so raising the floor loses nothing that ever worked.
+    if wrists and len(hands) > max(len(wrists), 2):
         extra = max(hands, key=lambda hd: min(_dist(hd["pts"][0], i["pt"])
                                               for i in wrists.values()))
         box = _box_from_points(extra["pts"], 0.15 * torso, w, h)
@@ -383,8 +699,16 @@ def _hand_defects(img_bgr, lm: dict, frame, h: int, w: int) -> list[dict]:
             "extra_limb", "hands", box, 0.75, True,
             "se detectaron %d manos para %d munecas" % (len(hands), len(wrists))))
 
-    # A wrist well inside the frame with nothing on the end of it.
+    # A wrist well inside the frame with nothing on the end of it - and
+    # "nothing" has to be checked, not assumed.  All seven of the wrists this
+    # used to report on her own photographs have skin right where the hand
+    # should be (0.75 to 1.00 of the disc beyond the wrist): the hand is in the
+    # picture, behind her back or in a fist the model would not name.  Calling
+    # that a missing limb is a false statement in a report the client reads, so
+    # the skin is looked at first, and when it is there the hand is listed as
+    # one nobody could check.
     margin_x, margin_y = 0.06 * w, 0.06 * h
+    skin = None
     for side, info in wrists.items():
         pt = info["pt"]
         if not (margin_x < pt[0] < w - margin_x and margin_y < pt[1] < h - margin_y):
@@ -398,9 +722,33 @@ def _hand_defects(img_bgr, lm: dict, frame, h: int, w: int) -> list[dict]:
         bx = _clamp(pt[0] - radius, 0, w - 2)
         by = _clamp(pt[1] - radius, 0, h - 2)
         box = [bx, by, min(2 * radius, w - bx), min(2 * radius, h - by)]
+
+        centre = pt
+        elbow = info.get("elbow")
+        if elbow is not None:
+            dx, dy = pt[0] - elbow[0], pt[1] - elbow[1]
+            reach = math.hypot(dx, dy)
+            if reach > 1e-6:
+                centre = (pt[0] + 0.55 * info["forearm"] * dx / reach,
+                          pt[1] + 0.55 * info["forearm"] * dy / reach)
+        if skin is None:
+            skin = skin_mask_ycrcb(img_bgr)
+        disc = np.zeros((h, w), np.uint8)
+        cv2.circle(disc, (int(centre[0]), int(centre[1])),
+                   int(max(6.0, 0.45 * info["forearm"])), 255, -1)
+        area = float(cv2.countNonZero(disc))
+        covered = (float(cv2.countNonZero(cv2.bitwise_and(disc, skin))) / area
+                   if area > 0 else 0.0)
+        if covered >= LIMB_SKIN_PRESENT:
+            if unjudged is not None:
+                unjudged.append({"where": side + "_hand",
+                                 "reason": "hay mano pero no se pudo reconocer",
+                                 "bbox": [int(round(t)) for t in box]})
+            continue
         defects.append(_defect(
             "missing_limb", side + "_hand", box, 0.35, True,
-            "muneca " + side + " visible sin mano reconocible"))
+            "muneca " + side + " visible y sin mano: solo el %d%% del sitio "
+            "donde deberia estar tiene piel" % int(round(100.0 * covered))))
     return defects
 
 
@@ -555,45 +903,53 @@ def _face_defects(img_bgr, face: dict, h: int, w: int) -> list[dict]:
         return []
     midline = sum(p[0] for p in mid_pts) / len(mid_pts)
 
-    # Yaw makes a healthy face asymmetric in projection; measure it from the
-    # mesh itself and stay quiet when the head is genuinely turned.
+    # Yaw makes a healthy face asymmetric in projection.  How much turn there
+    # is comes from the mesh itself, and the asymmetry a turn is allowed to
+    # explain grows with it - see FACE_ASYM_TURN for why this is a slope and no
+    # longer a step at balance 0.78.
     half_a = abs(midline - rot(pts[33])[0])
     half_b = abs(rot(pts[263])[0] - midline)
     balance = min(half_a, half_b) / max(half_a, half_b, 1e-6)
-    yaw = abs(float(face.get("yaw") or 0.0))
-    turned = balance < 0.78 or yaw > 18.0
+    turn = _clamp(1.0 - balance, 0.0, 1.0)
 
     defects: list[dict] = []
     box = _box_from_points(list(pts.values()), 0.10 * iod, w, h)
+    if balance < FACE_BALANCE_MIN:
+        return defects
 
-    if not turned:
-        offs, vmis = [], []
-        for a, b in _MESH_PAIRS:
-            if a not in pts or b not in pts:
-                continue
-            ra, rb = rot(pts[a]), rot(pts[b])
-            offs.append(abs((ra[0] + rb[0]) / 2.0 - midline) / iod)
-            vmis.append(abs(ra[1] - rb[1]) / iod)
-        if len(offs) >= 5:
-            asym = sum(offs) / len(offs)
-            drift = sum(vmis) / len(vmis)
-            if asym > 0.10 or drift > 0.055:
-                sev = _clamp(max((asym - 0.10) / 0.12, (drift - 0.055) / 0.06),
-                             0.25, 0.9)
-                defects.append(_defect(
-                    "face_distorted", "face", box, sev, True,
-                    "rasgos asimetricos respecto a la linea media "
-                    "(desvio %.3f, deriva %.3f)" % (asym, drift)))
+    offs, vmis = [], []
+    for a, b in _MESH_PAIRS:
+        if a not in pts or b not in pts:
+            continue
+        ra, rb = rot(pts[a]), rot(pts[b])
+        offs.append(abs((ra[0] + rb[0]) / 2.0 - midline) / iod)
+        vmis.append(abs(ra[1] - rb[1]) / iod)
+    if len(offs) >= 5:
+        asym = sum(offs) / len(offs)
+        drift = sum(vmis) / len(vmis)
+        asym_max = FACE_ASYM_BASE + FACE_ASYM_TURN * turn
+        drift_max = FACE_DRIFT_BASE + FACE_DRIFT_TURN * turn
+        if asym > asym_max or drift > drift_max:
+            sev = _clamp(max((asym - asym_max) / 0.12, (drift - drift_max) / 0.06),
+                         0.25, 0.9)
+            defects.append(_defect(
+                "face_distorted", "face", box, sev, True,
+                "rasgos asimetricos respecto a la linea media (desvio %.3f "
+                "sobre %.3f, deriva %.3f sobre %.3f)"
+                % (asym, asym_max, drift, drift_max)))
 
+    # One eye is smaller than the other the moment the head turns, so this only
+    # speaks about a face that is looking at the camera.
+    if balance >= FACE_EYE_FRONTAL:
         area_a = _poly_area([rot(p) for p in eye_a])
         area_b = _poly_area([rot(p) for p in eye_b])
         if min(area_a, area_b) > 4.0:
             ratio = min(area_a, area_b) / max(area_a, area_b)
-            if ratio < 0.62:
+            if ratio < FACE_EYE_RATIO:
                 eye_box = _box_from_points(eye_a + eye_b, 0.25 * iod, w, h)
                 defects.append(_defect(
                     "eye_asymmetry", "eyes", eye_box,
-                    _clamp((0.62 - ratio) / 0.5, 0.2, 0.85), True,
+                    _clamp((FACE_EYE_RATIO - ratio) / 0.5, 0.2, 0.85), True,
                     "un ojo mide %.0f%% del otro" % (100.0 * ratio)))
     return defects
 
@@ -903,22 +1259,29 @@ def _duplicate_defects(img_bgr, person, h: int, w: int) -> list[dict]:
     best = int(np.argmax(corr[ii, jj]))
     i, j = int(ii[best]), int(jj[best])
     score = float(corr[i, j])
+    # This one is information, not a verdict.  It fires on 4 of her 24 untouched
+    # photographs at correlation 0.97-0.98 - a tiled floor, a repeated lace
+    # pattern - and not once in this corpus on anything a person would call a
+    # duplicated feature, so it is pinned below the severity that can reject an
+    # image however sure the correlation looks.
     inv = 1.0 / scale
     x0 = min(coords[i][0], coords[j][0]) * inv
     y0 = min(coords[i][1], coords[j][1]) * inv
     x1 = (max(coords[i][0], coords[j][0]) + size) * inv
     y1 = (max(coords[i][1], coords[j][1]) + size) * inv
     box = [coords[j][0] * inv, coords[j][1] * inv, size * inv, size * inv]
-    detail = ("dos zonas casi identicas (correlacion %.2f) separadas %d px"
-              % (score, int(math.hypot(x1 - x0, y1 - y0))))
-    return [_defect("duplicated_feature", "body", box, 0.5, True, detail)]
+    detail = ("dos zonas casi identicas (correlacion %.2f) separadas %d px; "
+              "suele ser una textura repetida" % (score,
+                                                  int(math.hypot(x1 - x0, y1 - y0))))
+    return [_defect("duplicated_feature", "body", box, 0.30, True, detail)]
 
 
 # ------------------------------------------------------------------- public
 
 def scan_anomalies(img_bgr, pose: dict, face: dict, masks: dict) -> dict:
     """Full anatomical and texture audit of one generated image."""
-    out = {"ok": False, "defects": [], "score": 0.0, "reason": "", "checks": []}
+    out = {"ok": False, "defects": [], "score": 0.0, "reason": "", "checks": [],
+           "unjudged": []}
     if not isinstance(img_bgr, np.ndarray) or img_bgr.ndim != 3 or img_bgr.size == 0:
         out["reason"] = "imagen invalida"
         return out
@@ -960,8 +1323,9 @@ def scan_anomalies(img_bgr, pose: dict, face: dict, masks: dict) -> dict:
                     masks_s["face"] = oval
 
     defects: list[dict] = []
+    unjudged: list[dict] = []
     jobs = [
-        ("hands", lambda: _hand_defects(img_bgr, lm, frame, h, w)),
+        ("hands", lambda: _hand_defects(img_bgr, lm, frame, h, w, unjudged)),
         ("extra_person", lambda: _extra_person(img_bgr, face, h, w)),
         ("face", lambda: _face_defects(img_bgr, face, h, w)),
         ("duplicate", lambda: _duplicate_defects(img_bgr, person, h, w)),
@@ -979,6 +1343,22 @@ def scan_anomalies(img_bgr, pose: dict, face: dict, masks: dict) -> dict:
         out["checks"].append(name)
         defects.extend(d for d in found if isinstance(d, dict))
 
+    # What was found, and - just as important for a client who is paying for
+    # these - what nobody could look at.  See _hand_defects.  One hand is one
+    # entry: a named side reaches this list from two places, the hand pass and
+    # the wrist pass, and telling her "no se han podido comprobar 3 manos"
+    # about a photograph of one person is the kind of sentence that makes her
+    # stop believing the rest of the report.
+    seen_sides: set[str] = set()
+    kept = []
+    for note in unjudged:
+        side = str(note.get("where") or "")
+        if side and side != "hand":
+            if side in seen_sides:
+                continue
+            seen_sides.add(side)
+        kept.append(note)
+    out["unjudged"] = kept
     defects.sort(key=lambda d: -float(d.get("severity", 0.0)))
     penalty = sum(SEVERITY_WEIGHT.get(d["type"], 0.5) * float(d["severity"])
                   for d in defects)

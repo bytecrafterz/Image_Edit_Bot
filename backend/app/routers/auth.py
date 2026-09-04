@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .. import db, security
 from ..config import SETTINGS
+from ..identity import onboarding as onboarding_mod
 from ..services import billing
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -77,16 +78,25 @@ def register(body: RegisterBody, request: Request, response: Response) -> dict:
     db.audit("auth.register", user_id, email=email, first=is_first)
 
     user = db.row_to_dict(db.q1("SELECT * FROM users WHERE id=?", (user_id,)))
+    # What the account owes before it can generate travels with the very first
+    # answer the person ever gets, so the screen after "Crear cuenta" asks for
+    # the photographs instead of dropping her into an app that will refuse her
+    # later without saying why.
+    onboarding = onboarding_mod.readiness(user_id)
     if not is_first:
         return {"user": security.public_user(user), "needs_approval": True,
+                "onboarding": onboarding,
                 "message": ("Tu cuenta se ha creado. Un administrador tiene que "
-                            "aprobarla antes de que puedas entrar.")}
+                            "aprobarla antes de que puedas entrar. Cuando entres, "
+                            "lo primero sera subir al menos %d fotos tuyas reales."
+                            % onboarding_mod.MIN_PHOTOS)}
 
     token, expires = security.create_session(
         user_id, request.headers.get("user-agent", ""))
     _set_cookie(response, token)
     return {"user": security.public_user(user), "token": token,
-            "expires_at": expires, "needs_approval": False}
+            "expires_at": expires, "needs_approval": False,
+            "onboarding": onboarding}
 
 
 @router.post("/login")
@@ -142,6 +152,8 @@ def me(user: dict = Depends(security.current_user)) -> dict:
         "balances": billing.all_balances(user["id"]),
         "alerts_unread": int(unread["n"] or 0) if unread else 0,
         "default_profile": profile,
+        "onboarding": onboarding_mod.readiness(
+            user["id"], (profile or {}).get("id") or ""),
     }
 
 

@@ -204,7 +204,26 @@ def plan_run(brief: dict, options: dict, n_previews: int, profile: dict,
                   if body_allowed or not prompt_mod.body_change_reason(opt)]
         if len(usable) >= 2:
             free_candidates.append((group, usable))
-    free_candidates.sort(key=lambda item: (-_priority(item[0], shot), item[0]))
+    # WHICH GROUP THE ROBOT VARIES DECIDES WHETHER HER FACE IS GENERATED.
+    # Nobody asked for a pose change; the robot used to add one by itself
+    # because pose scores 4.4 against scene's 1.0 in the table above - and a
+    # pose change moves the person inside the frame (measured on her own
+    # photographs: the head travels a median 1.23 head lengths), which is
+    # exactly the thing generation/protect.py cannot mask.  So a preview that
+    # nobody asked to vary in the pose stopped being able to keep her face.
+    # Groups whose change lives outside the face now come first, and only if
+    # they cannot fill the tanda does the robot reach for one that costs her
+    # face.  Variety is not lost: scene alone carries 18 values.
+    from . import protect as protect_mod
+
+    def _keeps_face(group: str) -> bool:
+        try:
+            return bool(protect_mod.plan_mask({group: "x"}).get("safe"))
+        except Exception:                                 # noqa: BLE001
+            return False
+
+    free_candidates.sort(key=lambda item: (not _keeps_face(item[0]),
+                                           -_priority(item[0], shot), item[0]))
 
     combos, left_out, short = _combos(crossed, count)
     base = len(combos) or 1
@@ -221,8 +240,10 @@ def plan_run(brief: dict, options: dict, n_previews: int, profile: dict,
 
     for group, values in free_used:
         notes.append("Nadie eligio '%s': el robot lo varia (%d valores) para que "
-                     "las vistas no se parezcan entre si."
-                     % (prompt_mod.group_label_es(group), len(values)))
+                     "las vistas no se parezcan entre si.%s"
+                     % (prompt_mod.group_label_es(group), len(values),
+                        "" if _keeps_face(group) else
+                        " Al variarlo hay que volver a dibujar tu rostro."))
     if base < count and not free_used:
         notes.append("No hay grupos libres en el catalogo para variar: algunas "
                      "vistas repetiran combinacion y solo cambiara la semilla.")

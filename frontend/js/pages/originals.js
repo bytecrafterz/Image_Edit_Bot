@@ -7,6 +7,9 @@ full-body reference photos, in the words the server returns. */
 import { api } from '../api.js';
 import { store } from '../store.js';
 import {
+  progressCard, explainCard, reportCard, runFirstRun, spinnerCard,
+} from '../onboarding.js';
+import {
   el, clear, note, toast, spinner, empty, lazyImg, confirmSheet, sheet,
   kv, pct, dateLabel,
 } from '../ui.js';
@@ -14,6 +17,7 @@ import {
 let originals = [];
 let byShot = {};
 let profile = null;
+let onboarding = null;
 let buildTimer = null;
 
 const SHOT_ES = { closeup: 'Primer plano', half: 'Medio cuerpo',
@@ -30,6 +34,7 @@ async function load() {
   ]);
   originals = list.originals || [];
   byShot = list.by_shot_type || {};
+  onboarding = list.onboarding || null;
   profile = (profiles.profiles || [])[0] || null;
 }
 
@@ -39,13 +44,32 @@ async function render(view) {
   view.appendChild(el('p', { class: 'view__sub',
     text: 'Las fotos con las que el robot aprende como eres.' }));
 
+  // The count comes first: on this page it is the only thing that decides
+  // whether she can generate at all, and she should not have to find it.
+  if (onboarding) {
+    view.appendChild(progressCard(onboarding, {
+      action: profile && onboarding.puede_generar
+        ? el('button', { class: 'btn', type: 'button',
+            onClick: () => analyse(view) },
+            (profile.first_run || {}).hecho
+              ? 'Repetir el analisis de mis fotos'
+              : 'Analizar mis fotos')
+        : null,
+    }));
+    view.appendChild(explainCard(onboarding, { open: !onboarding.puede_generar }));
+  }
+
   view.appendChild(profileCard(view));
   view.appendChild(uploadCard(view));
+
+  const report = reportCard((profile || {}).first_run);
+  if (report) view.appendChild(report);
 
   if (!originals.length) {
     view.appendChild(empty({
       icon: '◎', title: 'Aun no has subido fotos',
-      text: 'Sube entre 20 y 30 fotos tuyas para que el sistema aprenda tus rasgos.',
+      text: `Sube al menos ${(onboarding || {}).minimo || 5} fotos tuyas: son `
+        + 'con las que el robot comprueba que cada imagen sigues siendo tu.',
     }));
     return;
   }
@@ -253,6 +277,26 @@ async function buildProfile(view) {
     await load();
     await render(view);
     toast('Perfil actualizado', 'ok');
+  } catch (err) {
+    box.remove();
+    toast(err.message, 'danger');
+  }
+}
+
+/* The thorough reading, on demand.  Also runs by itself on the first estimate,
+   but a person who has just uploaded her photographs wants to know NOW whether
+   they are good enough, not after choosing an outfit. */
+async function analyse(view) {
+  if (!profile) { toast('Crea tu perfil primero'); return; }
+  const box = spinnerCard('Mirando tus fotos con detalle...');
+  view.insertBefore(box, view.firstChild);
+  try {
+    await runFirstRun(profile.id, (msg) => {
+      box.replaceChildren(spinner(msg));
+    });
+    await load();
+    await render(view);
+    toast('Analisis terminado', 'ok');
   } catch (err) {
     box.remove();
     toast(err.message, 'danger');

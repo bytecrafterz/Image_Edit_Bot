@@ -218,6 +218,28 @@ async function deleteSelected() {
   } catch (err) { toast(err.message, 'danger'); }
 }
 
+/* Move already-paid, approved images into "Finales" without generating them
+   again.  The two images bought as this project's delivery sat in "Previas"
+   while "Finales" read zero, and the only route into that tab re-rendered them
+   at 0.04 USD each - paying twice for pixels that already exist.  The server
+   refuses anything that did not pass its checks, so this button can only ever
+   relabel work the robot already approved. */
+async function markFinalSelected() {
+  const ids = Array.from(selected);
+  let done = 0;
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await api.post(`/api/album/${id}/final`);
+      done += 1;
+    } catch (err) { failed.push(err.message); }
+  }
+  if (done) toast(`${done} en Finales, sin coste`, 'ok');
+  if (failed.length) toast(failed[0], 'danger');
+  setMode(false);
+  reload();
+}
+
 async function favoriteSelected(on) {
   const ids = Array.from(selected);
   try {
@@ -277,6 +299,7 @@ async function render() {
     onClear: () => { selected.clear(); syncTiles(); refreshBar(); },
     onCancel: () => setMode(false),
     actions: [
+      { label: 'Marcar final', onClick: markFinalSelected },
       { label: 'Favoritos', onClick: () => favoriteSelected(true) },
       { label: 'Quitar favorito', onClick: () => favoriteSelected(false) },
       { label: 'Eliminar', kind: 'danger', onClick: deleteSelected },

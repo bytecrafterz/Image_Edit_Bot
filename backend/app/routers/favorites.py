@@ -59,15 +59,33 @@ def bulk(body: BulkBody, user: dict = Depends(security.active_user)) -> dict:
     ids = [str(i) for i in body.image_ids if str(i).strip()][:500]
     if not ids:
         raise HTTPException(400, "No has elegido ninguna imagen.")
+    # Which of those ids are actually hers, resolved BEFORE anything is written.
+    # The UPDATE was already scoped by user_id, so nobody else's flag ever
+    # moved - but the two things that followed were not scoped: the answer said
+    # "n": len(ids) whether or not a single row matched, and record_feedback ran
+    # once per id, writing a feedback row under HER user_id carrying SOMEONE
+    # ELSE's image_id.  The isolation audit caught exactly that: account A
+    # posted account B's image id here, B's favourites stayed at 0 and the reply
+    # still said n=1, and a feedback row referring to B's image appeared under
+    # A.  learning.record_feedback then refuses to learn from it ("never learn
+    # from another user's image"), so the row was pure litter in her own
+    # history.  Now the ids are matched first and only what matched is touched
+    # or counted.
     placeholders = ",".join("?" * len(ids))
+    mine = [r["id"] for r in db.q(
+        f"SELECT id FROM images WHERE user_id=? AND deleted_at IS NULL "
+        f"AND id IN ({placeholders})", (user["id"], *ids))]
+    if not mine:
+        return {"ok": True, "n": 0, "favorite": body.favorite,
+                "mensaje": "Ninguna de esas imagenes es tuya."}
+    marks = ",".join("?" * len(mine))
     db.execute(
-        f"UPDATE images SET is_favorite=? WHERE user_id=? AND deleted_at IS NULL "
-        f"AND id IN ({placeholders})",
-        (1 if body.favorite else 0, user["id"], *ids))
+        f"UPDATE images SET is_favorite=? WHERE user_id=? AND id IN ({marks})",
+        (1 if body.favorite else 0, user["id"], *mine))
     if body.favorite:
-        for image_id in ids:
+        for image_id in mine:
             learning.record_feedback(user["id"], image_id, "like", "favorito")
-    return {"ok": True, "n": len(ids), "favorite": body.favorite}
+    return {"ok": True, "n": len(mine), "favorite": body.favorite}
 
 
 @router.post("/{image_id}")

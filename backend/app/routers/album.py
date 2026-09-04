@@ -111,6 +111,47 @@ def feedback(image_id: str, body: FeedbackBody,
     return {"ok": True}
 
 
+@router.post("/{image_id}/final")
+def mark_final(image_id: str, user: dict = Depends(security.active_user)) -> dict:
+    """Move an image she has already paid for into "Finales", for 0.00 USD.
+
+    Until now the only way into that tab was ``run_final``, which re-renders the
+    chosen previews and bills again: on 2026-09-04 the two images bought as the
+    project's final delivery (0.08 USD, identity 0.7375 and 0.5958, both
+    approved) sat in "Previas" while "Finales" read zero, and promoting them
+    honestly would have cost another 0.08 USD out of a 2.58 USD balance.  A
+    higher tier buys a more faithful model, not a bigger file - the pixels are
+    already the pixels - so when the image in hand has passed every check there
+    is nothing left to buy, and charging for the label would be charging twice.
+
+    Two conditions, both about not lying to her.  The file has to be on disk,
+    because "Finales" is where she goes to download.  And the verdict has to
+    have PASSED: an image the robot could not confirm is her must never be
+    relabelled as the finished work, whoever asks.  Anything else still goes
+    through ``run_final`` and is priced there.
+    """
+    row = _own(image_id, user)
+    if row.get("deleted_at"):
+        raise HTTPException(410, "Esa imagen esta en la papelera.")
+    if not Path(row["path"]).is_file():
+        raise HTTPException(410, "El archivo ya no esta en el disco.")
+    if str(row.get("kind")) == "final":
+        return {"ok": True, "kind": "final", "cost_usd": 0.0,
+                "mensaje": "Esa imagen ya estaba en Finales."}
+    verdict = row.get("verdict") or {}
+    if not verdict.get("passed"):
+        raise HTTPException(
+            409, "Esa imagen no paso todas las comprobaciones, asi que no se "
+                 "puede marcar como final: %s" % (verdict.get("summary")
+                                                  or "no fue aprobada."))
+    db.execute("UPDATE images SET kind='final' WHERE id=? AND user_id=?",
+               (image_id, user["id"]))
+    db.audit("album.mark_final", user["id"], image_id=image_id)
+    return {"ok": True, "kind": "final", "cost_usd": 0.0,
+            "mensaje": "Ya esta en Finales. No se ha cobrado nada: es el mismo "
+                       "archivo que ya pagaste."}
+
+
 class BulkDeleteBody(BaseModel):
     image_ids: list[str]
 

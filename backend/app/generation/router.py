@@ -36,6 +36,99 @@ REPAIR_FACTOR = 1.35
 # regions below are the measured typical round, not a guess.
 REPAIR_REGIONS_TYPICAL = 2
 
+# How many photographs of her travel with one generation, the one being edited
+# included.  It lives here, with the pricing, because the number changes which
+# model runs and therefore what an image costs: fal picks identity_multi
+# (0.040 USD) when references are attached and identity_max (0.080 USD) when
+# they are not, so the balance page, the estimate and the run have to agree
+# about it or they will quote three different prices again.
+REFERENCE_COUNT = 3
+
+# How many attempts a variant TYPICALLY makes.  The orchestrator stops as soon
+# as the same check fails twice with the same reading (STOP_NOISE there), and
+# that is what a run measured against the engine's actual behaviour will do:
+# three paid attempts on one variant read identity 0.3507 / 0.3753 / 0.3643 -
+# the same answer three times, 0.12 USD for it.
+#
+# It is NOT the bound, and quoting it as one made the ceiling a lie.  The stop
+# rule only recognises a REPEATED reading; a check whose value moves between
+# attempts - anatomy severity 0.62, then 0.95, then 0.72, which is ordinary
+# scatter on that ruler - buys the third attempt ``max_retries_per_variant``
+# allows.  Measured 2026-09-04 in the adversarial rehearsal: three variants
+# failing that way settled 1.2600 USD (9 generations at 0.040 + 18 repaints at
+# 0.050) against a ceiling announced as 1.1400 USD, while the run's own
+# reservations added up to 1.7100 USD - the billing gate was already holding
+# for three attempts while the screen promised two.  So the ceiling below is
+# computed from the hard limit and this number is only quoted as the usual
+# stopping point.
+BOUNDED_ATTEMPTS = 2
+
+# What the paid history says about the options themselves.  This used to be a
+# hand-written table and it went stale the moment the next run finished: it
+# still announced playa_atardecer as "3 de 11" after that scene had been
+# measured at 1 of 5.  So it is now a SEED plus a live count, and the rule that
+# turns counts into a warning is written once, below, instead of being applied
+# by hand into two frozen dictionaries.
+#
+# THE SEED.  Re-measured 2026-09-04 by scoring every paid image FILE still on
+# disk (17 of them) with the live SFace recogniser against her current profile
+# signature, at the 0.45 bar.  The previous seed counted 21 attempts, four of
+# which no longer have a file and could only be read from records written by
+# the old blind descriptor that scored 0.99 on a different woman; those are
+# dropped, which is the whole difference between "3 de 11" and "1 de 5".
+#
+#   ropa    camisa_blanca      2 de 2 (0.7256, 0.7396 - las dos mejores del corpus)
+#   ropa    jersey_cachemira   2 de 2      ropa   blazer_oversize   1 de 1
+#   ropa    gabardina          1 de 1      ropa   vaqueros_camiseta 7 de 8
+#   ropa    vestido_verano     0 de 3
+#   postura caminando          7 de 8      postura sentada          1 de 1
+#   postura brazos_cruzados    0 de 3
+#   escena  ciudad_noche       6 de 6      escena ciclorama_blanco  1 de 1
+#   escena  playa_atardecer    1 de 5 (0.3221, 0.3365, 0.3580, 0.3853, 0.6323)
+#   color   blanco             7 de 11     luz ventana_izq 4 de 7, ventana_der 4 de 5
+#
+# n is small and the cells are partly confounded (scene with clothing), but the
+# beach signal survives the obvious control: the same garment and pose scored
+# 6 of 6 in ciudad_noche and 1 of 2 on the beach.  It is a warning, not a law,
+# and it is worded as one.  The colour and lighting cells are counted and named
+# here on purpose - they are the ones the rule below correctly declines to warn
+# about, and leaving them out of the record would make the table look cleaner
+# than the measurement was.
+SEED_HISTORY: dict[tuple[str, str], tuple[int, int]] = {
+    ("clothing", "camisa_blanca"): (2, 2),
+    ("clothing", "jersey_cachemira"): (2, 2),
+    ("clothing", "blazer_oversize"): (1, 1),
+    ("clothing", "gabardina"): (1, 1),
+    ("clothing", "vaqueros_camiseta"): (7, 8),
+    ("clothing", "vestido_verano"): (0, 3),
+    ("clothing_color", "blanco"): (7, 11),
+    ("clothing_color", "gris"): (1, 1),
+    ("lighting", "ventana_izq"): (4, 7),
+    ("lighting", "ventana_der"): (4, 5),
+    ("pose", "caminando"): (7, 8),
+    ("pose", "sentada"): (1, 1),
+    ("pose", "brazos_cruzados"): (0, 3),
+    ("scene", "ciudad_noche"): (6, 6),
+    ("scene", "ciclorama_blanco"): (1, 1),
+    ("scene", "playa_atardecer"): (1, 5),
+}
+# Every paid attempt in this installation was made on or before this instant,
+# so anything the live query finds after it is new evidence and adds to the
+# seed instead of double-counting it.
+SEED_UNTIL = 1788514580.1
+
+# When a tally is worth putting on the screen.  Three paid images is the least
+# that can distinguish a bad option from bad luck, and half of them coming back
+# as somebody else is not luck; four at 85% is the mirror image of that.  The
+# measured cells the rule declines to warn about are exactly the confounded
+# ones - colour blanco at 7 of 11 and ventana_izq at 4 of 7 - which is the
+# behaviour wanted: those numbers are carried by whatever scene they were shot
+# in, not by the colour.
+RISK_MIN_N = 3
+RISK_MAX_RATE = 0.50
+SAFE_MIN_N = 4
+SAFE_MIN_RATE = 0.85
+
 QUALITIES = ("draft", "preview", "standard", "high", "max")
 QUALITY_MIN_SIDE = {"draft": 0, "preview": 0, "standard": 1024,
                     "high": 1536, "max": 2048}
@@ -723,17 +816,132 @@ def plan_requests(plan: dict, quality: str) -> list[GenRequest]:
     rows = variants if isinstance(variants, list) and variants else [{}]
     source_path = plan_d.get("source_path")
     source_size = plan_d.get("source_size")
+    # The references are part of the request and they change which model runs:
+    # with them fal picks identity_multi at 0.040 USD, without them
+    # identity_max at 0.080 USD on the top tiers.  Pricing a probe that has no
+    # references while the run sends three is the same defect as pricing a
+    # request with no source photograph - it quotes a call nobody makes.
+    references = [r for r in (plan_d.get("reference_paths") or []) if r]
+    # And whether her face will be protected, which changes BOTH the endpoint
+    # and the price: a masked variant goes to fal's fill model at 0.050 USD and
+    # carries no reference images, an unmasked one to Kontext multi at 0.040
+    # USD with three.  Pricing every variant as unmasked was the same defect as
+    # pricing a probe with no source photograph - it quotes a call nobody
+    # makes - and here it would understate a masked preview by 25%.
+    from . import protect as protect_mod
+
     out: list[GenRequest] = []
     for variant in rows:
         choices = variant.get("choices") if isinstance(variant, dict) else {}
-        out.append(_probe_request("generate", quality, source_path=source_path,
+        masked = bool(protect_mod.plan_mask(choices or {}).get("safe"))
+        out.append(_probe_request("inpaint" if masked else "generate", quality,
+                                  source_path=source_path,
                                   source_size=source_size,
+                                  mask_path="mask.png" if masked else None,
+                                  reference_paths=[] if masked else references,
                                   framing=(choices or {})))
     return out
 
 
-def _cost_ceiling_note(total: float, total_max: float,
-                       repair_unit: float) -> str:
+def option_history(user_id: str = "") -> dict[tuple[str, str], tuple[int, int]]:
+    """Paid images per option value, and how many of them were really her.
+
+    The seed above plus everything paid for since, so the warning learns.  Only
+    attempts whose stored verdict was written by the CURRENT recogniser count:
+    ``identity_face.threshold`` is 0.45 for the SFace check and 0.72 for the
+    old geometric descriptor that read 0.99 on a stranger, and counting the
+    second kind is how a table ends up certifying the images the client
+    rejected on sight.  Which option each attempt was made under comes from the
+    run's own plan, matched on the variant index, because the run's options
+    hold every value that was asked for and not the one this image used.
+
+    Reads only rows; a failure here costs a sentence on a screen, never a run.
+    """
+    counts = {k: list(v) for k, v in SEED_HISTORY.items()}
+    if not user_id:
+        return {k: (v[0], v[1]) for k, v in counts.items()}
+    try:
+        rows = db.q(
+            "SELECT a.variant_index, a.verdict_json, r.plan_json "
+            "FROM attempts a JOIN runs r ON r.id=a.run_id "
+            "WHERE a.user_id=? AND a.cost_usd>0 AND a.created_at>?",
+            (user_id, SEED_UNTIL))
+    except Exception:                                     # noqa: BLE001
+        rows = []
+    for row in (rows or []):
+        verdict = db.loads(row["verdict_json"], None) or {}
+        check = next((c for c in (verdict.get("checks") or [])
+                      if isinstance(c, dict) and c.get("name") == "identity_face"), None)
+        if not check:
+            continue
+        threshold = _f(check.get("threshold"), None)
+        value = _f(check.get("value"), None)
+        if threshold is None or value is None or abs(threshold - 0.45) > 1e-6:
+            continue
+        plan = db.loads(row["plan_json"], None) or {}
+        index = row["variant_index"]
+        variant = next((v for v in (plan.get("variants") or [])
+                        if isinstance(v, dict)
+                        and int(v.get("index", -1)) == int(index if index is not None else -1)),
+                       None)
+        for group, picked in ((variant or {}).get("choices") or {}).items():
+            if not _text(picked) or not isinstance(picked, str):
+                continue
+            cell = counts.setdefault((_text(group), _text(picked)), [0, 0])
+            cell[1] += 1
+            if value >= threshold:
+                cell[0] += 1
+    return {k: (v[0], v[1]) for k, v in counts.items()}
+
+
+def _history_note(plan: dict, user_id: str = "") -> str:
+    """What the images already paid for say about these very options.
+
+    The client has spent 2.42 USD, and the most useful thing that money bought
+    is a table of which requests came back as somebody else.  It is worth
+    exactly one sentence on the screen where the request can still be changed
+    for free.
+    """
+    history = option_history(user_id)
+    chosen: set[tuple[str, str]] = set()
+    for variant in (plan.get("variants") or []):
+        for group, value in ((variant or {}).get("choices") or {}).items():
+            values = value if isinstance(value, (list, tuple, set)) else [value]
+            for item in values:
+                if _text(item):
+                    chosen.add((_text(group), _text(item)))
+    for group, value in (plan.get("locked") or {}).items():
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            if _text(item):
+                chosen.add((_text(group), _text(item)))
+
+    risky = [(key, history[key]) for key in sorted(chosen)
+             if key in history and history[key][1] >= RISK_MIN_N
+             and history[key][0] <= RISK_MAX_RATE * history[key][1]]
+    if not risky:
+        return ""
+
+    def label(group: str, value: str) -> str:
+        option = options_mod.value_of(group, value) or {}
+        return _text(option.get("label_es")) or value
+
+    parts = ["%s (%d de %d aprobadas)" % (label(*key), ok, total)
+             for key, (ok, total) in risky]
+    safe = [label(*key) for key in sorted(chosen)
+            if key in history and history[key][1] >= SAFE_MIN_N
+            and history[key][0] >= SAFE_MIN_RATE * history[key][1]]
+    note = ("Aviso: de las imagenes que ya has pagado, estas opciones son las "
+            "que mas veces han salido con otra cara: %s. Cambiarlas es la "
+            "forma mas barata de no pagar por imagenes que no eres tu."
+            % _join_es(parts))
+    if safe:
+        note += " En cambio %s si ha funcionado casi siempre." % _join_es(safe)
+    return note
+
+
+def _cost_ceiling_note(total: float, total_max: float, repair_unit: float,
+                       attempts: int) -> str:
     """One Spanish sentence with the worst this run can cost.
 
     The estimate is a planning number - one image in three needs a second pass
@@ -746,16 +954,38 @@ def _cost_ceiling_note(total: float, total_max: float,
     """
     if total <= 0.0 or total_max <= total * 1.2:
         return ""
+    # The number of attempts said here is the hard one.  Saying "como mucho 2"
+    # while the loop can buy 3 turned this sentence into the defect it exists
+    # to prevent: 1.2600 USD settled under a 1.1400 USD promise, measured
+    # 2026-09-04.  The stop rule is still worth naming, but as what it is -
+    # what normally happens - and never as the limit.
+    # The stop rule is worth naming only when there is something for it to
+    # stop.  With retries disabled the loop makes one attempt, and "como mucho
+    # 1 veces (normalmente 2)" is the sentence contradicting itself.
+    usual = ("" if attempts <= BOUNDED_ATTEMPTS else
+             " (normalmente %d, porque el robot deja de pagar intentos en "
+             "cuanto la misma comprobacion falla dos veces con el mismo "
+             "resultado)" % BOUNDED_ATTEMPTS)
     return ("Aviso: la estimacion cuenta con que 1 de cada 3 imagenes se "
-            "repita. Si todas fallan a la primera, esta tirada puede llegar a "
-            "%s USD, porque cada intento rechazado se repinta por zonas a %s "
-            "USD cada una. El saldo se comprueba antes de cada llamada, asi "
-            "que no se gasta mas de lo que tienes."
-            % (_money(total_max), _money(repair_unit)))
+            "repita. En el peor caso esta tirada llega a %s USD: cada imagen "
+            "se intenta como mucho %d veces%s y solo se repintan por zonas (a "
+            "%s USD cada una) los fallos que no se pueden corregir gratis. Las "
+            "manos, el rostro y la piel se corrigen sin gastar. El saldo se "
+            "comprueba antes de cada llamada, asi que no se gasta mas de lo "
+            "que tienes."
+            % (_money(total_max), attempts, usual, _money(repair_unit)))
 
 
-def estimate_run_cost(plan: dict, quality: str) -> dict:
-    """What this plan will cost, repairs and retries included."""
+def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
+                      user_id: str = "") -> dict:
+    """What this plan will cost, repairs and retries included.
+
+    ``limits`` is what ``user_limits`` read off her Ajustes screen.  It is an
+    argument rather than another lookup because the caller has to hand the SAME
+    dict to the run: an estimate that prices two retries beside a run that buys
+    three is the defect this file was already fixed for once, and reading the
+    setting twice is how it comes back.
+    """
     plan_d = plan if isinstance(plan, dict) else {}
     qual = _quality(quality)
     requests = plan_requests(plan_d, qual)
@@ -768,18 +998,24 @@ def estimate_run_cost(plan: dict, quality: str) -> dict:
         # The estimate has to price the engine that will really run this
         # plan.  Pricing the free one for work it cannot do is how a run was
         # announced as "sin coste" and then delivered the wrong images.
+        # The operation is read off the request that will really be sent: a
+        # variant whose face is protected is an inpaint, and asking the router
+        # to price a 'generate' while sending an 'inpaint' is how the quote and
+        # the invoice came apart in the first place.
         provider, model, reason = choose_provider(
-            "generate", qual, budget_usd, plan_d.get("provider"),
-            changes=changes, request=requests[0])
+            _text(requests[0].operation) or "generate", qual, budget_usd,
+            plan_d.get("provider"), changes=changes, request=requests[0])
     except ProviderError as exc:
         return {"total_usd": 0.0, "per_image_usd": 0.0, "provider": "",
                 "model": "", "breakdown": [], "free": True,
                 "n_images": n_images, "quality": qual,
                 "factor": REPAIR_FACTOR, "reason": str(exc), "aviso": "",
                 "aviso_resolucion": "", "aviso_coste": "",
-                "total_max_usd": 0.0}
+                "aviso_opciones": _history_note(plan_d, user_id),
+                "intentos_maximos": 0, "total_max_usd": 0.0}
 
-    costs = [round(_cost(provider, "generate", qual, req), 6) for req in requests]
+    costs = [round(_cost(provider, _text(req.operation) or "generate", qual,
+                         req), 6) for req in requests]
     generation = round(sum(costs), 6)
     per_image = round(generation / float(max(1, n_images)), 6)
 
@@ -793,8 +1029,25 @@ def estimate_run_cost(plan: dict, quality: str) -> dict:
         source_size=plan_d.get("source_size"))), 6)
     round_price = round(repair_unit * REPAIR_REGIONS_TYPICAL, 6)
     # One image in three needs that pass, and the pass is a retry AND the
-    # repaint of the attempt that failed - both bill.
-    extra = round((REPAIR_FACTOR - 1.0) * (generation + n_images * round_price), 6)
+    # repaint of the attempt that failed - both bill.  But only the ones the
+    # limits in force still allow: _run_variant's loop is
+    # ``max_retries_per_variant + 1`` attempts long, so with 0 retries there is
+    # no second attempt to price, and its repair block is skipped outright when
+    # ``max_repair_rounds`` is 0, so there is no zone to repaint either.
+    # Quoting money the configuration forbids is the same defect as promising a
+    # ceiling the run can exceed, taken from the other side: measured
+    # 2026-09-04 with both limits at 0, two images at 0.040 USD were announced
+    # at 0.1780 USD under a 0.3800 USD ceiling when 0.0800 USD was the only
+    # spend the run could make.  With the shipped limits (2 retries, 2 rounds)
+    # both numbers below are exactly what they were.
+    lim = limits if isinstance(limits, dict) else {}
+    rounds = int(lim.get("max_repair_rounds",
+                         SETTINGS.limits.max_repair_rounds))
+    attempts = int(lim.get("max_retries",
+                           SETTINGS.limits.max_retries_per_variant)) + 1
+    retry_risk = generation if attempts > 1 else 0.0
+    repaint_risk = n_images * round_price if rounds > 0 else 0.0
+    extra = round((REPAIR_FACTOR - 1.0) * (retry_risk + repaint_risk), 6)
     total = round(generation + extra, 6)
 
     # The ceiling the hard limits allow, so the screen can promise a number
@@ -804,9 +1057,20 @@ def estimate_run_cost(plan: dict, quality: str) -> dict:
     # billed 0.2687 USD against a 0.0084 USD quote; this ceiling is 0.4688.
     from .repair import MAX_REGIONS
 
-    attempts = int(SETTINGS.limits.max_retries_per_variant) + 1
+    # Bounded by the HARD limit, which is the only number that cannot be
+    # exceeded.  The stop rule usually ends a variant after the second reading,
+    # but it only fires on a repeated one, so a check that scatters buys the
+    # third attempt - and a ceiling that assumed two was 0.1200 USD short of a
+    # 1.2600 USD run on 2026-09-04.  With the free corrections owning hands,
+    # face and skin, a repaint is also no longer bought for the defects that
+    # used to open most repair rounds - but the ceiling still counts them,
+    # because a run that meets three genuinely repaintable regions may still
+    # buy them.  This is exactly what the run's own reservations add up to, so
+    # the promise on the screen and the money the gate is willing to hold are
+    # now the same number.
+    regions = MAX_REGIONS if rounds > 0 else 0
     total_max = round(attempts * (generation
-                                  + n_images * MAX_REGIONS * repair_unit), 6)
+                                  + n_images * regions * repair_unit), 6)
 
     detail = ("%d variante(s) x %s USD" % (n_images, _money(per_image))
               if len(set(costs)) <= 1 else
@@ -834,7 +1098,12 @@ def estimate_run_cost(plan: dict, quality: str) -> dict:
         # And the worst case, in the same breath as the estimate.  She is
         # never surprised by a bill only if the bill cannot exceed a number
         # she was shown.
-        "aviso_coste": _cost_ceiling_note(total, total_max, repair_unit),
+        "aviso_coste": _cost_ceiling_note(total, total_max, repair_unit,
+                                          attempts),
+        # And what her own paid history says about the options she just picked,
+        # while picking a different one is still free.
+        "aviso_opciones": _history_note(plan_d, user_id),
+        "intentos_maximos": attempts,
         "total_max_usd": total_max,
         "total_usd": total,
         "per_image_usd": per_image,
@@ -867,10 +1136,51 @@ def pinned_provider(user_id: str) -> str | None:
     return None if name in ("", "auto") else name
 
 
+def user_limits(user_id: str) -> dict:
+    """The retry and repair limits this user set in Ajustes, clamped.
+
+    They were dead settings.  ``routers/settings.py`` has stored
+    ``max_retries``, ``max_repair_rounds`` and ``autorepair`` per user since the
+    screen was written, and nothing ever read them: ``_run_variant`` and the
+    repair block both went to ``SETTINGS.limits``, which is global.  Measured
+    2026-09-04 on this installation, a user who set "0 reparaciones" and "0
+    reintentos" still got a run that would buy up to three attempts and two
+    repaint rounds - up to 1.71 USD against a balance of 2.58.  A money setting
+    that does nothing is worse than no setting at all.
+
+    It lives here, beside ``pinned_provider``, for the same reason: the
+    estimate, the ceiling and the run must read one number, not three.  The
+    stored value is clamped by the configured maximum, so a user can only ever
+    ask for LESS than the installation allows, never more.
+    """
+    rows = db.q("SELECT key, value_json FROM user_settings WHERE user_id=? "
+                "AND key IN ('max_retries','max_repair_rounds','autorepair')",
+                (user_id,))
+    stored = {r["key"]: db.loads(r["value_json"], None) for r in (rows or [])}
+
+    def _pick(key: str, ceiling: int) -> int:
+        raw = stored.get(key)
+        if raw is None:
+            return int(ceiling)
+        try:
+            return max(0, min(int(raw), int(ceiling)))
+        except (TypeError, ValueError):
+            return int(ceiling)
+
+    rounds = _pick("max_repair_rounds", SETTINGS.limits.max_repair_rounds)
+    # "Autorepair off" and "zero repair rounds" are the same instruction said
+    # two ways, and the screen offers both; whichever she used has to hold.
+    if stored.get("autorepair") is False:
+        rounds = 0
+    return {"max_retries": _pick("max_retries",
+                                 SETTINGS.limits.max_retries_per_variant),
+            "max_repair_rounds": rounds}
+
+
 def price_per_image(quality: str, prefer: str | None = None, *,
                     operation: str = "generate", source_path: Any = None,
                     source_size: Any = None, framing: Any = None,
-                    changes: Any = None) -> float:
+                    changes: Any = None, references: int = 0) -> float:
     """What one image of this tier costs on the engine that would run it.
 
     The balance page used to read a hard-coded table - 0.055 USD for 'high' -
@@ -883,8 +1193,15 @@ def price_per_image(quality: str, prefer: str | None = None, *,
     no engine can be chosen, which is also what the free local engine answers.
     """
     qual = _quality(quality)
+    # ``references`` is a COUNT, not a list of files: what changes the model -
+    # and therefore the price - is whether the request carries references at
+    # all, and this function is called from the balance page, which has no
+    # business opening her photographs to answer "what does an image cost".
+    # A run that sends none quotes none, so the two still agree.
+    refs = ["referencia_%d.jpg" % i for i in range(max(0, int(references)))]
     req = _probe_request(operation, qual, source_path=source_path,
-                         source_size=source_size, framing=framing)
+                         source_size=source_size, framing=framing,
+                         reference_paths=refs)
     try:
         provider, _model, _why = choose_provider(operation, qual, None, prefer,
                                                  changes=changes, request=req)

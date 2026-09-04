@@ -7,19 +7,73 @@ different image from "dress", and the whole point of the robot is that she never
 has to know that.
 
 Each value also carries a ``local`` hint so the free local engine knows which
-scene, grade or lighting rig to build for it.
+scene, grade or lighting rig to build for it, and every garment carries a
+``garment`` classification saying whether it dresses the whole person or only
+the top half - see the block below, which exists because a shirt that did not
+say what the legs were wearing cost the client a paid image.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+# --------------------------------------------------- what a garment covers
+#
+# Eight of the eighteen garments below name only an upper body piece, and until
+# 2026-09-04 nothing in the system said what the lower half was wearing.  The
+# paid image bought as this project's delivery is what that costs.  Attempt
+# att_d6fb1c97f9874a82b38d35c3 sent "change only: a crisp white cotton poplin
+# shirt, sleeves lightly rolled" over a photograph of her in lingerie, and its
+# stored negative prompt - 62 terms about slimming, fingers, seams and
+# watermarks - does not contain the words underwear, lingerie, legs or
+# trousers.  Nothing in that request ever asked for the lower half, so the
+# engine kept the one that was already in the photograph: the shirt was painted
+# on over the lingerie, bare legs, a dark lace edge showing at the hem.  The
+# same option on the same photograph had produced black trousers on an earlier
+# square preview, so the fragment was never wrong - it was silent, and a silent
+# request is a coin toss.
+#
+# ``garment`` is the answer.  ``kind`` says whether the piece dresses the whole
+# person (``complete``), only the top half (``top``) or only the bottom half
+# (``bottom``); ``lower`` says what the lower half ends up being, which is what
+# decides whether bare legs are a defect or simply a midi dress; ``bottom`` is
+# the English phrase naming that lower half when the fragment does not already
+# name it.  It lives BESIDE the garment instead of inside its prompt fragment
+# on purpose: a bottom the user picks herself has to be able to replace it, and
+# a phrase welded into the fragment cannot be replaced by anything.  The
+# automatic completion only ever fills a gap - see prompt.outfit_plan.
+#
+# It travels in ``params`` because that is the one field seed.py already copies
+# into the options table verbatim (``local`` rides the same way), so the
+# classification reaches the database, the API and the report with no schema
+# change.
+
+
+def _complete(lower: str, bottom: str = "") -> dict:
+    """A garment that dresses the whole person on its own."""
+    return {"kind": "complete", "lower": lower, "bottom": bottom}
+
+
+def _top(bottom: str, lower: str = "trousers") -> dict:
+    """An upper body piece.  ``bottom`` is what completes it by default."""
+    return {"kind": "top", "lower": lower, "bottom": bottom}
+
+
+def _bottom(lower: str = "trousers") -> dict:
+    """A lower body piece the user picked on purpose."""
+    return {"kind": "bottom", "lower": lower, "bottom": ""}
 
 
 def _v(key: str, es: str, en: str, prompt: str, negative: str = "",
        shots: str = "closeup,half,full", local: dict | None = None,
-       params: dict | None = None) -> dict:
+       params: dict | None = None, garment: dict | None = None) -> dict:
+    merged = dict(params or {})
+    if garment:
+        merged["garment"] = dict(garment)
     return {"value_key": key, "label_es": es, "label_en": en,
             "prompt_fragment": prompt, "negative_fragment": negative,
-            "shot_types": shots, "local": local or {}, "params": params or {}}
+            "shot_types": shots, "local": local or {}, "params": merged}
 
 
 BUILTIN_OPTIONS: list[dict] = [
@@ -33,44 +87,109 @@ BUILTIN_OPTIONS: list[dict] = [
         "group_key": "clothing", "label_es": "Ropa", "label_en": "Clothing",
         "multi": True, "sort_order": 10, "shot_types": "closeup,half,full",
         "values": [
+            # --- complete outfits: they already dress the whole person ---
             _v("vestido_noche", "Vestido de noche", "Evening gown",
                "a floor length evening gown in matte satin, elegant drape, subtle sheen",
-               shots="full"),
+               shots="full", garment=_complete("dress")),
+            # "two piece suit" does not say which two pieces, and a jacket over
+            # nothing is a legal reading of it.  Naming the trousers costs a
+            # clause and removes the reading.
             _v("traje_sastre", "Traje sastre", "Tailored suit",
-               "a sharply tailored two piece suit in fine wool, structured shoulders"),
-            _v("blazer_oversize", "Blazer oversize", "Oversized blazer",
-               "an oversized wool blazer worn open over a simple top, relaxed tailoring"),
-            _v("camisa_blanca", "Camisa blanca", "White shirt",
-               "a crisp white cotton poplin shirt, sleeves lightly rolled"),
-            _v("top_punto", "Top de punto", "Knit top",
-               "a fine gauge knit top in a warm neutral tone, soft texture"),
-            _v("abrigo_lana", "Abrigo de lana", "Wool coat",
-               "a long wool coat in camel, clean lines, worn open"),
-            _v("gabardina", "Gabardina", "Trench coat",
-               "a classic belted trench coat in beige gabardine"),
+               "a sharply tailored two piece suit in fine wool, structured shoulders",
+               garment=_complete("trousers",
+                                 "matching full length tailored trousers")),
             _v("vaqueros_camiseta", "Vaqueros y camiseta", "Jeans and tee",
-               "straight leg blue jeans with a plain white cotton t-shirt"),
+               "straight leg blue jeans with a plain white cotton t-shirt",
+               garment=_complete("trousers")),
             _v("mono_elegante", "Mono elegante", "Elegant jumpsuit",
                "a tailored wide leg jumpsuit in deep navy, cinched at the waist",
-               shots="full"),
+               shots="full", garment=_complete("jumpsuit")),
             _v("falda_midi", "Falda midi", "Midi skirt",
-               "a pleated midi skirt with a tucked in silk blouse", shots="full"),
+               "a pleated midi skirt with a tucked in silk blouse", shots="full",
+               garment=_complete("skirt")),
             _v("vestido_verano", "Vestido de verano", "Summer dress",
-               "a light cotton summer dress with a small floral print", shots="full"),
-            _v("chaqueta_cuero", "Chaqueta de cuero", "Leather jacket",
-               "a black leather biker jacket over a plain top, worn open"),
-            _v("jersey_cachemira", "Jersey de cachemira", "Cashmere sweater",
-               "a soft oversized cashmere sweater in oatmeal"),
-            _v("blusa_seda", "Blusa de seda", "Silk blouse",
-               "a fluid silk blouse in ivory, softly draped"),
+               "a light cotton summer dress with a small floral print", shots="full",
+               garment=_complete("dress")),
+            # "matching technical sportswear" reads just as easily as a sports
+            # bra with nothing below it, which is the failure this catalogue
+            # already paid for once.
             _v("deportiva_elegante", "Ropa deportiva elegante", "Elevated sportswear",
-               "matching technical sportswear in a muted tone, clean minimal styling"),
+               "matching technical sportswear in a muted tone, clean minimal styling",
+               garment=_complete("trousers", "matching full length leggings")),
             _v("conjunto_lino", "Conjunto de lino", "Linen set",
-               "a relaxed linen shirt and trouser set in natural ecru"),
+               "a relaxed linen shirt and trouser set in natural ecru",
+               garment=_complete("trousers")),
             _v("esmoquin", "Esmoquin", "Tuxedo",
-               "a womens tuxedo with satin lapels, crisp white shirt", shots="full"),
+               "a womens tuxedo with satin lapels, crisp white shirt", shots="full",
+               garment=_complete("trousers", "matching tuxedo trousers")),
             _v("vestido_rojo", "Vestido rojo largo", "Long red dress",
-               "a long crimson dress in flowing crepe, simple neckline", shots="full"),
+               "a long crimson dress in flowing crepe, simple neckline", shots="full",
+               garment=_complete("dress")),
+
+            # --- upper body only: each one names the lower half it needs ---
+            # This is the group the delivered image came from.  Every default
+            # below reaches the ankle or the knee on purpose: "trousers" alone
+            # still leaves the engine free to stop at the hip.
+            _v("blazer_oversize", "Blazer oversize", "Oversized blazer",
+               "an oversized wool blazer worn open over a simple top, relaxed tailoring",
+               garment=_top("matching tailored trousers in the same weight of "
+                            "cloth, full length to the ankle")),
+            _v("camisa_blanca", "Camisa blanca", "White shirt",
+               "a crisp white cotton poplin shirt, sleeves lightly rolled",
+               garment=_top("dark charcoal tailored trousers, full length to "
+                            "the ankle, the shirt tucked in at the waistband")),
+            _v("top_punto", "Top de punto", "Knit top",
+               "a fine gauge knit top in a warm neutral tone, soft texture",
+               garment=_top("dark straight leg trousers, full length to the ankle")),
+            _v("abrigo_lana", "Abrigo de lana", "Wool coat",
+               "a long wool coat in camel, clean lines, worn open",
+               garment=_top("a fine knit top and dark straight leg trousers "
+                            "worn underneath the open coat, full length to "
+                            "the ankle")),
+            _v("gabardina", "Gabardina", "Trench coat",
+               "a classic belted trench coat in beige gabardine",
+               garment=_top("dark tailored trousers worn underneath, full "
+                            "length to the ankle, the coat belted and fully "
+                            "fastened")),
+            _v("chaqueta_cuero", "Chaqueta de cuero", "Leather jacket",
+               "a black leather biker jacket over a plain top, worn open",
+               garment=_top("a plain top and dark straight leg jeans, full "
+                            "length to the ankle")),
+            _v("jersey_cachemira", "Jersey de cachemira", "Cashmere sweater",
+               "a soft oversized cashmere sweater in oatmeal",
+               garment=_top("dark straight leg trousers, full length to the ankle")),
+            _v("blusa_seda", "Blusa de seda", "Silk blouse",
+               "a fluid silk blouse in ivory, softly draped",
+               garment=_top("a dark tailored midi skirt to below the knee, "
+                            "the blouse tucked in at the waistband",
+                            lower="skirt")),
+
+            # --- lower body only: choosing one of these overrides the
+            # automatic completion above, which is the whole reason they are
+            # in the same menu and not a separate one.  Absent on a close up:
+            # there is no lower half in frame to dress.
+            _v("pantalon_sastre", "Pantalon de vestir", "Tailored trousers",
+               "dark tailored trousers, full length to the ankle, clean break",
+               shots="half,full", garment=_bottom()),
+            _v("vaqueros_rectos", "Vaqueros rectos", "Straight leg jeans",
+               "straight leg blue jeans, full length to the ankle",
+               shots="half,full", garment=_bottom()),
+            _v("pantalon_ancho", "Pantalon ancho", "Wide leg trousers",
+               "high waisted wide leg trousers, full length to the floor",
+               shots="half,full", garment=_bottom()),
+            # Not "slim cigarette trousers": prompt.BODY_CHANGE_RE reads the
+            # word slim as a request to narrow her body and refuses the whole
+            # option, which left this garment with no prompt fragment at all.
+            # The trousers are described by their cut instead.
+            _v("pantalon_pitillo", "Pantalon pitillo", "Cigarette trousers",
+               "tapered cigarette trousers cropped at the ankle",
+               shots="half,full", garment=_bottom()),
+            _v("falda_tubo", "Falda de tubo", "Pencil skirt",
+               "a tailored pencil skirt to just below the knee",
+               shots="half,full", garment=_bottom("skirt")),
+            _v("falda_larga", "Falda larga", "Long skirt",
+               "a long flowing skirt falling to the ankle",
+               shots="half,full", garment=_bottom("skirt")),
         ],
     },
     {
@@ -470,3 +589,131 @@ def value_of(group_key: str, value_key: str) -> dict[str, Any] | None:
         if value["value_key"] == value_key:
             return value
     return None
+
+
+# ------------------------------------------------------------ garment lookup
+
+# The classification above, keyed by value.  It is read from the catalogue row
+# first (``params.garment``, written by seed.py) and only falls back to this
+# table when a caller hands over a bare value key or an options table that has
+# not been reseeded yet.
+def _garment_index() -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for group in BUILTIN_OPTIONS:
+        for value in group["values"]:
+            info = (value.get("params") or {}).get("garment")
+            if info:
+                out[value["value_key"]] = dict(info)
+    return out
+
+
+GARMENT_BY_VALUE: dict[str, dict] = _garment_index()
+
+# A user can add her own garment to the wardrobe - options rows carry a
+# user_id and the admin screen writes them - and those rows have no
+# classification at all.  Reading the words of the fragment is a guess, and it
+# is reported as one, but a guess that answers "trousers" to a fragment that
+# says trousers beats the alternative that was in place until today, which was
+# to say nothing and let the engine keep whatever the photograph had on.
+_LOWER_WORDS = ("trouser", "pant", "jean", "skirt", "legging", "short",
+                "pantalon", "vaquero", "falda", "chino", "culotte", "bermuda")
+_DRESS_WORDS = ("dress", "gown", "jumpsuit", "vestido", "mono", "romper",
+                "playsuit", "overall", "kaftan")
+_UPPER_WORDS = ("shirt", "blouse", "top", "sweater", "jumper", "knit",
+                "blazer", "jacket", "coat", "cardigan", "camisa", "blusa",
+                "jersey", "chaqueta", "abrigo", "gabardina", "camiseta",
+                "sudadera", "corset", "bodysuit", "kimono", "poncho")
+
+# Used only when a garment is known to be a top and declares no bottom of its
+# own.  Full length on purpose: "trousers" alone still lets the engine stop the
+# garment at the hip, which is one word away from the failure being fixed.
+DEFAULT_BOTTOM = "dark tailored trousers, full length to the ankle"
+
+# The mirror of DEFAULT_BOTTOM, and it exists because the same measurement that
+# justified the trousers was run in the other direction.  Sweeping every one and
+# two garment selection the wardrobe allows (600 prompts, 24 options, framings
+# half and full) the lower half is now named in 600 of 600 - but the UPPER half
+# is named in only 558: the 21 selections made only of the six bottoms leave the
+# chest unnamed while the same request still says "dress her in this outfit and
+# in nothing else" and drops the clause that preserved the source clothing.  On
+# a photograph of a person in lingerie that is an instruction to undress her,
+# the exact mirror of the delivered image that started all this.  Neutral and
+# fully covering on purpose: it has to be wearable under any of the six bottoms
+# and must not become a second styling decision.
+DEFAULT_TOP = ("a plain long sleeve top in a neutral tone, fully covering the "
+               "chest and shoulders, tucked in at the waistband")
+
+
+def _word(text: str, roots) -> bool:
+    """Match at the start of a word, not anywhere inside one.
+
+    A plain substring test reads "kimono" as "mono" and files a silk kimono as
+    a jumpsuit, which is how a top ends up classified as a complete outfit and
+    loses its trousers.  Matching the start of a word keeps the plural ("root"
+    finds "trousers") without inventing the stem in the middle of another word.
+    """
+    return any(re.search(r"\b" + re.escape(root), text) for root in roots)
+
+
+def _garment_guess(text: str) -> dict:
+    words = text.lower()
+    has_lower = _word(words, _LOWER_WORDS)
+    has_upper = _word(words, _UPPER_WORDS)
+    if _word(words, _DRESS_WORDS):
+        return {"kind": "complete", "lower": "dress", "bottom": "",
+                "source": "deducido"}
+    if has_lower and has_upper:
+        return {"kind": "complete", "lower": "trousers", "bottom": "",
+                "source": "deducido"}
+    if has_lower:
+        lower = "skirt" if ("skirt" in words or "falda" in words) else "trousers"
+        return {"kind": "bottom", "lower": lower, "bottom": "",
+                "source": "deducido"}
+    if has_upper:
+        return {"kind": "top", "lower": "trousers", "bottom": DEFAULT_BOTTOM,
+                "source": "deducido"}
+    # Nothing recognisable.  Saying "top" here would put trousers on a garment
+    # nobody described, so this abstains: the caller still forbids visible
+    # underwear and still says replace rather than layer, it just does not
+    # invent a lower half.
+    return {"kind": "unknown", "lower": "", "bottom": "", "source": "sin clasificar"}
+
+
+def garment_info(option: Any) -> dict:
+    """What this wardrobe choice covers: ``kind``, ``lower``, ``bottom``.
+
+    Accepts a bare value key, a catalogue row, or the resolved option shape
+    that ``generation.prompt`` passes around.  Always returns a dict, so the
+    caller never has to branch on missing data.
+    """
+    key = ""
+    params: dict = {}
+    text_bits: list[str] = []
+    if isinstance(option, str):
+        key = option.strip()
+    elif isinstance(option, dict):
+        key = str(option.get("value") or option.get("value_key")
+                  or option.get("key") or "").strip()
+        raw = option.get("params")
+        if isinstance(raw, dict):
+            params = raw
+        for field in ("prompt", "prompt_fragment", "label_en", "label",
+                      "label_es"):
+            value = option.get(field)
+            if value:
+                text_bits.append(str(value))
+    declared = params.get("garment")
+    if isinstance(declared, dict) and declared.get("kind"):
+        info = {"kind": str(declared.get("kind") or "top"),
+                "lower": str(declared.get("lower") or ""),
+                "bottom": str(declared.get("bottom") or ""),
+                "source": "catalogo"}
+        return info
+    known = GARMENT_BY_VALUE.get(key)
+    if known:
+        info = dict(known)
+        info.setdefault("lower", "")
+        info.setdefault("bottom", "")
+        info["source"] = "catalogo"
+        return info
+    return _garment_guess(" ".join(text_bits) or key.replace("_", " "))

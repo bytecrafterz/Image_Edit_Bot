@@ -29,6 +29,7 @@ Four rules shape the code:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -39,11 +40,15 @@ from ..analysis import loader
 from ..catalog import options as options_mod
 from ..catalog import styles as styles_mod
 from ..config import PREVIEW_DIR, OUTPUT_DIR, SETTINGS
+from ..identity import gallery as gallery_mod
+from ..identity import onboarding as onboarding_mod
 from ..identity import verify as verify_mod
 from ..safety import consent as consent_mod
 from ..safety import guard as guard_mod
-from ..services import billing, jobs, storage
+from ..services import billing, jobs
+from . import correct as correct_mod
 from . import learning, planner, prompt as prompt_mod, repair as repair_mod
+from . import protect as protect_mod
 from . import retouch as retouch_mod
 from . import router as router_mod
 
@@ -121,6 +126,48 @@ def _is_generative_provider(provider) -> bool:
 TEXTURE_NOTE = ("Se devolvio la textura real de la piel: el motor la habia "
                 "suavizado y se ha vuelto a aplicar la de su foto.")
 
+# How many photographs of her travel with one generation.  Kontext multi takes
+# three images in ``image_urls`` and charges the same 0.040 USD as the single
+# image endpoint at preview - and HALF of identity_max's 0.080 USD at high and
+# max - so the pooled reference is free or cheaper, never dearer.  The
+# photograph being edited is one of the three; the other two are chosen by
+# identity/gallery.py to go with it.  The number itself is defined in the
+# router, where the price that depends on it is computed.
+REFERENCE_COUNT = router_mod.REFERENCE_COUNT
+
+# JPEG quality for an image composed from her photograph and a repainted zone.
+# The pixel array outside the mask is identical to her file - 0 of 5 554 727
+# protected pixels differ on IMG_7871 - and this is the number that decides how
+# much of that survives the encoder: measured on that same composite, the
+# protected region comes back off disk with a mean error of 1.14/255 at q92,
+# 0.69 at q96 and 0.10 at q100, and identity_face reads 0.7918, 0.8006 and
+# 0.8044 against 0.8177 on her own photograph.  100 costs 3.5 MB a preview
+# against 2.2 MB, which is the cheapest thing in this whole product.
+COMPOSE_QUALITY = 100
+
+# Defects the free correction path owns.  A paid repaint must not be bought for
+# any of them: a hand repainted by the fill endpoint measured 0.000 severity in
+# 6 of 6 rehearsals because the hand had been deleted, a face is a different
+# woman and cannot be patched at all, and smoothed skin is already given back
+# from her own photograph before anything is verified.
+FREE_DEFECTS = ("hand_malformed", "face_distorted", "oversmoothed_skin")
+
+# When is a second paid attempt worth buying?  Measured on run_16e276b5: three
+# paid attempts on one variant scored identity 0.3507, 0.3753 and 0.3643 - a
+# spread of 0.0246 around a line at 0.45 - and lowering the strength did not
+# move it.  That is not luck, it is the engine drawing a different person, and
+# every further attempt is 0.040 USD for the same answer.  So when one check
+# fails twice with readings this close, the variant stops.  The bands are twice
+# the scatter measured on each ruler, which is the least that cannot be
+# mistaken for noise.
+STOP_NOISE: dict[str, float] = {
+    "identity_face": 0.05,
+    "body_proportions": 0.02,
+    "skin_tone": 0.02,
+    "anatomy": 0.05,
+    "quality": 0.05,
+}
+
 
 def _smoothed_skin(image_path: str) -> str:
     """Which detector, if any, says the engine sanded her skin.  '' if none.
@@ -160,32 +207,255 @@ def _smoothed_skin(image_path: str) -> str:
     return ""
 
 
-def _restore_texture(run_id: str, image_path: str, source_path: str) -> dict:
+SKIN_MAX_PROBES = 6
+
+
+def _skin_candidates(profile: dict, image_path: str, source_path: str) -> list:
+    """Her photographs, in the order the transfer should be tried.
+
+    The run's source photograph is NOT privileged.  Measured over 27 generated
+    frames, the fixed source succeeds on 11 of 26 (42%) because
+    ``restore_skin_texture`` reads both files at full resolution and her
+    3024x4032 photograph against a 1024 px render gives a warp scale of 0.16
+    against retouch.SCALE_MIN 0.20 - the very refusal this rehearsal printed on
+    every image before this function existed.  Trying her photographs in
+    ascending alignment residual and keeping the first the module itself
+    accepts reaches 19 of 27 (70%), median 3 probes, and costs nothing but a
+    few seconds of local work.  The source is in that ordering like any other
+    photograph of hers, so nothing is lost by not going first.
+    """
+    ordered: list[str] = []
+    try:
+        donor = gallery_mod.choose_donor(profile, image_path, "skin")
+        ordered = [p for p in ([donor.get("path")] +
+                               list(donor.get("alternatives") or [])) if p]
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("Eleccion de donante de piel fallida: %s", exc)
+    if source_path and source_path not in ordered:
+        # A profile that could not be read still deserves the old behaviour.
+        ordered.append(source_path)
+    return ordered[:SKIN_MAX_PROBES]
+
+
+def _gate_texture_loss(image_path: str, source_path: str) -> float | None:
+    """The grain loss the anatomy gate will read on this file, or None.
+
+    ``restore_skin_texture`` grades itself with ``gain`` - the fine band it
+    added over the fine band it found, on the pixels it touched.  The gate that
+    decides whether the image is delivered or thrown away reads something else:
+    ``verify._texture_loss``, her face against the same face in her own
+    photograph, both brought to one width.  The two can disagree, so the only
+    honest way to know whether a free correction helped is to ask the ruler
+    that judges it.
+    """
+    if not source_path:
+        return None
+    from ..analysis import face as face_mod          # as _smoothed_skin does
+    try:
+        img = loader.load_image(image_path, verify_mod.VERIFY_MAX_SIDE)
+        face_d = face_mod.detect_face(img)
+        band = verify_mod._texture_loss(img, face_d,
+                                        {"source_path": str(source_path)})
+    except Exception as exc:                              # noqa: BLE001
+        log.debug("Medida del grano fallida: %s", exc)
+        return None
+    return float(band.get("loss")) if band.get("ok") else None
+
+
+def _restore_texture(run_id: str, image_path: str, source_path: str,
+                     profile: dict | None = None) -> dict:
     """Put her own skin grain back on a generated file, in place.
 
-    Returns what happened, for the attempt row and the ficha.  It never
-    raises and it never loses the picture: the module writes only when the
-    transfer succeeded, and the write itself is atomic, so a failure of any
-    kind leaves exactly the file the provider returned - already paid for.
+    Returns what happened, for the attempt row and the ficha.  It never raises
+    and it never loses the picture: the module writes only when the transfer
+    succeeded, and the write itself is atomic, so a failure of any kind leaves
+    exactly the file the provider returned - already paid for.  What is new is
+    that a refusal is not the end: her other photographs are tried in the
+    measured order until one of them is accepted by the module's own gates.
+
+    And one more gate, because the module's own numbers were not enough.  The
+    transfer rewrites the whole paid JPEG, and one more JPEG generation moves
+    the gate's own reading by up to 0.03 of severity in either direction -
+    measured 2026-09-04 by re-encoding one untouched file at several
+    qualities: 0.387 at q90, 0.424 at q95, 0.454 at q96, 0.430 at q98, 0.423 at
+    q100, and 0.424 through a lossless PNG, which is the file itself.  On
+    run_713536e2/v1_a1 that cost more than the transfer gave: a paid image the
+    robot ACCEPTED untouched (anatomy 0.310, grain loss 0.132) came back at
+    0.451 after a correction that reported gain x1.13, failed the smoothing
+    gate at 0.45 and would have bought another 0.040 USD attempt to replace an
+    image that was already good.  Raising the save quality only moves the luck
+    around - q96 measured better than q98 on 5 of the 9 files where the gate
+    could read at all - so the fix is not a constant but a check: keep the
+    corrected bytes only when the ruler that decides says the grain really
+    improved, and otherwise put the provider's own bytes back and try the next
+    photograph.  Measured over the twelve frames on disk the transfer treats:
+    ten keep their correction with the identical gain (x1.21..x1.55), the
+    regression above disappears, and the one transfer that reported x1.01 for
+    a change of 4/255 on 1410 pixels is reverted instead of announced.
     """
     signal = _smoothed_skin(image_path)
+    candidates = _skin_candidates(profile or {}, image_path, source_path)
+    before_loss = _gate_texture_loss(image_path, source_path)
     try:
-        got = retouch_mod.restore_skin_texture(image_path, source_path,
-                                               image_path)
+        paid_bytes = Path(image_path).read_bytes()
     except Exception as exc:                              # noqa: BLE001
-        log.warning("Restauracion de textura fallida: %s", exc)
-        return {"aplicada": False, "motivo": str(exc)[:120], "senal": signal}
+        log.warning("No se pudo leer el archivo pagado: %s", exc)
+        paid_bytes = b""
+    got: dict = {}
+    tried = 0
+    reverted = 0
+    revert_reason = ""
+    for candidate in candidates:
+        tried += 1
+        try:
+            got = retouch_mod.restore_skin_texture(image_path, candidate,
+                                                   image_path)
+        except Exception as exc:                          # noqa: BLE001
+            log.warning("Restauracion de textura fallida: %s", exc)
+            return {"aplicada": False, "motivo": str(exc)[:120],
+                    "senal": signal, "intentos": tried}
+        if got.get("ok"):
+            after_loss = _gate_texture_loss(image_path, source_path)
+            if (paid_bytes and before_loss is not None
+                    and after_loss is not None and after_loss > before_loss):
+                # The paid file measured better before we touched it.  Put it
+                # back byte for byte and keep looking; nothing is spent either
+                # way, and an image that was already good must not be lost to
+                # a correction it did not need.  Written beside the file and
+                # moved into place, like every other write on a paid image: a
+                # half-written restore would destroy the very thing this branch
+                # exists to protect.
+                spare = Path(image_path).with_suffix(".pagada.tmp")
+                spare.write_bytes(paid_bytes)
+                os.replace(str(spare), image_path)
+                reverted += 1
+                revert_reason = ("tu foto %s no mejoraba el grano medido "
+                                 "(%.3f -> %.3f): se deja la imagen tal como "
+                                 "vino" % (Path(candidate).name,
+                                           before_loss, after_loss))
+                got = {"ok": False, "reason": revert_reason}
+                continue
+            break
+        # "The image already keeps your skin texture" is an answer about the
+        # IMAGE, not about this donor, so there is nothing to be gained by
+        # asking another photograph the same question.
+        if "ya conserva" in str(got.get("reason") or ""):
+            break
 
-    record = {"aplicada": bool(got.get("ok")),
-              "motivo": str(got.get("reason") or "")[:160],
+    # A revert is the reason the paid file is the one she gets, so it wins the
+    # sentence over whatever the last photograph in the queue happened to say.
+    applied = bool(got.get("ok"))
+    if applied:
+        motivo = str(got.get("reason") or "")
+    else:
+        motivo = str(revert_reason or got.get("reason")
+                     or "sin fotos con las que comparar la piel")
+    record = {"aplicada": applied,
+              "motivo": motivo[:160],
               "senal": signal,
               "ganancia": round(float(got.get("gain") or 1.0), 3),
-              "zonas": int(got.get("regions") or 0)}
+              "zonas": int(got.get("regions") or 0),
+              "intentos": tried,
+              "revertidas": reverted,
+              "grano_antes": None if before_loss is None else round(before_loss, 4),
+              "foto": Path(candidates[tried - 1]).name if tried else ""}
     if got.get("ok"):
         _plan_note(run_id, TEXTURE_NOTE)
-        log.info("Textura devuelta (x%.2f) en %s", record["ganancia"],
-                 image_path)
+        log.info("Textura devuelta (x%.2f) en %s desde %s",
+                 record["ganancia"], image_path, record["foto"])
     return record
+
+
+def _failed_checks(verdict: dict) -> dict[str, float]:
+    """Which checks failed and what they read, so a repeat can be recognised."""
+    out: dict[str, float] = {}
+    for check in (verdict.get("checks") or []):
+        if not check.get("passed", True):
+            try:
+                out[str(check.get("name"))] = float(check.get("value") or 0.0)
+            except (TypeError, ValueError):
+                out[str(check.get("name"))] = 0.0
+    return out
+
+
+def _repeat_failure(history: dict, verdict: dict) -> str:
+    """The reason to stop buying attempts, or "".
+
+    A check that fails twice with the same reading is not bad luck; it is the
+    engine's answer to this request.  Recorded per check, because a run that
+    fails identity once and anatomy once has learnt two different things and
+    deserves its retry.
+    """
+    for name, value in _failed_checks(verdict).items():
+        seen = history.setdefault(name, [])
+        band = STOP_NOISE.get(name, 0.05)
+        for before in seen:
+            if abs(before - value) <= band:
+                return ("%s ha fallado dos veces con el mismo resultado (%.3f y "
+                        "%.3f): no se compra otro intento, el motor esta dando "
+                        "siempre la misma respuesta."
+                        % (verify_mod.CHECK_ES.get(name, name), before, value))
+        seen.append(value)
+    return ""
+
+
+def _correct_free(run_id: str, image_path: str, profile: dict, brief: dict,
+                  verdict: dict, defects: list[dict]) -> tuple[dict, list, list]:
+    """Try to fix what failed WITHOUT buying anything, then measure again.
+
+    The order is the order of the money already spent: the image exists, it is
+    paid for, and the only question left is whether her own photographs can
+    correct it.  Each correction refuses on its own numbers - see
+    generation/correct.py - so what comes back here is either a better file or
+    an untouched one with a sentence explaining why it was left alone.  The
+    verdict is only recomputed when a file really changed, because verifying
+    the same bytes twice would only cost time and could not change the answer.
+    """
+    failing = set(_failed_checks(verdict))
+    log: list[dict] = []
+    notes: list[str] = []
+    changed = False
+    if not failing:
+        return verdict, log, notes
+
+    jobs_to_do: list = []
+    if "identity_face" in failing:
+        jobs_to_do.append(("rostro",
+                           lambda: correct_mod.restore_face(image_path, profile,
+                                                            brief)))
+    if "body_proportions" in failing:
+        jobs_to_do.append(("proporciones",
+                           lambda: correct_mod.restore_body(image_path, profile,
+                                                            brief)))
+    if "anatomy" in failing and any(
+            d.get("type") == "hand_malformed" for d in (defects or [])):
+        jobs_to_do.append(("manos",
+                           lambda: correct_mod.fix_hands(image_path, profile,
+                                                         defects, brief)))
+    for label, run in jobs_to_do:
+        try:
+            got = run()
+        except Exception as exc:                          # noqa: BLE001
+            log.append({"que": label, "aplicada": False,
+                        "motivo": str(exc)[:160]})
+            logging.getLogger("photorobot.robot").warning(
+                "Correccion de %s fallida: %s", label, exc)
+            continue
+        log.append({"que": label, "aplicada": bool(got.get("ok")),
+                    "motivo": str(got.get("reason") or "")[:200]})
+        if got.get("ok"):
+            changed = True
+            note = str(got.get("nota") or got.get("reason") or "")
+            if note:
+                notes.append(note)
+                _plan_note(run_id, note)
+        else:
+            log_it = ("No se pudo corregir %s sin gastar mas: %s"
+                      % (label, got.get("reason")))
+            _plan_note(run_id, log_it)
+    if changed:
+        verdict = verify_mod.verify_image(image_path, profile, brief)
+    return verdict, log, notes
 
 
 def _plan_note(run_id: str, note: str) -> None:
@@ -274,6 +544,14 @@ def _brief_from(analysis: dict, original: dict, choices: dict) -> dict:
         "shot_type": analysis.get("shot_type") or "unknown",
         "source_path": original["path"],
         "source_body": analysis.get("body") or {},
+        # And the skin of that same photograph.  identity/verify judges the
+        # skin tone against the picture this one was made from, not against the
+        # pooled gallery mean: measured over 168 honest changes of her 24
+        # photographs the pooled reference false-alarmed 3 times (twice on a
+        # lighting change she had asked for) and the paired one never did.  It
+        # is already measured and cached here, so handing it over costs
+        # nothing and saves verify a second reading of the photograph.
+        "source_skin": analysis.get("skin") or {},
         "expects_face": bool(analysis.get("has_face")),
         "choices": choices,
     }
@@ -305,10 +583,43 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     if not original:
         raise ValueError("Esa foto no existe o fue eliminada.")
 
+    # ENOUGH REAL PHOTOGRAPHS FIRST, before anything is measured or priced.
+    # The whole product rests on comparing what comes back against photographs
+    # of the person, and identity/onboarding.py measures what a gallery of each
+    # size is worth: with a single photograph 12.5% of possible profiles reject
+    # one of her OWN photographs, and the margin against other women is 0.2965
+    # where five photographs give 0.4290.  Refusing here rather than at the
+    # button is deliberate - it costs her nothing and it is the only moment at
+    # which the answer is still "upload four more" instead of "that image was
+    # discarded".
+    blocked = onboarding_mod.blocking_reason(user["id"])
+    if blocked:
+        raise PermissionError(blocked)
+
     analysis = analyse_original(original)
     shot = analysis.get("shot_type") or "unknown"
     profile = _profile_for(user, profile_id)
     warnings: list[str] = []
+
+    # THE FIRST GENERATION FOR A PERSON READS HER PHOTOGRAPHS PROPERLY.  The
+    # client asked for a detailed analysis on the first composite, and this is
+    # the only place that is both before the money and after she has a profile.
+    # It runs once: the report is stored on the profile row and every later
+    # estimate reads it back, so the cost - profile.build_profile over her
+    # photographs plus a hand reading on at most eight of them - is paid on the
+    # first estimate and never again.  A failure here must not block a run, so
+    # it is logged and the estimate goes on without the section.
+    first_run: dict = {}
+    if profile:
+        first_run = onboarding_mod.stored_report(profile["id"], user["id"])
+        if not first_run:
+            try:
+                first_run = onboarding_mod.build_first_run(user, profile["id"])
+            except Exception as exc:                      # noqa: BLE001
+                log.warning("Analisis inicial fallido: %s", exc)
+                first_run = {}
+            else:
+                profile = _profile_for(user, profile["id"])
 
     if not profile:
         warnings.append("Todavia no has creado tu perfil: no se podran comprobar "
@@ -364,7 +675,60 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     plan["source_size"] = [int(original.get("width") or 0),
                            int(original.get("height") or 0)]
 
-    estimate = router_mod.estimate_run_cost(plan, quality or "preview")
+    # Three photographs of her, not one.  The engine was being shown a single
+    # picture and, at high quality, was even being sent that same picture twice
+    # - as the image to edit and as its own "identity reference" - which is not
+    # evidence about anybody.  The two companions are chosen by measurement
+    # (identity/gallery.py) to cover her worst photograph and to differ in
+    # framing and face size, and they are picked here, at planning time, so the
+    # price on the screen is the price of the call that will really be sent:
+    # with references fal bills identity_multi at 0.040 USD instead of
+    # identity_max at 0.080 USD on the top tiers.
+    plan["reference_paths"] = []
+    if profile:
+        try:
+            picked = gallery_mod.choose_references(
+                profile, REFERENCE_COUNT, must_include=original["path"])
+        except Exception as exc:                          # noqa: BLE001
+            log.warning("Eleccion de referencias fallida: %s", exc)
+            picked = {"paths": [], "reason": ""}
+        plan["reference_paths"] = [p for p in (picked.get("paths") or [])
+                                   if p and p != original["path"]]
+        plan["reference_detail"] = picked.get("detail") or {}
+        note = str(picked.get("reason") or "")
+        if note:
+            notes = [n for n in (plan.get("notes") or []) if isinstance(n, str)]
+            if note not in notes:
+                notes.append(note)
+            plan["notes"] = notes
+
+    # WILL HER FACE BE GENERATED?  Decided here, on the option groups alone,
+    # because the answer has to be on the screen with the price and not
+    # discovered afterwards in a report.  It is the same call _run_variant
+    # makes, from the same module, so the sentence she reads is the decision
+    # the run takes.  A plan whose variants disagree - because the robot varied
+    # the pose by itself on some of them - says how many.
+    shields = [protect_mod.plan_mask((v or {}).get("choices") or {})
+               for v in (plan.get("variants") or [{}])]
+    safe_n = sum(1 for s in shields if s.get("safe"))
+    plan["face_protected"] = [bool(s.get("safe")) for s in shields]
+    if safe_n == len(shields):
+        warnings.append("Tu rostro NO se va a generar en ninguna de estas "
+                        "imagenes: se repinta solo la zona que cambias y tu "
+                        "cara y tus manos se copian de tu propia foto.")
+    elif safe_n:
+        warnings.append("En %d de las %d imagenes tu rostro se copia de tu "
+                        "foto; en las otras %d hay que volver a dibujarlo. %s"
+                        % (safe_n, len(shields), len(shields) - safe_n,
+                           next(s["reason"] for s in shields if not s.get("safe"))))
+    else:
+        warnings.append(next(s["reason"] for s in shields))
+
+    # The same limits the run will obey, read once and handed to the estimate,
+    # so the ceiling she is shown is the ceiling _run_variant can reach.
+    estimate = router_mod.estimate_run_cost(plan, quality or "preview",
+                                            router_mod.user_limits(user["id"]),
+                                            user["id"])
     balances = billing.all_balances(user["id"])
     provider_name = estimate.get("provider") or "local"
     if provider_name not in billing.FREE_PROVIDERS:
@@ -373,6 +737,18 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
             warnings.append("El saldo de %s (%.2f USD) no cubre esta tirada "
                             "(%.2f USD). Registra una recarga en Ajustes."
                             % (provider_name, bal, estimate["total_usd"]))
+
+    if first_run:
+        for line in (first_run.get("no_se_puede_comprobar") or []):
+            note = ("En tus fotos no hay con que comprobar esto: %s" % line)
+            if note not in warnings:
+                warnings.append(note)
+        # A warning about her own gallery is worth more here than anywhere
+        # else: it is the only screen where the answer is still "upload three
+        # more photographs" instead of "that attempt was discarded".
+        for line in (first_run.get("avisos") or []):
+            if line not in warnings:
+                warnings.append(line)
 
     # The run writes the same warning into the plan notes, but by then the
     # images exist; here it lands on the estimate screen, which is the last
@@ -394,6 +770,13 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     aviso_coste = str(estimate.get("aviso_coste") or "")
     if aviso_coste and aviso_coste not in warnings:
         warnings.append(aviso_coste)
+
+    # What her own paid images say about the options she has just chosen.  It
+    # is the cheapest warning in the product: changing a scene costs nothing,
+    # and playa_atardecer came back as somebody else on 8 of 11 paid attempts.
+    aviso_opciones = str(estimate.get("aviso_opciones") or "")
+    if aviso_opciones and aviso_opciones not in warnings:
+        warnings.append(aviso_opciones)
 
     db.execute(
         "INSERT INTO runs(id,user_id,original_id,profile_id,mode,status,"
@@ -418,6 +801,7 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
             "style": {"key": style["key"], "name": style["name_es"]},
         },
         "warnings": warnings,
+        "analisis_inicial": first_run or None,
         "analysis": {"shot_type": shot,
                      "quality": (analysis.get("quality") or {}).get("score"),
                      "issues": (analysis.get("quality") or {}).get("issues") or []},
@@ -672,6 +1056,12 @@ def run_previews(user: dict, run_id: str) -> dict:
     brief = dict(opts.get("brief") or {})
     brief["source_path"] = original["path"]
     brief["source_body"] = analysis.get("body") or {}
+    brief["source_skin"] = analysis.get("skin") or {}
+    # The references chosen when the run was priced, so the call that is sent
+    # is the call that was quoted; repair.py reads the same list, which is why
+    # it lives on the brief and not in a second variable.
+    brief["reference_paths"] = [p for p in (plan.get("reference_paths") or [])
+                                if p and Path(p).exists()]
 
     out_dir = PREVIEW_DIR / str(user["id"]) / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -741,13 +1131,35 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     cost = 0.0
     repaired = 0
     attempts = 0
-    max_retries = SETTINGS.limits.max_retries_per_variant
+    # Read once per variant, not per attempt: the settings cannot change
+    # halfway through a retry loop and one query each is enough.
+    prefer = _default_provider(user["id"])
+    # Her own limits, not the installation's.  Until 2026-09-04 both numbers
+    # below came from SETTINGS.limits, so "0 reintentos, 0 reparaciones" on the
+    # Ajustes screen changed nothing and the run still bought up to three
+    # attempts and two repaint rounds.  ``plan_run`` prices the estimate off
+    # this same reader, so the ceiling on the screen and the money this loop
+    # can spend stay one number.
+    limits = router_mod.user_limits(user["id"])
+    max_retries = int(limits["max_retries"])
+    max_repair_rounds = int(limits["max_repair_rounds"])
     params = dict(variant.get("params") or {})
     seed = int(variant.get("seed") or 0)
     extra_negatives: list[str] = []
-    # Read once per variant, not per attempt: the setting cannot change
-    # halfway through a retry loop and one query is enough.
-    prefer = _default_provider(user["id"])
+    # Her other photographs, already chosen and priced when the run was
+    # planned.  The photograph being edited is never repeated here: it travels
+    # as the source and sending it twice is what the old code did.
+    references = [p for p in (brief.get("reference_paths") or [])
+                  if p and p != original.get("path") and Path(p).exists()]
+    # What each check has read on the attempts that failed, so the loop can
+    # stop buying answers the engine has already given.
+    seen_failures: dict[str, list[float]] = {}
+    # The face shield, built at most once for this variant and reused by every
+    # retry.  Empty means "this image is made whole"; ``mask_note`` says why,
+    # in her language, whichever way it went.
+    mask_path = ""
+    mask_note = ""
+    mask_cover = 0.0
 
     for attempt_no in range(1, max_retries + 2):
         # Between attempts, and always before anything reaches a provider: a
@@ -771,12 +1183,37 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         # comes from the original row; a chosen framing overrides it, because
         # a 9:16 story really is a different picture.
         hints = _local_hints(choices)
+
+        # THE FACE, AT GENERATION.  A request that only changes the clothes or
+        # the background does not need her face redrawn, and a face that is
+        # never redrawn cannot come back as somebody else.  This is the whole
+        # of the client's first requirement, and it is not a check - it is
+        # arithmetic: generation/protect.py masks the regions the request
+        # really touches, keeps her face and her hands out of the mask, and
+        # puts her own pixels back outside it at full resolution afterwards.
+        # It matters because the repair side cannot do this job: restore_face
+        # wrote 0 of 9 failing images, since a face measured 0.29-0.40 against
+        # her is not a damaged copy of her face but a different woman's.
+        # The mask is built once per variant and reused by every retry: it
+        # depends on her photograph and on what she asked for, neither of which
+        # changes between attempts, and building it costs about 1.4 s.
+        shield = protect_mod.plan_mask(choices)
+        if shield.get("safe") and not mask_path and not mask_note:
+            mask_path, mask_note, mask_cover = _face_shield(
+                original, choices, out_dir, index)
+        masked = bool(mask_path)
         request = router_mod.build_request(
-            "generate", quality,
+            "inpaint" if masked else "generate", quality,
             prompt=built["prompt"], negative_prompt=negative,
             source_path=original["path"],
             source_size=[int(original.get("width") or 0),
                          int(original.get("height") or 0)],
+            mask_path=mask_path or None,
+            # The fill endpoint takes no reference images at all (see
+            # providers/fal MODELS['inpaint']['knobs']), and on this path it
+            # needs none: the face it would have to be taught is the face it is
+            # forbidden to touch.
+            reference_paths=[] if masked else references,
             framing=hints.get("framing") or choices,
             seed=seed + attempt_no - 1,
             strength=float(merged.get("strength", 0.5)),
@@ -791,8 +1228,43 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         # engine that cannot change clothes or pose wins on price and
         # produces images that could never have satisfied the request.
         provider, model, why = router_mod.choose_provider(
-            "generate", quality, budget_usd=None, prefer=prefer,
-            changes=choices, request=request)
+            "inpaint" if masked else "generate", quality, budget_usd=None,
+            prefer=prefer, changes=choices, request=request)
+        if masked and not _is_generative_provider(provider):
+            # The local engine's inpaint fills a hole from the pixels around
+            # it: handed the mask of a torso it would sample the wall, not sew
+            # a suit.  Masking is only worth anything against an engine that
+            # can actually paint the garment, so this falls back to the whole
+            # image path before a single cent is committed.
+            masked, mask_path = False, ""
+            mask_note = ("El motor gratuito no sabe repintar solo una zona, "
+                         "asi que esta imagen se hace entera.")
+            request = router_mod.build_request(
+                "generate", quality,
+                prompt=built["prompt"], negative_prompt=negative,
+                source_path=original["path"],
+                source_size=[int(original.get("width") or 0),
+                             int(original.get("height") or 0)],
+                reference_paths=references,
+                framing=hints.get("framing") or choices,
+                seed=seed + attempt_no - 1,
+                strength=float(merged.get("strength", 0.5)),
+                guidance=float(merged.get("guidance", 4.0)),
+                steps=int(merged.get("steps", 28)),
+                identity_weight=float(merged.get("identity_weight", 0.85)),
+                extra=hints,
+            )
+            provider, model, why = router_mod.choose_provider(
+                "generate", quality, budget_usd=None, prefer=prefer,
+                changes=choices, request=request)
+        # What was decided about her face, in her language, on the attempt row
+        # and on the run's notes - before the image exists, not after.
+        merged["rostro"] = {
+            "protegido": masked,
+            "motivo": (mask_note or shield.get("reason") or ""),
+            "zona": round(float(mask_cover), 4),
+            "referencias": 0 if masked else len(references),
+        }
         unsupported = router_mod.unsupported_changes(provider, choices)
         # Priced on the object that is about to be sent, and on nothing else.
         price = provider.estimate_cost(request)
@@ -814,6 +1286,12 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         checked["generative"] = _is_generative_provider(provider)
 
         target = out_dir / f"v{index}_a{attempt_no}.jpg"
+        # On the masked path what the engine returns is not the image she gets:
+        # it is the repainted half, which is then put back inside the mask over
+        # her own photograph.  Both files are kept, because the raw answer is
+        # the only evidence of what was actually bought.
+        painted_target = (out_dir / f"v{index}_a{attempt_no}_pintado.jpg"
+                          if masked else target)
 
         # Reserve, do not merely ask.  "Can I afford this?" is only true
         # until the next worker asks the same question about the same last
@@ -858,7 +1336,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         settled = False
         try:
             try:
-                result = provider.generate(request, target)
+                result = provider.generate(request, painted_target)
             except InsufficientBalance as exc:
                 billing.raise_alert(user["id"], "zero_balance", "critical",
                                     "Sin saldo en %s" % provider.name, str(exc),
@@ -898,6 +1376,46 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             if not settled:
                 billing.release(hold)
 
+        # THE GUARANTEE, ENFORCED HERE AND NOT ASKED OF THE ENGINE.  fal is
+        # told which pixels it may repaint; this puts her own back everywhere
+        # else, at the full resolution of her photograph, and counts the pixels
+        # outside the mask that differ before writing anything.  Measured on
+        # her IMG_7871 against the delivered render: 0 of 5 554 727 protected
+        # pixels differ, and identity_face reads 0.8044 against 0.8177 on the
+        # photograph itself - where the same render judged whole reads 0.7375
+        # and fails the verdict.
+        if masked:
+            batch.detail("Devolviendo tu rostro a la imagen %d" % (index + 1))
+            put = protect_mod.compose(original["path"], result.image_path,
+                                      mask_path, str(target),
+                                      quality=COMPOSE_QUALITY)
+            merged["rostro"] = {**merged.get("rostro", {}),
+                                "fuera_cambiado": put.get("fuera_cambiado"),
+                                # The two numbers that can actually fail, beside
+                                # the one that cannot: 'comprobante' says the
+                                # mask was drawn on THIS photograph (a mask from
+                                # another frame repaints her face while
+                                # fuera_cambiado still reads 0), and
+                                # 'fuera_pintado' says how much of the answer
+                                # fal returned outside the zone it was allowed
+                                # to touch, before that half was discarded.
+                                "comprobante": put.get("comprobante"),
+                                "fuera_pintado": put.get("fuera_pintado"),
+                                "compuesta": bool(put.get("ok")),
+                                "pintado": Path(str(result.image_path)).name}
+            if put.get("ok"):
+                result.image_path = put["image_path"]
+            else:
+                # The image is already bought, so it is judged as it came back
+                # rather than thrown away - but the promise about her face was
+                # not kept, and the run says so instead of implying it was.
+                merged["rostro"]["protegido"] = False
+                note = ("No se pudo devolver tu rostro a la imagen %d (%s): se "
+                        "revisa la imagen tal como llego."
+                        % (index + 1, put.get("reason") or "sin motivo"))
+                _plan_note(run_id, note)
+                log.warning(note)
+
         # What was ordered and what arrived, on the attempt row, before
         # anything downstream can resize or repaint the file and make the two
         # agree by accident.
@@ -912,19 +1430,87 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         # measured, so the verdict, the album and the file she downloads are
         # all the same picture.  Only when this engine invents pixels - a
         # compositor cannot have removed a texture it never touched.
-        if checked["generative"] and original and original.get("path"):
+        # Everything the robot did to this file, in her language, so the album
+        # can never present a corrected image as one that came out right.
+        corrections: list = []
+        correction_notes: list = []
+        # Never on the masked path: the grain transfer works on every skin
+        # pixel it finds, including the face, and on that path the face is
+        # already her own photograph at full resolution.  Rewriting it would
+        # be repairing her camera's grain with her camera's grain, and it
+        # would break the one promise this path makes about those pixels.
+        if masked:
+            merged["textura"] = {"aplicada": False,
+                                 "motivo": ("no hace falta: tu piel y tu rostro "
+                                            "vienen de tu propia foto")}
+        elif checked["generative"] and original and original.get("path"):
             batch.detail("Devolviendo la textura de la piel")
             # Recorded whether or not it changed anything: "se midio y no
             # hacia falta" is an answer she is entitled to read.
             merged["textura"] = _restore_texture(run_id, result.image_path,
-                                                 original["path"])
+                                                 original["path"], profile)
+            if merged["textura"].get("aplicada"):
+                correction_notes.append(
+                    "Se devolvio la textura real de tu piel desde tu foto %s "
+                    "(x%.2f): el motor la habia suavizado."
+                    % (merged["textura"].get("foto") or "de referencia",
+                       merged["textura"].get("ganancia") or 1.0))
 
         batch.detail("Revisando la imagen %d" % (index + 1))
         verdict = verify_mod.verify_image(result.image_path, profile, checked)
-        defects = verdict.get("repairable_defects") or []
+
+        # The image is bought.  Before anything else is considered - and before
+        # a single further cent can be spent - her own photographs are asked to
+        # correct what failed, for free, and the result is measured again.  Each
+        # correction refuses on its own numbers rather than doing something
+        # cosmetic, so this is either a better file or the same file with a
+        # sentence saying why it was left alone.
+        if not verdict.get("passed"):
+            batch.detail("Corrigiendo sin gastar la imagen %d" % (index + 1))
+            verdict, corrections, notes = _correct_free(
+                run_id, result.image_path, profile, checked, verdict,
+                verdict.get("defects") or [])
+            correction_notes.extend(notes)
+            merged["correcciones"] = corrections
+            if notes:
+                merged["corregida"] = True
+                if masked:
+                    # The free corrections work on the whole file, and on this
+                    # path most of that file is her own photograph: restore_body
+                    # warps the silhouette, restore_face pastes a donor face,
+                    # and either would rewrite pixels this run promised not to
+                    # touch - the very slimming the client complained about,
+                    # done by the robot instead of by the engine.  So the
+                    # promise is imposed again over whatever they produced: what
+                    # they improved INSIDE the repainted zone is kept, what they
+                    # changed outside it goes back to her photograph.
+                    again = protect_mod.compose(
+                        original["path"], result.image_path, mask_path,
+                        str(target), quality=COMPOSE_QUALITY)
+                    if again.get("ok"):
+                        result.image_path = again["image_path"]
+                        verdict = verify_mod.verify_image(result.image_path,
+                                                          profile, checked)
+                        correction_notes.append(
+                            "Las correcciones se aplicaron solo dentro de la "
+                            "zona repintada: fuera de ella la imagen sigue "
+                            "siendo tu foto.")
+                    else:
+                        _plan_note(run_id,
+                                   "No se pudo reimponer tu rostro tras las "
+                                   "correcciones en la imagen %d (%s)."
+                                   % (index + 1, again.get("reason") or ""))
+
+        # Only what the free path does NOT own may be bought as a repaint.  A
+        # hand repainted by the fill endpoint measures 0.000 severity because
+        # the hand has been deleted, and a face that is a different woman is
+        # not a region defect at all; paying 0.050 USD a zone for either was
+        # buying damage.
+        defects = [d for d in (verdict.get("repairable_defects") or [])
+                   if str(d.get("type")) not in FREE_DEFECTS]
 
         if (not verdict.get("passed") and defects
-                and SETTINGS.limits.max_repair_rounds and not batch.aborted()):
+                and max_repair_rounds and not batch.aborted()):
             # A repair is more calls to the provider, so it is held and
             # settled like them.  A refusal here only skips the repair: the
             # image in hand is already paid for and deserves its verdict, and
@@ -1009,15 +1595,35 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                     repair_settled = True
                 if fixed.get("ok"):
                     repaired += 1
-                    verdict = verify_mod.verify_image(fixed.get("image_path")
-                                                      or result.image_path,
-                                                      profile, checked)
                     result.image_path = fixed.get("image_path") or result.image_path
+                    if masked:
+                        # Same reasoning as after the free corrections: a paid
+                        # repaint is aimed at a box, and on this path a box can
+                        # land on her own face or her own hand.  Whatever it
+                        # improved inside the repainted zone is kept; outside
+                        # it, her photograph wins.  Then, and only then, is the
+                        # file judged.
+                        again = protect_mod.compose(
+                            original["path"], result.image_path, mask_path,
+                            str(target), quality=COMPOSE_QUALITY)
+                        if again.get("ok"):
+                            result.image_path = again["image_path"]
+                    verdict = verify_mod.verify_image(result.image_path,
+                                                      profile, checked)
             finally:
                 if not repair_settled:
                     billing.release(repair_gate["hold_id"])
 
         if verdict.get("passed"):
+            # A repaired image is not the same claim as one that came out
+            # right, and the client has to be able to read which one she is
+            # looking at: the sentences travel on the verdict, which the album
+            # and the ficha already show.
+            if correction_notes:
+                verdict = dict(verdict)
+                verdict["correcciones"] = list(correction_notes)
+                verdict["summary"] = (str(verdict.get("summary") or "").strip()
+                                      + " " + " ".join(correction_notes)).strip()
             image_id = _store_image(user, run_id, original, profile, result,
                                     verdict, kind, choices)
             _record_attempt(run_id, user["id"], index, attempt_no, provider.name,
@@ -1026,14 +1632,37 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                             verdict.get("defects") or [], "accepted", "",
                             real_cost, result.latency_ms, image_id)
             return {"accepted": True, "cost": cost, "attempts": attempts,
-                    "repaired": repaired}
+                    "repaired": repaired, "corrected": bool(correction_notes)}
 
         reason = _reject_reason(verdict)
+        # The file STAYS.  Deleting it is the most expensive answer available:
+        # 0.84 USD of the 2.34 USD spent on this installation bought two runs
+        # whose images no longer exist, so what they proved cannot be looked at
+        # again and the same mistake was paid for twice.  Nothing further is
+        # spent on it - it is not put in the album either, because an image that
+        # failed the identity check is not her and must never be handed over as
+        # if it were - but it is kept, and the run says where.
+        merged["archivo_conservado"] = str(result.image_path)
         _record_attempt(run_id, user["id"], index, attempt_no, provider.name,
                         result.model or model, "generate", built["prompt"],
                         negative, merged, verdict, verdict.get("defects") or [],
                         "rejected", reason, real_cost, result.latency_ms)
-        storage.delete_file(result.image_path)
+        _plan_note(run_id,
+                   "La imagen %d no se pudo aprobar (%s) y NO se ha borrado: "
+                   "ya esta pagada y se conserva en %s. No se ha gastado nada "
+                   "mas en ella."
+                   % (index + 1, reason, Path(result.image_path).name))
+
+        # Stop buying answers the engine has already given.  This is the rule
+        # that would have saved 0.27 USD on run_16e276b5, where three paid
+        # attempts on one variant came back at identity 0.3507, 0.3753 and
+        # 0.3643 against a line at 0.45.
+        stop = _repeat_failure(seen_failures, verdict)
+        if stop:
+            _plan_note(run_id, "Variante %d: %s" % (index + 1, stop))
+            return {"accepted": False, "cost": cost, "attempts": attempts,
+                    "repaired": repaired, "stopped_repeating": True,
+                    "reason": stop}
 
         # Adapt before trying again: hold closer to the real photograph and
         # name the observed failure in the negative prompt.
@@ -1099,6 +1728,34 @@ def _local_hints(choices: dict) -> dict:
         if value and value.get("local"):
             extra.update(value["local"])
     return extra
+
+
+def _face_shield(original: dict, choices: dict, out_dir: Path,
+                 index: int) -> tuple[str, str, float]:
+    """The mask that keeps her face out of this generation, or why there isn't one.
+
+    Returns ``(mask_path, sentence, cover)``.  An empty path is not an error:
+    9 of her 24 photographs are closeups from which no torso can be built, and
+    on those there is nothing to repaint around the face, so the image is made
+    whole and the sentence says so.  Everything here is free and local; the
+    money is only committed afterwards.
+    """
+    source = str((original or {}).get("path") or "")
+    if not source:
+        return "", "", 0.0
+    mask_file = out_dir / ("v%d_mask.png" % int(index))
+    try:
+        built = protect_mod.build_mask(source, choices, str(mask_file))
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("No se pudo preparar la mascara de proteccion: %s", exc)
+        return "", ("No se pudo aislar la zona a cambiar, asi que la imagen se "
+                    "hace entera y se comprueba la identidad."), 0.0
+    if not built.get("ok"):
+        return "", ("Tu rostro se volvera a generar: %s. Se comprobara la "
+                    "identidad antes de ensenarte la imagen."
+                    % (built.get("reason") or "no se pudo aislar la zona")), 0.0
+    return str(built["mask_path"]), str(built.get("reason") or ""), \
+        float(built.get("cover") or 0.0)
 
 
 def _defect_label(defects: list[dict]) -> str:
@@ -1200,9 +1857,13 @@ def run_final(user: dict, run_id: str) -> dict:
     style = styles_mod.get_style(opts.get("style")) or styles_mod.default_style(
         analysis.get("shot_type") or "unknown")
     brief = dict(opts.get("brief") or {})
+    brief["reference_paths"] = [
+        p for p in ((run.get("plan") or {}).get("reference_paths") or [])
+        if p and Path(p).exists()]
     if original:
         brief["source_path"] = original["path"]
         brief["source_body"] = analysis.get("body") or {}
+        brief["source_skin"] = analysis.get("skin") or {}
 
     out_dir = OUTPUT_DIR / str(user["id"]) / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1285,9 +1946,30 @@ def build_report(run_id: str) -> dict:
     ganancia = (round(sum(float(t.get("ganancia") or 1.0) for t in restored)
                       / len(restored), 3) if restored else None)
     # Routing warnings written during the run: which requested changes the
-    # chosen engine was unable to make.  She reads them next to the cost.
+    # chosen engine was unable to make, which photographs were sent as
+    # references, what was corrected for free and which paid files were kept
+    # instead of being deleted.  She reads them next to the cost.
     avisos = [n for n in ((run.get("plan") or {}).get("notes") or [])
               if isinstance(n, str)]
+    # What the robot fixed by itself, per image, in her own language.  It rides
+    # on params_json like the texture record, so no migration is needed.
+    corregidas = []
+    for attempt in attempts:
+        applied = [c for c in ((attempt.get("params") or {}).get("correcciones")
+                               or []) if c.get("aplicada")]
+        refused = [c for c in ((attempt.get("params") or {}).get("correcciones")
+                               or []) if not c.get("aplicada")]
+        if applied or refused:
+            corregidas.append({
+                "variante": attempt["variant_index"],
+                "intento": attempt["attempt_no"],
+                "aplicadas": [c.get("que") for c in applied],
+                "no_aplicadas": [{"que": c.get("que"), "motivo": c.get("motivo")}
+                                 for c in refused],
+            })
+    conservadas = [(a.get("params") or {}).get("archivo_conservado")
+                   for a in attempts]
+    conservadas = [c for c in conservadas if c]
 
     return {
         "ok": True,
@@ -1308,6 +1990,8 @@ def build_report(run_id: str) -> dict:
         "avisos": avisos,
         "textura_restaurada": len(restored),
         "textura_ganancia": ganancia,
+        "correcciones": corregidas,
+        "archivos_conservados": conservadas,
         "defectos_detectados": detected,
         "motivos_descarte": [
             {"variante": a["variant_index"], "intento": a["attempt_no"],

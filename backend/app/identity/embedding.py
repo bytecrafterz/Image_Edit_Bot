@@ -111,6 +111,22 @@ _NOSE_TIP = 1
 _MOUTH_R, _MOUTH_L = 61, 291
 
 _LOCK = threading.Lock()
+# The two nets are ONE object each for the whole process, and they are
+# stateful: YuNet is told the size of the picture with ``setInputSize`` and
+# only then asked to detect, and SFace aligns a crop inside itself before it
+# measures it.  Nothing serialised those two-step sequences, and the run makes
+# up to ``max_parallel_generations`` images at a time (3 on this installation),
+# so one variant's ``setInputSize`` landed between another's and its
+# ``detect``.  Measured on 2026-09-04 with three threads over three files: the
+# same frame that reads 0.7173 three times in a row on its own came back at
+# 0.0106 and 0.1407 in parallel, and a second frame that reads 0.5279 alone
+# read 0.1022 twice.  That is not a face check being strict, it is a face check
+# measuring the wrong pixels - and every one of those readings would have
+# rejected an image of her that she had already paid for, at 0.040 USD a
+# regeneration.  One lock around the inference costs about 0.3 s per image on a
+# three-way run and makes the number reproducible, which is the whole claim of
+# this module.
+_INFER = threading.RLock()
 _RECOGNIZER = None
 _DETECTOR = None
 _FAILED = ""
@@ -174,7 +190,8 @@ def _unit(vec) -> list[float] | None:
 
 def _feature(rec, image: np.ndarray, row: np.ndarray) -> list[float] | None:
     try:
-        return _unit(rec.feature(rec.alignCrop(image, row))[0])
+        with _INFER:
+            return _unit(rec.feature(rec.alignCrop(image, row))[0])
     except Exception:
         return None
 
@@ -185,8 +202,12 @@ def _best_rotation(det, image: np.ndarray):
     for _deg, code in _ROTATIONS:
         view = image if code is None else cv2.rotate(image, code)
         try:
-            det.setInputSize((int(view.shape[1]), int(view.shape[0])))
-            _n, faces = det.detect(view)
+            # setInputSize and detect are one indivisible operation: they are
+            # two calls into one stateful net, and interleaving them across
+            # threads makes the detector read a frame at another frame's size.
+            with _INFER:
+                det.setInputSize((int(view.shape[1]), int(view.shape[0])))
+                _n, faces = det.detect(view)
         except Exception:
             continue
         if faces is None or len(faces) == 0:

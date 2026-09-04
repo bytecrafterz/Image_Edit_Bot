@@ -6,6 +6,8 @@
 
 import { api } from '../api.js';
 import { store } from '../store.js';
+import { router } from '../router.js';
+import { progressCard, explainCard, reportCard } from '../onboarding.js';
 import {
   el, clear, frag, note, toast, sheet, spinner, progressBar, empty,
   money, moneyExact, lazyImg, confirmSheet, kv, pct, dragScroll,
@@ -30,6 +32,7 @@ function reset() {
     quality: store.restore('quality', 'preview'),
     plan: null,
     run: null,
+    onboarding: null,
     selected: new Set(),
   };
 }
@@ -60,6 +63,23 @@ async function renderStep1(view) {
 
   const fileInput = el('input', { type: 'file', accept: 'image/*', multiple: true,
     hidden: true, onChange: (e) => uploadFiles(view, e.target.files) });
+
+  // Below the minimum this screen stops being a chooser and becomes the ask.
+  // The server refuses the estimate anyway; refusing here as well means she
+  // never picks an outfit only to be told afterwards that she cannot generate.
+  if (state.onboarding && !state.onboarding.puede_generar) {
+    view.appendChild(progressCard(state.onboarding, {
+      action: el('div', { class: 'btn-row' }, [
+        el('button', { class: 'btn', type: 'button',
+          onClick: () => fileInput.click() }, 'Anadir fotos ahora'),
+        el('button', { class: 'btn btn--secondary', type: 'button',
+          onClick: () => router.go('#/originals') }, 'Ir a Mis fotos'),
+      ]),
+    }));
+    view.appendChild(fileInput);
+    view.appendChild(explainCard(state.onboarding, { open: true }));
+    return;
+  }
 
   view.appendChild(el('div', { class: 'card' }, [
     el('button', { class: 'btn', type: 'button',
@@ -147,6 +167,7 @@ async function uploadFiles(view, files) {
 async function loadOriginals() {
   const data = await api.get('/api/originals');
   state.originals = data.originals || [];
+  state.onboarding = data.onboarding || null;
 }
 
 async function chooseOriginal(view, original) {
@@ -331,15 +352,27 @@ async function goStep3(view) {
   state.step = 3;
   clear(view);
   view.appendChild(stepHeader(view));
-  view.appendChild(spinner('Preparando y calculando el coste...'));
+  const first = !(state.onboarding || {}).analisis_hecho;
+  view.appendChild(spinner(first
+    ? 'Mirando tus fotos a fondo y calculando el coste. La primera vez tarda '
+      + 'un poco: solo se hace una vez.'
+    : 'Preparando y calculando el coste...'));
   try {
+    // The FIRST estimate for a person runs the thorough reading of her
+    // photographs inside this request - build the profile, choose the
+    // reference trio, read her hands - which measured 18.5 s on five
+    // photographs and grows with the gallery.  api.js aborts an ordinary call
+    // at 20 s, so without a longer budget here the very first estimate any new
+    // account ever asks for would fail with "la conexion tarda demasiado" on a
+    // request that was working perfectly.  Later estimates read the stored
+    // report and come back in under a second.
     const plan = await api.post('/api/generate/analyze', {
       original_id: state.original.id,
       style: state.style ? state.style.key : null,
       options: state.choices,
       n_previews: state.nPreviews,
       quality: state.quality,
-    });
+    }, { timeout: 300000 });
     state.plan = plan;
     renderStep3(view);
   } catch (err) {
@@ -356,6 +389,11 @@ function renderStep3(view) {
   view.appendChild(stepHeader(view));
 
   const plan = state.plan;
+  // What was measured on HER photographs, above the price and before the
+  // button: the first estimate for a person runs the thorough analysis and
+  // this is where its verdict is read.
+  const first = reportCard(plan.analisis_inicial);
+  if (first) view.appendChild(first);
   const est = plan.estimate || {};
   const summary = plan.plan_summary || {};
   const balances = store.get('balances') || {};

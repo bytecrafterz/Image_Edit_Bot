@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from .. import db, security
 from ..analysis import loader
 from ..config import SETTINGS
+from ..identity import onboarding as onboarding_mod
 from ..safety import guard as guard_mod
 from ..services import storage
 
@@ -122,7 +123,8 @@ def list_originals(profile_id: str | None = None,
         key = row.get("shot_type") or "unknown"
         counts[key if key in counts else "unknown"] += 1
     return {"originals": [_decorate(r) for r in rows], "total": len(rows),
-            "by_shot_type": counts}
+            "by_shot_type": counts,
+            "onboarding": onboarding_mod.readiness(user["id"], profile_id or "")}
 
 
 @router.post("")
@@ -159,8 +161,12 @@ async def upload(request: Request, files: list[UploadFile] = File(...),
                             "reason": "no se pudo leer la imagen"})
 
     db.audit("originals.upload", user["id"], n=len(stored), skipped=len(skipped))
+    # The count that decides whether she may generate travels back with every
+    # upload, so the screen can say "te faltan dos" without a second request
+    # and without the browser having to know the rule.
     return {"originals": stored, "skipped": skipped,
-            "added": sum(1 for s in stored if not s.get("duplicate"))}
+            "added": sum(1 for s in stored if not s.get("duplicate")),
+            "onboarding": onboarding_mod.readiness(user["id"], profile_id or "")}
 
 
 @router.get("/{original_id}/analysis")
@@ -195,16 +201,31 @@ def patch(original_id: str, body: PatchBody,
                 (original_id, user["id"]))
     if not row:
         raise HTTPException(404, "Esa foto no existe.")
+    # The row being edited is hers; the profile it is being hung on has to be
+    # hers too.  Without this check the field was a free cross-account write:
+    # in the isolation audit account A patched its OWN photograph to account
+    # B's profile_id and got 200, after which B's profile reported one more
+    # source photograph than B had ever uploaded.  Nothing leaked - every
+    # reader of originals also filters by user_id - but a foreign key pointing
+    # across two people is exactly the state a later, less careful query turns
+    # into a leak.  An empty string detaches the photograph from every profile.
+    if body.profile_id:
+        owns = db.q1("SELECT id FROM profiles WHERE id=? AND user_id=? "
+                     "AND deleted_at IS NULL", (body.profile_id, user["id"]))
+        if not owns:
+            raise HTTPException(404, "Ese perfil no existe.")
     fields, params = [], []
     for key in ("sort_order", "profile_id", "tags"):
         value = getattr(body, key)
         if value is not None:
             fields.append(f"{key}=?")
-            params.append(value)
+            params.append(value or None if key == "profile_id" else value)
     if not fields:
         raise HTTPException(400, "Nada que cambiar.")
     params.append(original_id)
-    db.execute(f"UPDATE originals SET {', '.join(fields)} WHERE id=?", params)
+    params.append(user["id"])
+    db.execute(f"UPDATE originals SET {', '.join(fields)} "
+               f"WHERE id=? AND user_id=?", params)
     return _decorate(db.row_to_dict(db.q1(
         "SELECT * FROM originals WHERE id=?", (original_id,))))
 

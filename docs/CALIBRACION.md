@@ -82,6 +82,12 @@ la **media de los embeddings de sus fotos**, guardada en el perfil.
 | - de ellas, las 2 de pago que ella rechazó | 0.1829 y 0.2862 | **rechazadas** |
 | 32 imágenes generadas cuya cara sí es la suya | 0.5279 - 0.7925 | aceptadas |
 
+Repetido el **2026-09-04** sobre lo que hay en disco hoy, con la comprobación
+que decide (`_check_identity_face`, no una métrica escrita para el informe): sus
+24 fotografías 0.6908 - 0.8737, las 2 no vistas 0.7624 y 0.8222, las 8 mujeres
+distintas 0.0201 - 0.1925, y las 4 imágenes de pago que quedan en disco y no son
+ella 0.2920 - 0.3968. **38 de 38 correctas.** El hueco sigue donde estaba.
+
 **Separación medida: +0.2461.** Entre la mejor cara ajena (0.3968) y su peor
 fotografía propia (0.6429) no hay ninguna imagen. El límite **0.45** se pone
 dentro de esa franja vacía: queda 0.056 por encima de la peor impostora y 0.19
@@ -141,14 +147,40 @@ contraluz, recortadas y comprimidas a JPEG de calidad 20 **pasan las 24**.
 
 ## Resultado medido (24 fotos reales, septiembre 2026)
 
-| adelgazamiento | detección neta | falsas alarmas |
-|---|---|---|
-| 6 %  | 83 % (5 de 6) | **0 %** |
-| 12 % | 100 % (6 de 6) | **0 %** |
-| 18 % | 83 % (5 de 6) | **0 %** |
+Barrido sobre las **24 fotos**, cada una sometida a cuatro cambios que **no**
+tocan su cuerpo (reguardar, releer a 1024 px, reencuadrar al 62 % del alto, y
+ensanchar un 6 % como hace la ropa) y tres que sí (estrecharla un 6, 12 y 18 %).
+168 verificaciones, con el mismo camino que usa la aplicacion: cada resultado
+comparado contra su propia foto de origen.
 
-Y lo más importante: **el 100% de esas detecciones las dispara la comprobación de
-proporciones corporales**, no otra por casualidad. El control acierta por el
+| cambio | verdad | rechazos | fotos que la regla pudo juzgar |
+|---|---|---|---|
+| reguardada | sin tocar | **0 de 24** | 7 |
+| releída a 1024 px | sin tocar | **0 de 24** | 7 |
+| reencuadre al 62 % | sin tocar | **0 de 24** | 4 |
+| ropa que ensancha un 6 % | sin tocar | **0 de 24** | 7 |
+| estrechada un 6 % | −6 % | 0 de 24 | 7 |
+| estrechada un 12 % | −12 % | **7 de 7 juzgables** | 7 |
+| estrechada un 18 % | −18 % | **7 de 7 juzgables** | 7 |
+
+Dos lecturas, y las dos importan:
+
+* **Ninguna foto suya se rechaza jamás**, ni reencuadrada ni con ropa nueva.
+  Ese era el encargo: una diferencia pequeña no puede costarle una imagen
+  pagada.
+* **El adelgazamiento del 12 % — el que ella denunció — se caza siempre que hay
+  cuerpo que medir**, y se caza también bajo un reencuadre (4 de 4).
+* El del 6 % **no se caza, a propósito**: un adelgazamiento del 6 % se lee
+  entre 4,5 % y 7,5 % y un 6 % de tela añadida se lee entre 4,1 % y 6,7 %. Las
+  dos lecturas se solapan, así que a ese tamaño **ningún límite** distingue un
+  cuerpo estrechado de un jersey. Se mide, se escribe en el veredicto en
+  castellano y no se le cobra.
+* De las 24 fotos, la regla solo puede juzgar 7: el resto son primeros planos
+  con menos de dos cabezas de cuerpo bajo la barbilla, o medios cuerpos que
+  salen del cuadro por los lados. Ahí no se inventa un número: se informa.
+
+Y lo más importante: **el 100 % de esas detecciones las dispara la comprobación
+de proporciones corporales**, no otra por casualidad. El control acierta por el
 motivo correcto.
 
 ### De dónde viene ese resultado
@@ -160,7 +192,8 @@ decisiones del código:
 |---|---|---|
 | Primera versión | 60 % | 0 % (la comprobación de proporciones no llegaba a dispararse nunca) |
 | Con la comparación contra la foto de origen | 0 % | 60 % |
-| Versión actual (regla de la cabeza) | 0 % | 83 % / 100 % / 83 % |
+| Tres reglas a la vez | 0 % contra sí misma; sobre copias reencuadradas o reguardadas, **21 %** la regla del esqueleto (8 de 38) y **6 %** la de la silueta sobre el torso (2 de 31) | 83 % / 100 % / 83 % |
+| Versión actual (solo la regla de la cabeza) | **0 %** en 96 pruebas | 0 % / 100 % / 100 % de lo juzgable |
 
 Cinco correcciones, todas motivadas por una medición:
 
@@ -189,6 +222,22 @@ Cinco correcciones, todas motivadas por una medición:
    mismo con la piel suavizada: todos los móviles modernos suavizan la piel, así
    que eso se informa pero no rechaza por sí solo.
 
+   **Y hasta dónde llega eso, medido el 2026-09-04 sobre sus 24 fotografías más
+   todas las generadas en disco.** De las 38 manos detectadas, 12 salen cortadas
+   por el borde del cuadro y las 26 restantes están **todas** por debajo de
+   `HAND_MIN_PX` = 170: la mayor mide 157 px y la mediana 68. A ese tamaño no hay
+   ninguna regla que separe una mano suya de una generada rota. Por geometría, su
+   propia IMG_7880 mide una palma 17.42 de largo por ancho — 7.9 veces fuera del
+   límite 2.20 — mientras que una mano generada que a simple vista está derretida
+   mide 3.99; y por energía de borde contra el antebrazo, sus fotos dan 0.75 -
+   3.00 y las generadas 0.50 - 3.00, solapadas por completo. Conclusión: **la
+   comprobación de anatomía no puede juzgar una mano en estas imágenes, y desde
+   hoy lo dice.** El veredicto y el resumen del álbum escriben "No se ha podido
+   comprobar 2 manos: tu mano izquierda, sale del encuadre y tu mano derecha,
+   demasiado pequeña para medirla (75 px, harían falta 170)". No rechaza nada
+   — bajar el umbral hasta que fallen rechazaría antes sus propias fotos — pero
+   deja de decir "sin anomalías" sobre una parte que nadie ha mirado.
+
 4. **Comparación contra la foto de origen, no contra una media.** Es el cambio
    que más aporta. Comparar una imagen generada contra una banda de población
    arrastra todo el ruido de encuadre, distancia y giro. Pero el robot **siempre
@@ -203,10 +252,34 @@ Cinco correcciones, todas motivadas por una medición:
    tamaño en el cuadro. La figura se mide también en alturas contadas desde la
    barbilla en unidades de **la longitud de su cabeza** (`head_profile`, hasta 29
    alturas), medida sobre un recorte de tamaño fijo y promediada con su espejo
-   para que no prefiera un lado. Medido: 0,4 % de variación al cambiar la
-   resolución, 0,4 % al recortar al 62 % del cuadro y 2,4 % en el peor espejo,
-   frente al 8 % que se lee cuando alguien la estrecha un 8 %. Es lo que permite
-   juzgar un reencuadre, donde antes no había control ninguno.
+   para que no prefiera un lado. Es lo que permite juzgar un reencuadre, donde
+   antes no había control ninguno.
+
+6. **Y una sola regla decide.** Las tres se contradecían sobre la misma imagen
+   pagada, así que se midieron contra una verdad que se puede construir en vez
+   de discutir: sus 24 fotos reguardadas, releídas más pequeñas, recortadas al
+   62 % del alto, ensanchadas un 6 % (la única dirección en la que la ropa
+   puede mover una silueta) y estrechadas un 6, 12 y 18 % conocidos. 112
+   parejas medidas. Lo que leyó cada regla, en porcentaje de diferencia:
+
+   | regla | sin tocar | reencuadrada | +6 % de tela | −6 % | −12 % | −18 % |
+   |---|---|---|---|---|---|---|
+   | esqueleto (anchos ÷ largo del torso) | 0,7–14,4 | 13,5 | 1,5–15,3 | 2,6–19,8 | 2,7–13,4 | 3,1–25,7 |
+   | silueta sobre el torso | 0,0–2,6 | 14,2–16,9 | 0,4–7,5 | 2,8–7,8 | 3,1–12,5 | 3,3–19,9 |
+   | **figura en cabezas** | **0,0–1,2** | **0,3–1,6** | 4,1–6,7 | 4,5–7,5 | **11,4–13,5** | **17,2–19,0** |
+
+   Las dos primeras no miden el cuerpo. El esqueleto marcó **14,4 % en una foto
+   que solo se había vuelto a guardar** y **2,7 % en otra estrechada un 12 %**:
+   no existe ningún límite con el que baje del 10 % de falsas alarmas y llegue
+   al 80 % de detección. La silueta sobre el torso mide el recorte (14–17 % en
+   una foto que nadie tocó) y se le escapó por completo un adelgazamiento real
+   del 12 % bajo ese recorte (0,4 %). La regla de la cabeza lee la verdad.
+
+   Así que **la cabeza es la que rechaza, y las otras dos solo informan**. No se
+   promedian: una regla que mide el encuadre y otra que mide el cuerpo no
+   discrepan sobre su figura, discrepan sobre qué están midiendo, y la media de
+   las dos es un número sobre nada. Las dos cifras degradadas siguen apareciendo
+   en el veredicto, en castellano, con la frase que explica por qué no deciden.
 
 ---
 
@@ -216,9 +289,16 @@ De las 24 fotos actuales, **solo una muestra los tobillos**. La mayoría son de
 medio cuerpo o primer plano.
 
 Consecuencia concreta: el control de proporciones **solo puede actuar sobre las
-fotos en las que se ven los hombros y las caderas a la vez**. En un primer plano
-no hay torso que medir, no hay proporciones que comparar, y el sistema lo dice en
-vez de inventarse un número.
+fotos con al menos dos cabezas de cuerpo por debajo de la barbilla y que no se
+salgan del cuadro por los lados**. Son 7 de las 24. En un primer plano no hay
+figura que medir, no hay proporciones que comparar, y el sistema lo dice en vez
+de inventarse un número.
+
+Medido foto a foto: de las 17 que no se pueden juzgar, **16 tienen entre 0,9 y
+2,2 cabezas de cuerpo** por debajo de la barbilla, y en 7 de esas las pocas
+filas que quedan tocan además el borde lateral del cuadro — una fila que llega
+al borde no da un ancho, da un mínimo, y un adelgazamiento no puede mover un
+extremo que ya está fuera de la foto. La número 17 no devuelve malla facial.
 
 Esto es exactamente lo que ya se le pidió a la clienta: **6 a 8 fotos de cuerpo
 entero**, de la cabeza a los pies. No es un trámite. Es la diferencia entre un
@@ -234,9 +314,16 @@ detección suba bastante, porque la limitación actual es de datos, no de métod
 ```
 Falsas alarmas (fotos reales rechazadas):   0.0%  (0 de 6)
 Base para la deteccion neta: 6 fotos aceptadas sin tocar
-Deteccion NETA del adelgazamiento del 12%: 100.0%  (6 de 6)   [OK]
-   de las cuales por proporciones corporales: 6
+Deteccion NETA del adelgazamiento del 12%:  50.0%  (3 de 6)   [DEBIL]
+   de las cuales por proporciones corporales: 3
 ```
+
+Ese 50 % es **cobertura, no puntería**: de las seis fotos de prueba, tres son
+primeros planos sin cuerpo bajo la barbilla y la regla se abstiene en vez de
+inventarse un número. En las tres que sí puede medir, acierta las tres. El
+barrido sobre las 24 fotos de más arriba lo separa: 7 de 7 juzgables cazadas al
+12 %, 0 falsas alarmas en 96 pruebas. Si esta cifra sube, será porque llegaron
+fotos de cuerpo entero, no porque el control haya mejorado.
 
 * Si **falsas alarmas** sube, el sistema tirará fotos buenas y cada una cuesta
   dinero regenerarla. Es el número que hay que vigilar primero.
@@ -252,11 +339,15 @@ Umbrales relevantes, todos en un sitio:
 | `face_embed_min` | `identity/profile.py` | 0.45 | parecido facial mínimo: coseno del embedding SFace contra la media de sus fotos |
 | `MESH_TRUSTED_CONF` | `identity/embedding.py` | 0.90 | confianza por debajo de la cual el recorte de la malla pide una segunda opinión |
 | `RESCUE_MARGIN` | `identity/embedding.py` | 0.10 | cuánto más segura tiene que ser esa segunda opinión para ganar |
-| `PAIRED_TOL` | `identity/verify.py` | 0.08 | cambio máximo de forma frente a la foto de origen |
-| `HEAD_TOL` | `identity/verify.py` | 0.04 | lo mismo, con la regla que no depende del encuadre (en cabezas) |
+| `PAIRED_TOL` | `identity/verify.py` | 0.08 | reglas sobre el torso: a partir de aquí la diferencia se **informa**. Ya no rechaza nada |
+| `HEAD_TOL` | `identity/verify.py` | 0.08 | **la única que rechaza**: cambio de figura medido en cabezas. 0 falsas alarmas en 25 pruebas honestas (peor lectura 6,7 %), caza el 12 % siempre (11,4 % la lectura más floja) |
+| `HEAD_TOL_MAX` | `identity/verify.py` | 0.10 | tope al que puede ensancharse ese límite por ruido de medición; más allá perdonaría el 12 % que existe para cazar |
 | `SMOOTH_TEXTURE_LOSS_MAX` | `identity/verify.py` | 0.14 | grano de piel perdido a partir del cual se rechaza |
 | `SMOOTH_TEXTURE_LOSS_MIN` | `identity/verify.py` | 0.09 | grano de piel perdido a partir del cual se informa |
 | `BAND_MAX_REL` | `identity/profile.py` | 0.12 | anchura máxima de una banda de población |
 | `GATE_MIN_SAMPLES` | `identity/profile.py` | 3 | fotos necesarias antes de que una medida pueda rechazar |
 | `ANATOMY_SEVERITY_MAX` | `identity/verify.py` | 0.6 | gravedad a partir de la cual un defecto rechaza |
-| `HAND_MIN_PX` | `analysis/anomaly.py` | 170 | tamaño de mano por debajo del cual la geometría no es fiable |
+| `HAND_MIN_PX` | `analysis/anomaly.py` | 170 | tamaño de mano por debajo del cual la geometría no es fiable; por debajo, la mano se declara **no comprobada** y se nombra en el veredicto |
+| `RISK_MIN_N` / `RISK_MAX_RATE` | `generation/router.py` | 3 / 0.50 | cuándo una opción del catálogo se avisa como arriesgada, contada sobre sus propias imágenes pagadas |
+| `SAFE_MIN_N` / `SAFE_MIN_RATE` | `generation/router.py` | 4 / 0.85 | cuándo se dice que una opción sí ha funcionado |
+| `SEED_UNTIL` | `generation/router.py` | 1788514580.1 | hasta aquí llega la tabla medida a mano; lo pagado después se cuenta solo desde la base de datos |

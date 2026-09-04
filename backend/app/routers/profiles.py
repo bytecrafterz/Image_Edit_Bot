@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import db, security
+from ..identity import onboarding as onboarding_mod
 from ..identity import profile as profile_mod
 from ..safety import consent as consent_mod
 from ..services import jobs, storage
@@ -43,6 +44,10 @@ class ForgetBody(BaseModel):
     confirm: bool = False
 
 
+class FirstRunBody(BaseModel):
+    force: bool = False
+
+
 def _own(profile_id: str, user: dict) -> dict:
     row = db.row_to_dict(db.q1(
         "SELECT * FROM profiles WHERE id=? AND user_id=? AND deleted_at IS NULL",
@@ -54,11 +59,16 @@ def _own(profile_id: str, user: dict) -> dict:
 
 def _decorate(row: dict) -> dict:
     row = dict(row)
+    # Scoped to the profile's own owner: this count is what the screen shows as
+    # "fotos usadas", and an unscoped COUNT(*) would include a photograph some
+    # other account had hung on this profile_id.
     counts = db.q1("SELECT COUNT(*) AS n FROM originals WHERE profile_id=? "
-                   "AND deleted_at IS NULL", (row["id"],))
+                   "AND user_id=? AND deleted_at IS NULL",
+                   (row["id"], row.get("user_id")))
     row["n_originals"] = int(counts["n"] or 0) if counts else 0
     row["consent_ok"] = consent_mod.has_valid_consent(row["id"])
     row["consent_problem"] = consent_mod.consent_problem(row["id"])
+    row["onboarding"] = onboarding_mod.readiness(row["user_id"], row["id"])
     return row
 
 
@@ -93,18 +103,67 @@ def create(body: CreateBody,
                                           (profile_id,))))
 
 
-def _store_profile(profile_id: str, built: dict) -> None:
-    coverage = built.get("coverage") or {}
-    status = "ready" if coverage.get("ready_for_body_check") else "draft"
+@router.get("/onboarding")
+def onboarding(user: dict = Depends(security.active_user)) -> dict:
+    """How many real photographs this account still owes, and why.
+
+    Deliberately usable before any profile exists: it is what the screen after
+    registration reads, and a person with zero photographs has to be told the
+    rule and the reason, not shown an empty page.
+    """
+    return onboarding_mod.readiness(user["id"])
+
+
+@router.get("/{profile_id}/first-run")
+def get_first_run(profile_id: str,
+                  user: dict = Depends(security.active_user)) -> dict:
+    _own(profile_id, user)
+    report = onboarding_mod.stored_report(profile_id, user["id"])
+    return {"hecho": bool(report), "informe": report or None,
+            "onboarding": onboarding_mod.readiness(user["id"], profile_id)}
+
+
+@router.post("/{profile_id}/first-run")
+def run_first_run(profile_id: str, body: FirstRunBody,
+                  user: dict = Depends(security.active_user)) -> dict:
+    """The thorough reading of her photographs, before she spends anything.
+
+    Same shape as /build: inline while it is quick, a background job with a
+    run_id to poll once there are enough photographs for it to take a while.
+    The heavy half IS /build's work - build_profile over every photograph - so
+    the two share a cost rather than paying it twice.
+    """
+    _own(profile_id, user)
+    state = onboarding_mod.readiness(user["id"], profile_id)
+    if not state["puede_generar"]:
+        raise HTTPException(400, onboarding_mod.blocking_reason(user["id"],
+                                                                profile_id))
+    if state["fotos"] <= INLINE_LIMIT:
+        try:
+            report = onboarding_mod.build_first_run(user, profile_id, body.force)
+        except PermissionError as exc:
+            raise HTTPException(400, str(exc))
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+        return {"ok": True, "async": False, "informe": report,
+                "onboarding": state}
+
+    run_id = db.new_id("run")
     db.execute(
-        "UPDATE profiles SET n_sources=?, coverage_json=?, face_json=?, "
-        "body_json=?, skin_json=?, hair_json=?, marks_json=?, thresholds_json=?, "
-        "status=?, updated_at=? WHERE id=?",
-        (int(built.get("n_sources") or 0), db.dumps(coverage),
-         db.dumps(built.get("face") or {}), db.dumps(built.get("body") or {}),
-         db.dumps(built.get("skin") or {}), db.dumps(built.get("hair") or {}),
-         db.dumps(built.get("marks") or []),
-         db.dumps(built.get("thresholds") or {}), status, db.now(), profile_id))
+        "INSERT INTO runs(id,user_id,profile_id,mode,status,n_requested,"
+        "created_at,stage) VALUES(?,?,?,'profile','queued',?,?,?)",
+        (run_id, user["id"], profile_id, state["fotos"], db.now(),
+         "Analizando %d fotos" % state["fotos"]))
+
+    def work() -> dict:
+        onboarding_mod.build_first_run(user, profile_id, body.force)
+        db.execute("UPDATE runs SET status='done', progress=1.0, finished_at=?, "
+                   "stage='Analisis terminado' WHERE id=?", (db.now(), run_id))
+        return {"ok": True}
+
+    jobs.submit(run_id, work)
+    return {"ok": True, "async": True, "run_id": run_id, "onboarding": state,
+            "message": "Estamos mirando tus fotos con detalle, tardara un momento."}
 
 
 @router.post("/{profile_id}/build")
@@ -131,7 +190,7 @@ def build(profile_id: str, body: BuildBody,
 
     if len(paths) <= INLINE_LIMIT:
         built = profile_mod.build_profile(paths, name)
-        _store_profile(profile_id, built)
+        onboarding_mod.store_profile(profile_id, built)
         db.execute("UPDATE originals SET profile_id=? WHERE user_id=? "
                    "AND profile_id IS NULL", (profile_id, user["id"]))
         return {"ok": True, "async": False,
@@ -147,7 +206,7 @@ def build(profile_id: str, body: BuildBody,
 
     def work() -> dict:
         built = profile_mod.build_profile(paths, name)
-        _store_profile(profile_id, built)
+        onboarding_mod.store_profile(profile_id, built)
         db.execute("UPDATE originals SET profile_id=? WHERE user_id=? "
                    "AND profile_id IS NULL", (profile_id, user["id"]))
         db.execute("UPDATE runs SET status='done', progress=1.0, finished_at=?, "

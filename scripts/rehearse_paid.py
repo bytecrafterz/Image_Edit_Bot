@@ -137,6 +137,17 @@ def install_spies() -> None:
                 "entregado": "%sx%s" % (meta.get("width"), meta.get("height")),
                 "aspect_dado": meta.get("delivered_aspect", "-"),
                 "coste": float(result.cost_usd or 0.0),
+                # Whether her face was shielded on this very call, read off the
+                # payload the provider really built: 'mascara' is set when a
+                # mask_url went out, 'refs' counts the reference photographs.
+                # The two are mutually exclusive by design - fal's fill
+                # endpoint takes no references - so this one row says which of
+                # the two paths bought this image.
+                "mascara": bool(meta.get("masked")),
+                "refs": int(meta.get("n_references") or 0),
+                # The fingerprints of the pictures that really went out, so
+                # "three photographs of her" is checked and not believed.
+                "huellas": list(meta.get("image_digests") or []),
                 "archivo": meta.get("replay_file", "-"),
                 "ensayo": bool(meta.get("replay")),
                 "salida": Path(str(out_path)).name,
@@ -251,8 +262,26 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", default=str(ROOT / "input" / "Nayane"),
                     help="carpeta con sus fotos de referencia")
-    ap.add_argument("--photos", type=int, default=3,
-                    help="cuantas fotos se importan (por defecto 3)")
+    # Was 3.  A new account may not generate below identity/onboarding.py's
+    # measured minimum, so a rehearsal that imported three photographs would be
+    # refused at the estimate - correctly, and without ever reaching the part
+    # of the paid path it exists to rehearse.  The default follows the constant
+    # rather than repeating it, so raising the minimum never leaves this script
+    # quietly broken.
+    # Was 3.  A new account may not generate below the measured onboarding
+    # minimum (identity/onboarding.py), so three photographs would be refused
+    # at the estimate without ever reaching the paid path this script exists to
+    # rehearse.  The number is written out rather than imported because
+    # argparse runs BEFORE the block below removes the real API keys from the
+    # environment and points PHOTOROBOT_DATA at a temporary folder: importing
+    # the application here would bind config.DATA_DIR to the client's REAL data
+    # directory and load her real keystore, which is precisely what this script
+    # promises never to do.  It was tried, and it turned the rehearsal's own
+    # "fal aun NO esta disponible: no hay clave" check red.  The constant is
+    # checked against the code that enforces it once the import is safe.
+    ap.add_argument("--photos", type=int, default=5,
+                    help="cuantas fotos se importan (por defecto 5, el minimo "
+                         "que exige el alta)")
     ap.add_argument("--variants", type=int, default=3,
                     help="cuantas vistas previas se piden (por defecto 3)")
     ap.add_argument("--quality", default="high",
@@ -261,6 +290,11 @@ def main() -> int:
     ap.add_argument("--clothing", default="traje_sastre",
                     help="cambio de ropa: es lo que obliga a usar el motor de "
                          "pago, porque el local no sabe cambiar la ropa")
+    ap.add_argument("--pose", default="",
+                    help="cambio de pose: obliga a rehacer la foto entera, "
+                         "porque mueve a la persona dentro del encuadre y su "
+                         "rostro ya no se puede copiar. Con esto se ensaya el "
+                         "otro camino, el de las tres fotos de referencia")
     ap.add_argument("--recharge", type=float, default=5.0,
                     help="saldo ficticio que se registra antes de empezar")
     ap.add_argument("--replay-dir", default=None,
@@ -279,6 +313,14 @@ def main() -> int:
     for name in ("FAL_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         os.environ.pop(name, None)
     sys.path.insert(0, str(ROOT / "backend"))
+
+    # Safe now: the environment is clean and PHOTOROBOT_DATA points at the
+    # temporary folder, so importing the application cannot reach a real key.
+    from app.identity.onboarding import MIN_PHOTOS
+    if args.photos < MIN_PHOTOS:
+        print("Se importaran %d fotos y no %d: es el minimo que exige el alta."
+              % (MIN_PHOTOS, args.photos))
+        args.photos = MIN_PHOTOS
 
     print("=" * 74)
     print("ENSAYO DEL CAMINO DE PAGO - coste real 0.00 USD")
@@ -323,7 +365,11 @@ def main() -> int:
     client.headers.update({"Authorization": "Bearer %s" % reg.json()["token"]})
 
     wanted = [p for p in photos if any(k in p.name for k in PREFERRED)]
-    chosen = (wanted or photos)[:max(1, args.photos)]
+    # PREFERRED names three photographs and the account now needs five, so the
+    # preferred ones lead and the rest of the folder fills the gap: slicing the
+    # preferred list alone would have imported three and been refused at the
+    # estimate for being under the minimum.
+    chosen = (wanted + [p for p in photos if p not in wanted])[:max(1, args.photos)]
     if not chosen:
         check("hay fotos en %s" % args.dir, False, "carpeta vacia")
         return finish(workdir, args.keep)
@@ -395,12 +441,50 @@ def main() -> int:
     print("     precio por imagen que anuncia Ajustes: %s"
           % json.dumps(settings.get("prices") or {}))
 
+    # The three settings on that screen that decide how much a run may spend
+    # were stored and never read: until 2026-09-04 both the retry loop and the
+    # repair gate went to the global SETTINGS.limits, so "0 reintentos, 0
+    # reparaciones" changed nothing and the run still bought up to three
+    # attempts and two repaint rounds.  They are exercised here through the
+    # same PUT the browser uses, and the ceiling is read back off the real
+    # estimator, because the number on the screen and the money the run may
+    # spend have to be the same number.
+    from app.generation import router as router_mod
+    plan_probe = {"variants": [{"index": i, "choices": {}} for i in range(args.variants)],
+                  "source_path": None, "source_size": None}
+    seen = {}
+    for label, payload in (("de serie", None),
+                           ("autorepair apagado", {"autorepair": False}),
+                           ("0 reintentos y 0 reparaciones",
+                            {"max_retries": 0, "max_repair_rounds": 0})):
+        if payload:
+            client.put("/api/settings", json=payload)
+        lim = router_mod.user_limits(user_id)
+        got = router_mod.estimate_run_cost(plan_probe, args.quality, lim, user_id)
+        seen[label] = (lim, got["total_max_usd"], got["intentos_maximos"])
+        print("     limites '%s': %s -> techo %s USD, %d intento(s) por imagen"
+              % (label, lim, money(got["total_max_usd"]), got["intentos_maximos"]))
+    check("los limites de Ajustes llegan de verdad a la tirada",
+          seen["de serie"][2] == 3
+          and seen["autorepair apagado"][0]["max_repair_rounds"] == 0
+          and seen["0 reintentos y 0 reparaciones"][2] == 1
+          and seen["0 reintentos y 0 reparaciones"][1]
+              < seen["de serie"][1] - 1e-9,
+          "techo %s -> %s -> %s USD"
+          % (money(seen["de serie"][1]),
+             money(seen["autorepair apagado"][1]),
+             money(seen["0 reintentos y 0 reparaciones"][1])))
+    # Put them back so the rest of the rehearsal runs with the shipped defaults.
+    client.put("/api/settings", json={"max_retries": 2, "max_repair_rounds": 2,
+                                      "autorepair": True})
+
     # ---------------------------------------------------------------- 6. plan
     print("\n6. Plan y estimacion (calidad %s, con cambio de ropa)"
           % args.quality)
     plan = client.post("/api/generate/analyze", json={
         "original_id": source["id"], "profile_id": profile_id,
-        "options": {"clothing": [args.clothing]},
+        "options": ({"clothing": [args.clothing], "pose": [args.pose]}
+                    if args.pose else {"clothing": [args.clothing]}),
         "n_previews": args.variants, "quality": args.quality,
         "style": "editorial_moda"})
     if not check("se planifica y se cotiza", plan.status_code == 200,
@@ -447,14 +531,15 @@ def main() -> int:
 
     # ----------------------------------------------------- 8. lo que se envio
     print("\n8. Lo que se envio a fal (y lo que habria costado)")
-    print("     %-9s %-28s %-10s %-6s %-10s %-6s %-8s %s"
+    print("     %-9s %-28s %-10s %-6s %-10s %-6s %-8s %-8s %-5s %s"
           % ("operacion", "endpoint", "pedido", "aspec", "entregado", "dado",
-             "USD", "archivo"))
+             "USD", "mascara", "refs", "archivo"))
     for call in CALLS:
-        print("     %-9s %-28s %-10s %-6s %-10s %-6s %-8s %s"
+        print("     %-9s %-28s %-10s %-6s %-10s %-6s %-8s %-8s %-5d %s"
               % (call["operation"], call["endpoint"], call["pedido"],
                  call["aspect"], call["entregado"], call["aspect_dado"],
-                 money(call["coste"]), call["archivo"]))
+                 money(call["coste"]), "si" if call["mascara"] else "no",
+                 call["refs"], call["archivo"]))
     check("ninguna llamada salio a la red",
           bool(CALLS) and all(c["ensayo"] for c in CALLS),
           "%d llamadas, todas en modo ensayo" % len(CALLS))
@@ -471,6 +556,145 @@ def main() -> int:
           bool(with_aspect) and all(c["aspect_dado"] != "-" for c in with_aspect),
           "%d de %d llamadas llevan las dos formas"
           % (len(with_aspect), len(CALLS)))
+
+    # --------------------------------------------------------- 8b. su rostro
+    # The client's first requirement, checked on the files themselves and not
+    # on what the code says it did.  Three separate questions: did a mask
+    # really leave for fal, are the pixels outside it still hers, and does the
+    # recogniser still find her in the composed image.
+    print("\n8b. Su rostro: que se envio, que volvio y quien es")
+    gen_only = [c for c in CALLS if not c["salida"].startswith("cand_")]
+    masked_calls = [c for c in gen_only if c["mascara"]]
+    check("cada imagen se pidio con mascara o con fotos de referencia, nunca "
+          "sin nada",
+          bool(gen_only) and all(c["mascara"] or c["refs"] >= 2
+                                 for c in gen_only),
+          "%d con mascara, %d con referencias, de %d"
+          % (len(masked_calls), len([c for c in gen_only if c["refs"] >= 2]),
+             len(gen_only)))
+    # The other path: when the change cannot be masked - a pose, an expression,
+    # a light - the face IS generated, and then the only defence is showing the
+    # engine several photographs of her.  Three of them, and three DIFFERENT
+    # ones: the code used to send her source photograph twice, which is not
+    # evidence about anybody, and only the digests can tell the difference.
+    with_refs = [c for c in gen_only if c["huellas"]]
+    if with_refs:
+        for call in with_refs[:3]:
+            print("     %s -> %d imagenes, huellas %s"
+                  % (call["endpoint"], len(call["huellas"]),
+                     ", ".join(call["huellas"])))
+        check("cuando hay que dibujar su rostro se envian 3 fotos suyas "
+              "DISTINTAS",
+              all(len(c["huellas"]) == 3 and len(set(c["huellas"])) == 3
+                  for c in with_refs),
+              "%d llamada(s); minimo de fotos distintas: %d"
+              % (len(with_refs),
+                 min(len(set(c["huellas"])) for c in with_refs)))
+        check("y se cobran por el modelo de varias imagenes (identity_multi)",
+              all("kontext/multi" in c["endpoint"] for c in with_refs),
+              "%s a %s USD" % (sorted({c["endpoint"] for c in with_refs}),
+                               money(with_refs[0]["coste"])))
+    rows = db.rows_to_dicts(db.q(
+        "SELECT variant_index, attempt_no, status, params_json, image_id "
+        "FROM attempts WHERE run_id=? ORDER BY created_at", (run_id,)))
+    # rows_to_dicts already decodes every *_json column and renames it, so the
+    # parameters arrive as row["params"], not as raw text.
+    shields = [(row, (row.get("params") or {}).get("rostro") or {})
+               for row in rows]
+    print("     %-4s %-9s %-9s %-8s %-9s %s"
+          % ("v.a", "estado", "protegido", "zona", "fuera", "motivo"))
+    for row, shield in shields:
+        print("     %-4s %-9s %-9s %-8s %-9s %s"
+              % ("%d.%d" % (row["variant_index"], row["attempt_no"]),
+                 row["status"], "si" if shield.get("protegido") else "no",
+                 "%.1f%%" % (100.0 * float(shield.get("zona") or 0.0)),
+                 str(shield.get("fuera_cambiado")),
+                 (shield.get("motivo") or "")[:52]))
+    protegidas = [s for _, s in shields if s.get("protegido")]
+    if protegidas:
+        check("en cada imagen protegida no cambio NI UN pixel fuera de la "
+              "mascara",
+              all(s.get("fuera_cambiado") == 0 for s in protegidas),
+              "%d de %d imagenes protegidas, fuera de la mascara: %s"
+              % (len(protegidas), len(shields),
+                 sorted({s.get("fuera_cambiado") for s in protegidas})))
+    else:
+        # Nothing to audit, and that is the honest outcome of a request that
+        # cannot be masked: the whole picture is redrawn and the identity check
+        # is the only defence left.  It is checked below all the same.
+        check("cuando el rostro NO se puede proteger, la peticion lo dice "
+              "antes de gastar",
+              all((s.get("motivo") or "").startswith("Tu rostro se va a volver")
+                  for _, s in shields),
+              "%d imagen(es) hechas enteras" % len(shields))
+
+    # And the same thing measured again from outside the code, on the file the
+    # album will hand her: her photograph, the mask that was sent, and the
+    # image that came out, compared pixel by pixel.
+    import numpy as np
+    from app.analysis import loader as loader_mod
+    from app.identity import verify as verify_mod
+
+    accepted = db.rows_to_dicts(db.q(
+        "SELECT i.path, i.width, i.height, o.path AS origen "
+        "FROM images i JOIN originals o ON o.id=i.original_id "
+        "WHERE i.run_id=? AND i.deleted_at IS NULL", (run_id,)))
+    for img in accepted:
+        folder = Path(img["path"]).parent
+        masks = sorted(folder.glob("v*_mask.png"))
+        if not masks:
+            # No mask on disk means this run went down the whole-image path,
+            # which the block above has already reported; the identity check is
+            # still worth printing, so only the pixel audit is skipped.
+            prof_row = db.row_to_dict(db.q1("SELECT * FROM profiles WHERE id=?",
+                                            (profile_id,)))
+            got = verify_mod.verify_image(img["path"], prof_row,
+                                          {"source_path": img["origen"],
+                                           "generative": True})
+            face = next((c for c in got["checks"]
+                         if c["name"] == "identity_face"), {})
+            check("la imagen hecha entera sigue siendo ella",
+                  bool(face.get("passed")),
+                  "identity_face %.4f sobre un limite de %.2f"
+                  % (float(face.get("value") or 0.0),
+                     float(face.get("threshold") or 0.0)))
+            break
+        source = loader_mod.load_image(img["origen"], 0)
+        result = loader_mod.load_image(img["path"], 0)
+        mask = loader_mod.load_image(str(masks[0]), 0)
+        if mask.ndim == 3:
+            mask = mask[:, :, 0]
+        keep = mask == 0
+        delta = np.abs(result[keep].astype(np.int16)
+                       - source[keep].astype(np.int16))
+        same = int(np.count_nonzero(np.any(result[keep] != source[keep], axis=-1)))
+        print("     %s  %dx%d  fuera de la mascara: %d de %d pixeles distintos, "
+              "error medio %.2f/255, maximo %d"
+              % (Path(img["path"]).name, img["width"], img["height"], same,
+                 int(keep.sum()), float(delta.mean()), int(delta.max())))
+        check("la foto que recibe es la suya fuera de la zona repintada",
+              float(delta.mean()) < 1.0,
+              "error medio %.2f/255 sobre %.1f%% de la imagen"
+              % (float(delta.mean()), 100.0 * keep.sum() / keep.size))
+        prof_row = db.row_to_dict(db.q1("SELECT * FROM profiles WHERE id=?",
+                                        (profile_id,)))
+        her = verify_mod.verify_image(img["origen"], prof_row,
+                                      {"generative": False})
+        mine = verify_mod.verify_image(img["path"], prof_row,
+                                       {"source_path": img["origen"],
+                                        "generative": True})
+        def face_of(verdict):
+            got = next((c for c in verdict["checks"]
+                        if c["name"] == "identity_face"), {})
+            return float(got.get("value") or 0.0), float(got.get("threshold") or 0.0)
+        mine_v, limit = face_of(mine)
+        her_v, _ = face_of(her)
+        print("     identidad: tu foto %.4f -> imagen entregada %.4f "
+              "(limite %.2f)" % (her_v, mine_v, limit))
+        check("el reconocedor sigue viendo a la misma persona",
+              mine_v >= limit and mine_v >= her_v - 0.06,
+              "%.4f frente a %.4f en tu propia foto" % (mine_v, her_v))
+        break
 
     # ------------------------------------------------------------- 9. dinero
     print("\n9. Dinero: lo cotizado, lo retenido y lo liquidado")
@@ -498,8 +722,14 @@ def main() -> int:
              len(releases)))
     print("     %-26s %s -> %s" % ("saldo:", money(balance_before),
                                    money(balance_after)))
-    gen_calls = [c for c in CALLS if c["operation"] != "inpaint"]
-    rep_calls = [c for c in CALLS if c["operation"] == "inpaint"]
+    # Split by WHERE the file was written, not by the operation: since the face
+    # shield went in, a generation that protects her face is itself an inpaint
+    # on fal's fill endpoint, and splitting on the verb counted every image of
+    # such a run as a repair - 0 generaciones x 0.0000 against 12 reparaciones.
+    # The destination still says which is which: a generation lands on the
+    # variant's own file, a repaint on repair.py's cand_N.png.
+    rep_calls = [c for c in CALLS if c["salida"].startswith("cand_")]
+    gen_calls = [c for c in CALLS if not c["salida"].startswith("cand_")]
     print("     de donde sale: %d generacion(es) x %s + %d reparacion(es) x %s "
           "= %s USD de llamadas reales"
           % (len(gen_calls), money(gen_calls[0]["coste"] if gen_calls else 0),
@@ -615,9 +845,36 @@ def main() -> int:
                  money(rep["coste"])))
         for note in (rep["notas"] or [rep["motivo"]])[:3]:
             print("       %s" % note)
-    check("un defecto abre una ronda de reparacion", bool(REPAIRS),
-          "%d rondas, %d con mejora aceptada"
-          % (len(REPAIRS), sum(1 for r in REPAIRS if r["ok"])))
+    # A repair round is not something the rehearsal can order: it opens only if
+    # a REJECTED attempt carried a repaintable defect that the free path does
+    # not already own (hands, face and smoothed skin are corrected for nothing,
+    # see orchestrator.FREE_DEFECTS).  Asserting that one always happens was
+    # asserting a lottery: the replay picks its file with sha1(name|seed|
+    # operation) % len(files), so when the two images bought on 2026-09-04
+    # joined the folder - 15 files to 17 - every pick moved, the smeared-texture
+    # frame landed on an attempt that PASSED, and a suite that had nothing
+    # wrong with it reported a failure.  What is actually invariant is the
+    # implication, so that is what is checked, and the census below says which
+    # branch ran.
+    payable = []
+    for att in attempts:
+        if att["status"] != "rejected":
+            continue
+        payable += [d for d in ((att.get("verdict") or {}).get("repairable_defects") or [])
+                    if str(d.get("type")) not in
+                    ("hand_malformed", "face_distorted", "oversmoothed_skin")]
+    if payable:
+        check("un defecto que no se puede corregir gratis abre una ronda de "
+              "reparacion", bool(REPAIRS),
+              "%d defecto(s) de pago en imagenes descartadas -> %d ronda(s), "
+              "%d con mejora aceptada"
+              % (len(payable), len(REPAIRS), sum(1 for r in REPAIRS if r["ok"])))
+    else:
+        check("no se compra ninguna reparacion cuando todo lo que fallo se "
+              "corrige gratis", not REPAIRS,
+              "0 defectos de pago en las %d imagenes descartadas -> %d ronda(s), "
+              "0.0000 USD" % (sum(1 for a in attempts if a["status"] == "rejected"),
+                              len(REPAIRS)))
     repair_holds = [m for m in MONEY
                     if m["que"] == "reserve" and ":repair" in m["ref"]]
     if repair_holds:

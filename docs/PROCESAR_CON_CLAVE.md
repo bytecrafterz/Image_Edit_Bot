@@ -25,10 +25,10 @@ Coste: **0.00 USD, siempre**. Tarda un par de minutos y termina con una linea
 como esta:
 
 ```
-RESULTADO: 35 correctas, 0 fallidas   |   COSTE REAL: 0.0000 USD
+RESULTADO: 37 correctas, 0 fallidas   |   COSTE REAL: 0.0000 USD
 ```
 
-Comprueba 35 cosas con numeros: que la clave se guarda por la pantalla de
+Comprueba 37 cosas con numeros: que la clave se guarda por la pantalla de
 Ajustes y nunca vuelve al navegador, que la tirada se enruta al motor de pago,
 que se pide tu forma y no un cuadrado, que lo retenido es igual a lo liquidado,
 que cada llamada al proveedor llega al libro mayor, que la puerta de calidad
@@ -43,6 +43,24 @@ backend\.venv\Scripts\python.exe scripts\rehearse_paid.py --recharge 0.30
 ```
 
 La segunda ensaya el caso de quedarse sin saldo a mitad de una tirada.
+
+**Una tirada que gasta dinero se lanza en segundo plano y con su propio
+registro, nunca en primer plano.** El 2026-09-04, durante la tirada de pago de
+este proyecto, el limite de tiempo de la consola mato la sesion a mitad; la
+tirada sobrevivio solo porque el proceso de Python no murio con ella, y durante
+unos diez minutos no habia forma de saber si se habia facturado una segunda
+llamada o no. No se perdio dinero, pero el susto era evitable:
+
+```powershell
+Start-Process -NoNewWindow -FilePath backend\.venv\Scripts\python.exe `
+  -ArgumentList "scripts\rehearse_paid.py" -RedirectStandardOutput tirada.log
+```
+
+Y mientras corre, la verdad esta siempre en el libro mayor, no en la consola:
+
+```powershell
+backend\.venv\Scripts\python.exe -c "import sqlite3;print(list(sqlite3.connect('data/photorobot.sqlite3').execute('select kind,amount_usd,ref from ledger order by id desc limit 5')))"
+```
 
 ---
 
@@ -94,27 +112,55 @@ Al pulsar *Calcular coste* (paso 3 de Crear) veras, antes de gastar nada:
 Ejemplo real de hoy, calidad alta, 3 imagenes, con cambio de ropa:
 
 ```
-3 variante(s) x 0.0800 USD  + factor 1.35  = 0.4290 USD
+3 variante(s) x 0.0400 USD  + factor 1.35  = 0.2670 USD
 Aviso: fal entrega como maximo 1024 px de lado largo en esta calidad, no 1536.
-Aviso: la estimacion cuenta con que 1 de cada 3 imagenes se repita. Si todas
-fallan a la primera, esta tirada puede llegar a 2.07 USD, porque cada intento
-rechazado se repinta por zonas a 0.05 USD cada una.
+Aviso: la estimacion cuenta con que 1 de cada 3 imagenes se repita. En el peor
+caso esta tirada llega a 1.71 USD: cada imagen se intenta como mucho 3 veces
+(normalmente 2, porque el robot deja de pagar intentos en cuanto la misma
+comprobacion falla dos veces con el mismo resultado) y solo se repintan por
+zonas (a 0.05 USD cada una) los fallos que no se pueden corregir gratis.
 ```
 
-Y lo que gasto de verdad esa misma tirada en el ensayo de hoy: **0.6500 USD**
-(5 generaciones a 0.08 mas 5 repintados a 0.05), un 52% por encima del estimado
-y muy por debajo del techo de 2.07. **El techo es la promesa; el estimado es
-solo una media.**
+Y lo que gasto de verdad esa misma tirada en el ensayo de hoy (2026-09-04):
+**0.2000 USD**, 5 generaciones a 0.04 y ningun repintado, frente a 0.2670
+estimados y un techo de 1.7100. **El techo es la promesa; el estimado es solo
+una media.**
 
 ### Precios reales por llamada
+
+Desde que la tirada manda tres fotografias tuyas como referencia, fal cobra
+`kontext/multi` a 0.0400 USD tambien en Alta y Maxima, donde antes cobraba
+`kontext/max` a 0.0800: **las referencias abarataron la calidad alta a la
+mitad**. Sin referencias (perfil sin construir) Alta y Maxima siguen costando
+0.0800 USD.
 
 | Nivel | Modelo de fal | Por imagen | Pide | Entrega | 3 imagenes: estimado / techo |
 |---|---|---|---|---|---|
 | Borrador | `flux/dev` img2img | 0.00625 USD | 384x512 | 512 px | 0.1303 / 1.4062 USD |
-| Vista previa | Kontext `[pro]` | 0.0400 USD | 576x768 | 1024 px | 0.2670 / 1.7100 USD |
-| Estandar | Kontext `[pro]` | 0.0400 USD | 768x1024 | 1024 px | 0.2670 / 1.7100 USD |
-| **Alta** | Kontext `[max]` | 0.0800 USD | 1152x1536 | 1024 px | 0.4290 / 2.0700 USD |
-| Maxima | Kontext `[max]` | 0.0800 USD | 1536x2048 | 1024 px | 0.4290 / 2.0700 USD |
+| Vista previa | Kontext `multi` | 0.0400 USD | 576x768 | 1024 px | 0.2670 / 1.7100 USD |
+| Estandar | Kontext `multi` | 0.0400 USD | 768x1024 | 1024 px | 0.2670 / 1.7100 USD |
+| **Alta** | Kontext `multi` | 0.0400 USD | 1152x1536 | 1024 px | 0.2670 / 1.7100 USD |
+| Maxima | Kontext `multi` | 0.0400 USD | 1536x2048 | 1024 px | 0.2670 / 1.7100 USD |
+
+El techo de 1.7100 USD es lo maximo que las reservas de la tirada llegan a
+retener: 3 intentos x (3 generaciones a 0.0400 + 3 zonas a 0.0500 por imagen).
+Es un peor caso que exige que las tres imagenes fallen las tres veces con tres
+zonas repintables cada vez; lo medido en los caminos de fallo normales son
+0.20 - 0.38 USD.
+
+**Tu decides ese techo.** En *Ajustes*, `max_retries` y `max_repair_rounds`
+(0 a 3) y el interruptor `autorepair` se aplican de verdad a la tirada desde el
+2026-09-04 - antes se guardaban y no los leia nadie. Medido sobre esta misma
+tirada de 3 imagenes en Alta:
+
+| Ajuste | Estimado | Techo | Intentos por imagen |
+|---|---|---|---|
+| De serie (2 reintentos, 2 rondas) | 0.2670 USD | 1.7100 USD | 3 |
+| `autorepair` apagado | 0.1080 USD | 0.2400 USD | 3 |
+| 0 reintentos y 0 reparaciones | 0.0800 USD | 0.0800 USD | 1 |
+
+Con 0 y 0 el estimado y el techo son el mismo numero: la tirada no puede
+gastar ni un centimo mas de lo que te ensena.
 
 Ademas, cada **repintado de una zona** cuesta 0.0500 USD, y una reparacion
 repinta hasta 3 zonas. Por eso un borrador de 0.006 USD puede acabar costando
@@ -133,8 +179,10 @@ compras al subir de nivel es **fidelidad a tus rasgos**, no pixeles.
 
 - **Vista previa (0.04 USD)** para explorar: cuando quieres ver seis ideas de
   escena, luz o encuadre y decidir cual te gusta.
-- **Alta (0.08 USD)** para la imagen que te vas a quedar. Usa Kontext `[max]`,
-  que es el que mejor conserva la cara y la piel.
+- **Alta (0.04 USD con tu perfil construido)** para la imagen que te vas a
+  quedar. Es el mismo precio que la vista previa y sube tus fotos de referencia
+  a 2048 px en vez de 1536, o sea un 28% mas de cara en cada referencia. Sin
+  perfil construido cuesta 0.08 USD.
 - **Borrador (0.006 USD)** solo para probar el circuito. Es un modelo mas
   flojo, y como cada reparacion suya cuesta ocho veces lo que costo generarla,
   sale caro en cuanto falla.
@@ -143,6 +191,12 @@ compras al subir de nivel es **fidelidad a tus rasgos**, no pixeles.
 
 Recomendacion practica: **vista previa para elegir, y luego alta calidad solo
 sobre las que has marcado** (boton *Alta calidad* en el paso de eleccion).
+
+Y si una vista previa ya te vale tal cual, **no la vuelvas a generar**:
+seleccionala en el album y pulsa *Marcar final*. Pasa a la pestana "Finales"
+por 0.0000 USD, porque es el mismo archivo que ya pagaste. El boton solo acepta
+imagenes que hayan pasado todas las comprobaciones; el resto sigue teniendo que
+pasar por *Alta calidad*, que es una llamada nueva y se cobra.
 
 ---
 
@@ -191,23 +245,29 @@ Sobre tus fotos reales, esa comprobacion mide hoy
    la gravedad del defecto antes y despues; si no baja, deja la imagen como
    estaba. La zona se paga igual, porque fal cobra el repintado aunque el
    resultado no sirva, y por eso ese gasto aparece en el libro mayor.
-3. **Si sigue sin pasar, se genera otra vez**, hasta 2 reintentos por vista.
+3. **Si sigue sin pasar, se genera otra vez**, hasta 2 reintentos por vista (3
+   intentos en total, o los que hayas dejado en *Ajustes*). Y se para antes si
+   la misma comprobacion falla **dos veces con el mismo resultado**: eso no es
+   mala suerte, es el motor dando la misma respuesta, y no se paga un tercer
+   intento por ella.
 4. **Si tampoco, se descarta con el motivo escrito en castellano** y aparece en
    la ficha de la tirada. Los motivos posibles son exactamente estos:
    *el rostro no coincide con el tuyo*, *cambiaron tus proporciones*, *cambio tu
    tono de piel*, *hay errores anatomicos*, *la calidad tecnica es baja*.
 
-En el ensayo de hoy (`python scripts\rehearse_paid.py`, calidad alta, 3 vistas,
-coste real 0.00 USD porque las imagenes salen de disco y la red esta cerrada):
-7 intentos, **1 aceptada y 6 descartadas**, 6 rondas de reparacion de las que 4
-mejoraron, 7.0 intentos por foto conseguida.
+Antes de llegar al punto 1, el robot intenta **arreglarlo gratis**: la textura
+de piel se devuelve desde una de tus propias fotografias, y las manos y el
+rostro tienen su propia correccion local. Nada de eso llama al proveedor ni
+cuesta un centimo, y ninguna de esas tres cosas abre ya una ronda de repintado
+de pago.
 
-Las 6 descartadas lo fueron por **el rostro no coincide con el tuyo**, y eso es
-nuevo: hasta septiembre esa comprobacion no podia rechazar nada (ver *La cara*,
-mas abajo), asi que el mismo ensayo aceptaba imagenes de otra cara. El numero
-tiene su cara amarga: en ese ensayo se llamo 16 veces al proveedor y se
-liquidaron 1.01 USD frente a los 0.43 estimados, dentro del techo anunciado de
-2.07 USD. Es el precio de que el control por fin funcione con este motor.
+En el ensayo del 2026-09-04 (calidad alta, 3 vistas, coste real 0.00 USD porque
+las imagenes salen de disco y la red esta cerrada): 5 intentos, **3 aceptadas y
+2 descartadas**, 1.67 intentos por foto conseguida, **0 rondas de reparacion**,
+y 0.2000 USD liquidados frente a 0.2670 estimados y un techo de 1.7100. Las dos
+descartadas lo fueron por *hay errores anatomicos* y por *el rostro no coincide
+con el tuyo*, y ninguna llego a comprar un repintado, porque todo lo que les
+fallaba pertenece al camino gratuito.
 
 Si en cualquier punto el saldo no cubre la siguiente llamada, la tirada se
 **detiene**, guarda lo que ya habia aceptado y te avisa de cuanto falta. Nunca
@@ -290,11 +350,15 @@ el tuyo"*.
 reparar por zonas**: un retoque local puede devolver grano a una mejilla, pero no
 puede convertir a otra mujer en ti. Asi que:
 
-* la imagen rechazada **ya esta pagada** (0.04 USD en vista previa, 0.08 USD en
-  alta): la llamada se hizo y el proveedor cobra igual;
+* la imagen rechazada **ya esta pagada** (0.04 USD en cualquier nivel salvo
+  borrador, con tu perfil construido): la llamada se hizo y el proveedor cobra
+  igual;
+* esa imagen pagada **ya no se borra**: se conserva, se nombra en la ficha de la
+  tirada y no se vuelve a gastar en ella;
 * el robot **genera otra entera**, a ese mismo precio, no al de reparacion
   (0.05 USD), que aqui no se usa, y como mucho **2 reintentos por vista** antes
-  de descartarla con el motivo escrito;
+  de descartarla con el motivo escrito - o solo uno, si las dos primeras
+  lecturas salen iguales;
 * el saldo se comprueba **antes de cada llamada**, asi que nunca se gasta mas de
   lo que tienes, y el aviso de coste de la pantalla ya cuenta con que 1 de cada
   3 se repita (factor 1.35) y te ensena el techo del peor caso.
@@ -315,10 +379,14 @@ puede convertir a otra mujer en ti. Asi que:
 
 ### Resumen para decidir
 
-- La cara **esta protegida y medida de verdad desde septiembre de 2026**: 6 de
-  las 17 imagenes de pago que hay en disco no son tu cara y hoy se rechazan,
-  incluidas las dos que tu rechazaste a mano. Las proporciones siguen medidas
-  como antes.
+- La cara **esta protegida y medida de verdad desde septiembre de 2026**.
+  Barrido del 2026-09-04 con la comprobacion que decide: tus 24 fotografias
+  0.6908 - 0.8737 (24 de 24 aceptadas), dos fotos tuyas que el perfil no ha
+  visto nunca 0.7624 y 0.8222 (aceptadas), ocho mujeres distintas 0.0201 -
+  0.1925 (8 de 8 rechazadas) y las 4 imagenes de pago que hay en disco y no son
+  tu cara 0.2920 - 0.3968 (4 de 4 rechazadas). El limite, 0.45, cae en una
+  franja donde no hay ninguna imagen. Las proporciones siguen medidas como
+  antes.
 - La piel **es el punto debil del modelo de pago**, y por eso 7 de 15 se
   descartan. Cuenta con que una parte de lo que pagues se vaya en reintentos:
   eso es exactamente el factor 1.35 y el techo que te ensena la pantalla.
@@ -335,8 +403,17 @@ buena, mira tu:
 1. **Los bordes de la silueta** contra el fondo: restos del fondo antiguo,
    escalones duros, un trozo de pared pegado a la mano. La puerta no mide el
    recorte.
-2. **Las manos y los dedos** de cerca. Se avisan, pero una mano pequena en la
-   foto no se puede juzgar por geometria y solo se informa.
+2. **Las manos y los dedos** de cerca. **Esta es la mas importante de la lista.**
+   Medido el 2026-09-04 sobre tus 24 fotografias y todas las generadas en
+   disco: de las 26 manos que no salen cortadas por el borde, ninguna llega a
+   los 170 px que hacen falta para medir la geometria de los dedos - la mayor
+   son 157 px. A ese tamano ninguna regla distingue una mano tuya de una mano
+   derretida: tu propia IMG_7880 mide una palma 7.9 veces fuera de rango y una
+   mano generada que se ve mal a simple vista mide 3.99. Por eso el robot ya no
+   dice "sin anomalias" cuando en realidad no ha podido mirar: la ficha y el
+   resumen del album dicen ahora **"Revisa 2 manos: no se ha podido
+   comprobar"**, con el motivo de cada una (sale del encuadre, o mide 75 px
+   cuando harian falta 170). Cuando leas esa frase, amplia la mano tu.
 3. **Los pies y el borde inferior**: si tu foto de origen corta por los
    tobillos, la generada tambien.
 4. **El grano de la piel a tamano real**, no en la miniatura.
@@ -347,6 +424,10 @@ Lo que el robot **si** garantiza, con numeros en la ficha de cada imagen: que la
 cara es la tuya, que nadie te ha estrechado el cuerpo sin que se vea, que el
 tono de piel es el tuyo, que el grano de piel perdido esta por debajo del 14%, y
 que no se gasta un centimo mas del techo que te ensena antes de empezar.
+
+Cuando la ropa que pediste puede ensancharte, la comprobacion de proporciones
+solo puede vigilar que **no te estrechen**, y desde hoy el resumen lo dice con
+esas palabras en vez de afirmar que tus proporciones coinciden.
 
 Lo que **no** garantiza: un recorte limpio contra el fondo, manos perfectas a
 tamano pequeno, encuadres que tu foto de origen no contiene, ni que la imagen te

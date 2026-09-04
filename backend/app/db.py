@@ -21,7 +21,7 @@ _local = threading.local()
 _init_lock = threading.Lock()
 _initialised = False
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 # --------------------------------------------------------------- connections
@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     marks_json    TEXT NOT NULL DEFAULT '[]',
     consent_json  TEXT NOT NULL DEFAULT '{}',
     thresholds_json TEXT NOT NULL DEFAULT '{}',
+    first_run_json TEXT NOT NULL DEFAULT '{}',
     is_default    INTEGER NOT NULL DEFAULT 0,
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL,
@@ -384,6 +385,33 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit(created_at DESC);
 """
 
 
+# Columns added after a version shipped.  CREATE TABLE IF NOT EXISTS silently
+# does nothing to a table that already exists, so a new column has to be added
+# by hand or an installation that has been running - this one, with 24
+# photographs and 26 generated images in it - would keep the old shape and
+# every INSERT naming the new column would fail.  Each entry is applied only
+# when the column is missing, so running it twice is free.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # table, column, full ALTER
+    ("profiles", "first_run_json",
+     "ALTER TABLE profiles ADD COLUMN first_run_json TEXT NOT NULL DEFAULT '{}'"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, statement in MIGRATIONS:
+        try:
+            have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error:
+            continue
+        if column in have:
+            continue
+        try:
+            conn.execute(statement)
+        except sqlite3.Error:
+            pass
+
+
 def init_db() -> None:
     global _initialised
     with _init_lock:
@@ -394,6 +422,7 @@ def init_db() -> None:
             conn = _connect()
             _local.conn = conn
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.execute(
             "INSERT INTO meta(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

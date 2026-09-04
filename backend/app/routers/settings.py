@@ -111,7 +111,17 @@ def get_settings(user: dict = Depends(security.active_user)) -> dict:
         (user["id"], billing._day_start()))
     return {
         "settings": settings,
-        "keys": config.key_status(),
+        # Presence only for an ordinary account.  key_status()'s hint is the
+        # first six and last four characters of the installation's paid API
+        # key, and this endpoint is open to every active user: in the isolation
+        # audit the non-administrator account read "fal-se...cdef" of the fal
+        # key straight out of /api/settings.  Nobody but the person who pays
+        # for the key needs to see any part of it, and the screen only needs to
+        # know whether one is configured.
+        "keys": config.key_status() if user.get("role") == "admin"
+        else {name: {"present": bool(info.get("present")), "hint": None,
+                     "from_env": bool(info.get("from_env"))}
+              for name, info in config.key_status().items()},
         "limits": {
             "daily_usd": float(user.get("daily_limit_usd") or 0.0),
             "monthly_usd": float(user.get("monthly_limit_usd") or 0.0),
@@ -240,9 +250,15 @@ def alerts(limit: int = 50,
 @router.post("/alerts/{alert_id}/read")
 def read_alert(alert_id: str,
                user: dict = Depends(security.active_user)) -> dict:
-    db.execute("UPDATE alerts SET read_at=? WHERE id=? AND user_id=?",
-               (db.now(), alert_id, user["id"]))
-    return {"ok": True}
+    # Scoped by user_id, so somebody else's alert is never marked - but the
+    # reply used to say {"ok": true} for an id that matched nothing at all,
+    # including an id invented on the spot.  It now reports how many rows it
+    # really touched.  Deliberately not a 404: answering differently for an
+    # alert that exists and one that does not would turn this into a way of
+    # asking whether another account's alert id is real.
+    cur = db.execute("UPDATE alerts SET read_at=? WHERE id=? AND user_id=?",
+                     (db.now(), alert_id, user["id"]))
+    return {"ok": True, "marcados": int(cur.rowcount or 0)}
 
 
 @router.post("/alerts/read-all")

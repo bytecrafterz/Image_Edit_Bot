@@ -6,14 +6,18 @@ particular photograph actually contains.  This module does exactly that: it
 reads the measured identity profile plus the analysis of the original and
 composes the positive prompt in a fixed professional order - who the subject is,
 what is being changed, what must be preserved, the scene, the camera, the
-finish - and the negative prompt from three mandatory blocks.
+finish - and the negative prompt from four mandatory blocks.
 
-Two invariants turn a text template into a control system.  The identity clause
-is never optional and names every attribute that must survive the edit, and the
-negative prompt always carries the no-beautify block, because the failure the
-client actually lived through was a tool that quietly slimmed her and reshaped
-her face.  ``tokens`` reports every fragment that went in, so the report page
-can explain why the prompt says what it says.
+Three invariants turn a text template into a control system.  The identity
+clause is never optional and names every attribute that must survive the edit;
+the negative prompt always carries the no-beautify block, because the failure
+the client actually lived through was a tool that quietly slimmed her and
+reshaped her face; and a request that changes what she is wearing always says
+what the whole outfit is and always forbids underwear showing under it, because
+the second failure she lived through was a shirt painted over the lingerie of
+the source photograph with bare legs below it.  ``tokens`` reports every
+fragment that went in, so the report page can explain why the prompt says what
+it says.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import re
 from typing import Any
 
 from .. import db
+from ..catalog import options as catalog_mod
 from . import learning as learning_mod
 
 # --------------------------------------------------------------- mandatory
@@ -45,6 +50,66 @@ ARTEFACT_NEGATIVE = (
     "banding, halo, oversharpened, seam, ghosting, smeared texture, "
     "watermark, text, logo, signature, border, cartoon, illustration, "
     "painting, 3d render, cgi, doll, mannequin, waxy skin"
+)
+
+# The fourth mandatory block, and every term in it was read off one delivered
+# image rather than imagined.  Attempt att_d6fb1c97f9874a82b38d35c3 asked for
+# "change only: a crisp white cotton poplin shirt, sleeves lightly rolled" over
+# a photograph of the client in lingerie.  Its negative prompt is stored beside
+# it and it is 62 terms long - slimming, fingers, seams, watermarks - and does
+# not contain the words underwear, lingerie, legs or trousers anywhere.  The
+# image came back exactly as asked: the shirt painted on top of the lingerie
+# that was already there, bare legs below it, a dark lace edge showing at the
+# hem.  The three blocks above forbid a different person and a broken hand;
+# nothing forbade a half dressed one, so this block does.
+#
+# It is applied whenever the request changes what she is wearing, in every
+# framing, because underwear showing under a new garment is wrong on a close up
+# too.  ``NO_BARE_LEGS`` and ``NO_BARE_HIPS`` are the part that depends on the
+# garment and only go in when the lower half is in frame - forbidding "bare
+# legs" under a summer dress would be forbidding the dress.
+NO_UNDERWEAR = (
+    "visible underwear, exposed lingerie, bra visible under the garment, "
+    "knickers, thong, lace underwear showing at the hem, "
+    "new garment worn over lingerie, new garment layered over the source "
+    "clothing, the source clothing still visible under the new outfit, "
+    "half dressed"
+)
+
+NO_BARE_LEGS = (
+    "bare legs, bare thighs, naked lower body, missing trousers, no trousers, "
+    "top worn without bottoms, underwear instead of trousers, "
+    "shirt worn as a dress, swimwear, bikini"
+)
+
+NO_BARE_HIPS = (
+    "naked lower body, missing skirt, no skirt, top worn without bottoms, "
+    "underwear instead of a skirt, swimwear, bikini"
+)
+
+# The same failure read backwards.  Six bottoms were added to the wardrobe so
+# that a user could overrule the automatic trousers, and a bottom chosen on its
+# own arrives here as a complete outfit request with no upper half in it: of the
+# 600 one and two garment selections the catalogue allows, 42 (the 21 made only
+# of bottoms, at both framings) named nothing above the waist while the request
+# still said "in nothing else" and no longer preserved the source clothing.
+# This block and DEFAULT_TOP are the answer, and it goes in only where the chest
+# is genuinely unnamed - the chest is in frame at every framing, unlike the legs.
+NO_BARE_TORSO = (
+    "topless, bare chest, bare breasts, exposed nipples, naked upper body, "
+    "missing top, no shirt, bra as outerwear, underwear instead of a top"
+)
+
+# Requirement 3 of the brief, in the words a diffusion model acts on.  The
+# source photographs this product is built from are of a person in minimal
+# clothing, and "change only: a shirt" is an instruction to ADD a shirt to what
+# is already in the frame - which is precisely what the engine did.  Saying
+# replace rather than add costs one sentence.
+OUTFIT_REPLACE = (
+    "dress the subject in this outfit and in nothing else: paint the complete "
+    "garment onto the body, replace whatever clothing the source photograph "
+    "shows instead of layering the new garment over it, and leave no "
+    "underwear and no part of the source clothing visible anywhere in the frame"
 )
 
 IDENTITY_CLAUSE = (
@@ -90,6 +155,11 @@ GROUP_CANON: dict[str, str] = {
     "location": "location", "lugar": "location", "place": "location",
     "outfit": "outfit", "ropa": "outfit", "clothing": "outfit",
     "garment": "outfit", "vestuario": "outfit", "wardrobe": "outfit",
+    # A trouser choice is not a separate subject from a shirt choice: both are
+    # the outfit, and treating them as one group is what lets an explicit
+    # bottom silence the automatic one.
+    "clothing_bottom": "outfit", "bottoms": "outfit", "bottom": "outfit",
+    "pantalon": "outfit", "falda": "outfit",
     "footwear": "footwear", "calzado": "footwear", "shoes": "footwear",
     "accessories": "accessories", "accesorios": "accessories",
     "pose": "pose", "postura": "pose",
@@ -649,6 +719,154 @@ def _vision_text(brief: dict, key: str, profile: dict) -> str:
     return _strip_name(_norm_ws(value), profile)
 
 
+# ------------------------------------------------------------ outfit plan
+
+# A lower half is only worth naming when there is a lower half in the picture.
+# On a head and shoulders portrait the trousers are an instruction about pixels
+# that do not exist, and every extra instruction is one more chance for the
+# engine to reframe in order to obey it.
+LOWER_BODY_SHOTS = ("half", "full", "unknown")
+
+# What the garment ends up wearing below the waist decides which negative is
+# honest.  A midi dress that shows a shin is the dress working; a shirt that
+# shows a thigh is the failure this whole block exists for.
+_SKIRT_LOWERS = ("skirt", "dress")
+
+
+def outfit_plan(chosen: dict, shot: str) -> dict:
+    """Work out what the lower half of a requested outfit is wearing.
+
+    The rule the client asked for, in one place: an explicit bottom wins, a
+    complete outfit needs nothing added, and only a top left without a bottom
+    gets one filled in automatically.  Returns the extra English phrase for the
+    prompt, the negatives the chosen garment makes honest, and the Spanish
+    tokens that let the report say why it says what it says.
+    """
+    tops: list = []
+    completes: list = []
+    bottoms: list = []
+    unclassified: list = []
+    for group, opts in (chosen or {}).items():
+        if canon_group(group) != "outfit":
+            continue
+        for opt in (opts or []):
+            info = catalog_mod.garment_info(opt)
+            kind = _norm_ws(info.get("kind")).lower()
+            entry = (opt, info)
+            if kind == "bottom":
+                bottoms.append(entry)
+            elif kind == "complete":
+                completes.append(entry)
+            elif kind == "top":
+                tops.append(entry)
+            else:
+                unclassified.append(entry)
+
+    plan = {"changed": bool(tops or completes or bottoms or unclassified),
+            "lower_phrase": "", "upper_phrase": "", "negatives": [],
+            "tokens": [], "instruction": "", "auto": False, "lower": ""}
+    if not plan["changed"]:
+        return plan
+
+    # Requirement 3.  This goes in whatever was chosen: a gown painted over
+    # lingerie is the same picture as a shirt painted over lingerie.
+    plan["instruction"] = OUTFIT_REPLACE
+    plan["negatives"].append(NO_UNDERWEAR)
+    plan["tokens"].append(
+        "ropa: se pide vestir el conjunto completo y sustituir la ropa de la "
+        "foto original, no superponerlo encima")
+    plan["tokens"].append(
+        "negativo: nada de ropa interior a la vista ni prenda superpuesta "
+        "sobre la ropa de la foto original")
+
+    visible = (shot or "unknown") in LOWER_BODY_SHOTS
+
+    def _name(option):
+        return _norm_ws(option.get("label")) or _norm_ws(option.get("value"))
+
+    # 1. An explicit bottom wins outright and nothing is added: its own prompt
+    #    fragment is already in the change list.
+    if bottoms:
+        opt, info = bottoms[0]
+        plan["lower"] = _norm_ws(info.get("lower")) or "trousers"
+        plan["tokens"].append(
+            "ropa: la prenda de abajo la elegiste tu (%s), no se anade ninguna"
+            % _name(opt))
+        # And the other half of her.  A bottom on its own says "dress her in
+        # these trousers and in nothing else" over a photograph in lingerie,
+        # which is the delivered failure with the halves swapped; measured over
+        # every selection the wardrobe allows it is the only case that reaches
+        # here with nothing named above the waist.  The chest is in frame in
+        # every framing, so this does not wait for the lower body to be visible.
+        if not tops and not completes:
+            plan["upper_phrase"] = catalog_mod.DEFAULT_TOP
+            plan["auto"] = True
+            plan["negatives"].append(NO_BARE_TORSO)
+            plan["tokens"].append(
+                "ropa: %s solo viste de cintura para abajo, asi que se anade "
+                "automaticamente una prenda de arriba (%s). Si eliges una tu, "
+                "manda la tuya." % (_name(opt), catalog_mod.DEFAULT_TOP))
+            plan["tokens"].append(
+                "negativo: nada de torso desnudo ni falta de prenda de arriba")
+    # 2. A complete outfit dresses the whole person; it only gets a phrase when
+    #    its own fragment never named the lower half.
+    elif completes:
+        opt, info = completes[0]
+        plan["lower"] = _norm_ws(info.get("lower")) or "trousers"
+        extra = _norm_ws(info.get("bottom"))
+        if extra and visible:
+            plan["lower_phrase"] = extra
+            plan["auto"] = True
+            plan["tokens"].append(
+                "ropa: %s es un conjunto completo y se nombra su parte de "
+                "abajo (%s) para que no quede a interpretacion"
+                % (_name(opt), extra))
+        else:
+            plan["tokens"].append(
+                "ropa: %s ya viste el cuerpo entero, no hace falta anadir nada"
+                % _name(opt))
+    # 3. A top with no bottom: the case that produced the delivered image, and
+    #    the only one where the robot chooses for her.
+    elif tops:
+        opt, info = tops[0]
+        plan["lower"] = _norm_ws(info.get("lower")) or "trousers"
+        extra = _norm_ws(info.get("bottom")) or catalog_mod.DEFAULT_BOTTOM
+        if visible:
+            plan["lower_phrase"] = extra
+            plan["auto"] = True
+            plan["tokens"].append(
+                "ropa: %s solo viste de cintura para arriba, asi que se anade "
+                "automaticamente la prenda de abajo (%s). Si eliges una tu, "
+                "manda la tuya." % (_name(opt), extra))
+        else:
+            plan["tokens"].append(
+                "ropa: %s solo viste de cintura para arriba, pero en un primer "
+                "plano no se ve la parte de abajo y no se pide" % _name(opt))
+    # 4. A garment nobody classified - a wardrobe entry the user wrote herself.
+    #    Inventing trousers for a garment this code cannot read would be
+    #    overruling her, so it does not, and the report says so out loud.
+    else:
+        opt, info = unclassified[0]
+        plan["negatives"].append(NO_BARE_TORSO)
+        plan["tokens"].append(
+            "ropa: no se ha podido clasificar %s, asi que no se anade prenda "
+            "de abajo; se exige igualmente que no se vea ropa interior ni "
+            "quede el torso desnudo" % _name(opt))
+
+    if visible and plan["lower"]:
+        if plan["lower"] in _SKIRT_LOWERS:
+            plan["negatives"].append(NO_BARE_HIPS)
+            plan["tokens"].append(
+                "negativo: nada de cuerpo desnudo de cintura para abajo bajo "
+                "la falda o el vestido pedido")
+        else:
+            plan["negatives"].append(NO_BARE_LEGS)
+            plan["tokens"].append(
+                "negativo: nada de piernas desnudas ni falta de pantalon bajo "
+                "la prenda pedida")
+    return plan
+
+
 # ------------------------------------------------------------ main builders
 
 def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict:
@@ -681,6 +899,10 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
     change_bits: list[str] = []
     negatives: list[str] = []
     used_options: list[dict] = []
+    # Only the garments that survive the body-change refusal below, because a
+    # garment that was refused never reaches the prompt and must not be able to
+    # answer "what are the legs wearing" either.
+    kept: dict[str, list[dict]] = {}
     for group in sorted(chosen, key=lambda g: (canon_group(g), g)):
         for opt in chosen[group]:
             reason = body_change_reason(opt)
@@ -698,9 +920,22 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
             if opt.get("negative"):
                 negatives.append(opt["negative"])
             used_options.append(opt)
+            kept.setdefault(group, []).append(opt)
             tokens.append("cambio [%s]: %s%s" % (
                 group_label_es(group), fragment,
                 " (elegido por el robot)" if opt.get("auto") else ""))
+
+    # The lower half of a requested outfit, decided once and in one place.  It
+    # runs after the loop because it needs every garment that was chosen, and
+    # its phrase joins "change only" so the trousers are asked for rather than
+    # merely not forbidden.
+    outfit = outfit_plan(kept, shot)
+    if outfit["lower_phrase"]:
+        change_bits.append("with " + outfit["lower_phrase"])
+    if outfit["upper_phrase"]:
+        change_bits.append("with " + outfit["upper_phrase"])
+    negatives.extend(outfit["negatives"])
+    tokens.extend(outfit["tokens"])
 
     # ---- 3. what must be preserved ----------------------------------
     preserve_bits: list[str] = [_body_clause(prof)]
@@ -765,6 +1000,7 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
         subject_clause,
         identity_clause,
         ("change only: " + _join(change_bits)) if change_bits else "",
+        outfit["instruction"],
         "keep unchanged: " + _join(preserve_bits),
         scene_clause,
         camera_clause,

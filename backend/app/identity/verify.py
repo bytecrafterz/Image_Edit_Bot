@@ -122,7 +122,10 @@ SMOOTH_SEVERITY_MAX = 0.45
 SMOOTH_SEVERITY_CAP = 0.95
 BODY_CONF_MIN = 0.5           # below this, measurements only inform, never gate
 YAW_BAND_SLACK = 1.4          # extra tolerance for a yaw-corrected width
-PAIRED_TOL = 0.08             # floor for the shape change vs the source photo
+PAIRED_TOL = 0.08             # torso rulers: the size a difference has to reach
+                              # before it is worth printing.  Since the ruler
+                              # shoot-out above HEAD_TOL it reports only and
+                              # rejects nothing.
 PROFILE_MIN_SAMPLES = 4       # torso heights needed before the profile counts
 
 # A pose landmark is not a tape measure.  Measuring one untouched photograph
@@ -145,37 +148,115 @@ PAIRED_TOL_MAX = 0.16
 # The silhouette profile is compared as a whole, so it carries its own noise
 # entry rather than borrowing one from a single width.
 WIDTH_PROFILE_KEY = "width_profile"
-# The head-length profile is a different ruler and gets a floor of its own.
-# Everything above divides by torso length from two pose landmarks, and the
-# local engine re-frames: a 62% crop (head to just below the hips) moved the
-# width profile of an untouched photograph +10..+19.5%, so on a reframed
-# result that ruler reports the crop, not the body.  The head profile divides
-# by forehead-to-chin of the face mesh on rows hung from the chin, and the
-# generator keeps the face (similarity 0.99) while every slimming filter keeps
-# it too.  Measured on the seven measurable photographs (scratchpad
-# ruler_probe3.py): re-measuring the same picture at 1300/1000/800 px moved
-# its median ratio 0.6% (max 1.5%), the 62% crop 0.7% (max 2.3%), the 45%
-# crop 1.4%; an 8% slim read 7.9% (7.1..8.6%) and a 12% slim 12.0%
-# (11.3..13.3%).  4% sits above the worst noise seen with room to spare and
-# under half the smallest slim measured; the client's complaint was about
-# 12%.  The per-pair widening in _noise_aware_tol still applies on top of
-# this floor, capped by PAIRED_TOL_MAX like every other metric.
+# THE RULER.  Three of them used to take part here and they contradicted each
+# other on the same picture, so they were shot against ground truth that could
+# be constructed rather than argued about: her 24 photographs re-encoded and
+# re-read (truth: nothing changed), the same photographs re-read at 1024 px
+# instead of 1600 (truth: nothing changed), cropped to 62% of their height
+# (truth: nothing changed, the FRAME changed), widened 6% by the same warp that
+# slims - a stand-in for the bulk a garment adds, which is the only direction
+# clothing can move a silhouette (truth: her body did not change) - and slimmed
+# by a known 6, 12 and 18%, plus a 62% crop of the 12% slim.  Fourteen of the
+# twenty-four can be measured at all; 112 measured pairs.  What each ruler read
+# (scratchpad rulers.py / an.py, 2026-09-04), as a percentage away from "no
+# change":
+#
+#   ruler       untouched   reframed     +6% fabric   -6% slim   -12%    -18%
+#   skeletal    0.7..14.4   13.5         1.5..15.3    2.6..19.8  2.7..13.4  3.1..25.7
+#   width prof  0.0.. 2.6   14.2..16.9   0.4.. 7.5    2.8.. 7.8  3.1..12.5  3.3..19.9
+#   head prof   0.0.. 1.2    0.3.. 1.6   4.1.. 6.7    4.5.. 7.5 11.4..13.5 17.2..19.0
+#
+# The first two do not measure the body.  The skeletal ratios read 14.4% on a
+# photograph that was only re-encoded and 2.7% on another one slimmed by 12%:
+# at no limit at all do they reach 10% false alarm together with 80% detection.
+# The width profile reads the crop - 14..17% on a picture nobody touched - and
+# missed a real 12% slim under that crop entirely (0.4%).  The head profile
+# reads the truth: it divides by forehead-to-chin of the face mesh on rows hung
+# from the chin, so a crop cannot move it, and it came back within 1.6% of zero
+# on every untouched and every reframed photograph while reporting each slim
+# within about two points of the amount actually applied.  So the head profile
+# is the gate and the other two are demoted to reported-only in
+# _check_body_paired.  They are not averaged with it: averaging a ruler that
+# measures the framing into one that measures the body is how two contradictory
+# percentages ended up in the same verdict.
+#
+# WHERE THE LINE GOES.  The client's instruction is that a small difference must
+# not cost her a paid image, and that the slim-down she originally complained
+# about - about 12% - must still be caught.  At 8%:
+#   false alarm  0 of 25  (7 re-encoded + 7 re-read smaller + 4 reframed
+#                          + 7 widened 6% by fabric; worst reading 6.7%)
+#   6% slim      0 of 7 caught  (readings 4.5..7.5%)
+#   12% slim     7 of 7 caught  (readings 11.4..13.5%)
+#   18% slim     7 of 7 caught  (readings 17.2..19.0%)
+#   12% slim under a 62% crop   4 of 4 caught  (8.1..12.3%)
+# The 6% row is not a limit that could simply be tightened: a 6% slim reads
+# 4.5..7.5% and 6% of added fabric reads 4.1..6.7%, and those two overlap, so
+# at that size no threshold separates a slimmed body from a jumper.  Only the
+# SIGN separates them, and a pose change moves the silhouette both ways - over
+# the 17 generated images on disk this ruler could measure, the worst honest
+# NARROWING was 4.2% - so the sign is not solid enough to gate on either.  A
+# 6% difference is therefore measured, written into the verdict in plain
+# Spanish, and not charged to her, which is what she asked for.
+#
+# The per-pair widening in _noise_aware_tol still applies on top of this floor,
+# capped at HEAD_TOL_MAX and not at the wider PAIRED_TOL_MAX: the faintest real
+# 12% slim read 11.4%, so a limit allowed past that would forgive the very
+# damage this module exists to catch.  Measured head-ruler noise is 1.6% at
+# worst, so 1.5 x noise never reaches 8% and the widening is inert here in
+# practice; the cap is the guarantee, not the expectation.
 HEAD_PROFILE_KEY = "head_profile"
-HEAD_TOL = 0.04
+HEAD_TOL = 0.08
+HEAD_TOL_MAX = 0.10
+# Before a rejection is spent, the heights have to agree with each other, and
+# this is the size of disagreement past which they do not.
+#
+# The failure this exists to stop was measured, not imagined.  Her own
+# IMG_8841, untouched and merely cropped to the top 80% of its own height, was
+# REJECTED as "tu figura es un 20% mas estrecha de arriba abajo".  Nothing
+# about her had moved; the person segmentation had.  In the cropped picture the
+# mask stops at her waist and leaves her hips and thighs out, so every row down
+# to two heads below the chin reads the same as the source and every row below
+# it reads 20..40% narrower.  The median of the eleven rows is a 19.5% slim the
+# generator never performed - in the one direction, narrowing, that this whole
+# module exists to catch, on a photograph nobody had touched.
+#
+# The rows themselves say which case they are in, because a slim-down is a
+# single multiplication: it moves EVERY height by the same factor, while a mask
+# that finds a different amount of body in the two pictures moves some heights
+# and leaves the rest alone.  Measured over the 7 photographs this ruler can
+# judge, as the median absolute deviation of the per-row ratios about their own
+# median, relative to that median (91 readings, 13 conditions):
+#   HONEST, nothing about her moved
+#     re-encode 0.000..0.006   at 1024 0.001..0.005   at 768 0.001..0.004
+#     re-saved at q75 0.000..0.006      upscaled x2 0.000..0.005
+#     lit +12 L* 0.000..0.004           +6% of garment bulk 0.003..0.019
+#     crop to 62% of the height 0.005..0.015   sides to 72% 0.004..0.025
+#     turned 3 degrees 0.003..0.037  <- the loudest honest reading
+#   HER BODY REALLY NARROWED
+#     6% 0.002..0.025      12% 0.001..0.015      18% 0.002..0.014
+#   THE MASK COLLAPSED
+#     the 80% crop of IMG_8841                             0.195
+# Every genuine reading - honest or slimmed - stays under 0.037, and no real
+# slim ever passed 0.025; the broken mask reads 7.8 times that.  The limit sits
+# at twice the loudest real slim and a quarter of the failure.
+#
+# It can only ever turn a rejection into a report, never the other way round,
+# so its worst case is a slim described instead of rejected, never a paid image
+# discarded.  Over the whole corpus it changes exactly one verdict out of 15:
+# the false alarm above.  All 14 rejections of a real 12% or 18% slim survive
+# it untouched.
+HEAD_ROWS_MAD_MAX = 0.05
 # The width profile and the head profile read the very same mask, so the ratio
 # between their two medians is not about her width at all: it is how much the
 # torso unit (pose landmarks) moved against the head unit (face mesh) between
-# the two images.  On the same framing it barely moves - the width profile
-# scatters 1.1% (max 3.4%) and the head profile 0.6% (max 1.5%) across
-# resolutions, and a slim-down moves both by the same amount (8% and 12% slims
-# left the two at most 4.5% apart).  A reframe moves only the torso unit: a
-# 62% crop of an untouched photograph read the width profile +10..+19.5% while
-# the head profile stayed within 2.3%.  Above this shift the torso-length
-# rulers are not commensurate between the two images and abstain; the head
-# ruler, which needs no torso, carries the verdict.  Erring on the low side
-# costs nothing but the torso rulers on a pair the head ruler judges anyway;
-# erring high lets a reframe read as a wider body, which is what happened to
-# five of seven faithful crops before this rule.
+# the two images.  A reframe moves only the torso unit: a 62% crop of an
+# untouched photograph read the width profile 14..17% while the head profile
+# stayed within 1.6%.  This number no longer switches any ruler off - since the
+# shoot-out above, nothing that divides by torso length is allowed to reject
+# anything - and it is kept for one purpose: it is the cheapest honest
+# explanation of WHY the torso figures printed in the verdict disagree with the
+# verdict, and she is owed that sentence rather than two contradictory
+# percentages with no account of which one to believe.
 UNIT_SHIFT_MAX = 0.06
 # The pixel width measure_body stored for each width metric, so the paired
 # test can divide the raw width by the raw torso length on both sides.  The
@@ -200,24 +281,44 @@ _PX_WIDTH: dict[str, str] = {
 # middle instead of dragging the run's score down with a measurement error.
 NON_GENERATIVE_SCORE = 0.75
 
-# Read off the silhouette, so clothing moves them; the rest come from the
-# skeleton and survive a change of outfit.
-SILHOUETTE_METRICS = ("waist_w_over_torso", "bust_w_over_torso")
+# The skin check used to be the last identity ruler still measured against the
+# POPULATION profile - the pooled mean of her whole gallery - while
+# body_proportions had already moved to comparing the image with the very
+# photograph it was made from.  Measured over her 24 photographs under seven
+# honest changes (168 readings: re-encode, three reframes, a 3 degree rotation,
+# a declared lighting change, 6% of added garment bulk):
+#
+#     reference                        falsas alarmas   peor lectura
+#     el perfil de la galeria (antes)      3 de 168      1.101 del limite
+#     su propia foto de origen (ahora)     0 de 168      0.884 del limite
+#
+# Two of the three false alarms were a LIGHTING change she had asked for, and
+# the third a 62% reframe that simply dropped a brightly lit thigh out of the
+# sample: the pooled mean cannot tell "this crop shows less leg" from "somebody
+# lightened her".  Her own photograph can, because both readings sample the
+# same person under the same light.
+#
+# The population profile is not thrown away, because a paired reading has one
+# blind spot the pooled one does not: if the engine shifts the whole frame it
+# shifts source and result alike.  So it stays as a LOOSER veto, at
+# SKIN_PROFILE_VETO times its own limit.  Sized off the same 168 honest
+# readings, whose worst reading against the profile is 1.101: 1.25 leaves 14%
+# of headroom above the loudest honest picture.  Over 120 images with the skin
+# really changed the pair beats the old rule on both counts at once -
+# 0.0% false alarms against 1.8%, and 58.3% detection against 55.8% - so
+# nothing was traded away for the quiet.
+SKIN_PROFILE_VETO = 1.25
 
-# Measurements of how WIDE she is.  They matter apart from the rest because
-# fabric is worn on top of a person: every garment in the catalogue adds bulk
-# and none removes any, so one of these coming back LARGER may be the coat that
-# was asked for, while one coming back SMALLER cannot be.  The skeleton is not
-# the refuge it looks like either - MediaPipe places the shoulder and hip points
-# by looking through the clothing, and over her own 24 photographs, same body in
-# different outfits and poses, they swing +/-39% (shoulders) and +/-24% (hips).
-# Judged on both sides at the 8-16% limits used here, a real jacket is rejected
-# as a changed body; judged on one side, a slim-down still is not, because
-# nothing she can put on makes her narrower.  Lengths are deliberately absent:
-# no garment lengthens an arm, so those keep both sides.
-WIDTH_METRICS = ("shoulder_w_over_torso", "hip_w_over_torso",
-                 "waist_w_over_torso", "bust_w_over_torso",
-                 "neck_w_over_torso")
+# Two lists used to live here, SILHOUETTE_METRICS and WIDTH_METRICS, naming
+# which torso-length ratios a change of clothes was allowed to move and in
+# which direction.  They are gone because the ruler they qualified is gone:
+# since the shoot-out above HEAD_TOL nothing that divides by torso length can
+# reject an image, so there is nothing left to excuse.  The reasoning they
+# carried survives where it is still load-bearing - fabric is worn on top of a
+# person, every garment in the catalogue adds bulk and none removes any, so a
+# figure that comes back WIDER may be the coat while one that comes back
+# NARROWER cannot be - and it now qualifies the head-length ruler instead, in
+# _check_body_paired.
 
 CHECK_WEIGHTS: dict[str, float] = {
     "identity_face": 0.30,
@@ -251,6 +352,13 @@ DEFECT_ES: dict[str, str] = {
     "duplicated_feature": "elemento duplicado",
     "border_artifact": "artefacto en el borde",
     "oversmoothed_skin": "piel demasiado suavizada",
+}
+
+# Body parts the anatomy scan could locate but not honestly judge.
+UNJUDGED_ES: dict[str, str] = {
+    "left_hand": "tu mano izquierda",
+    "right_hand": "tu mano derecha",
+    "hand": "una mano",
 }
 
 CHECK_ES: dict[str, str] = {
@@ -610,6 +718,28 @@ def _measure_source(path: str, max_side: int) -> tuple[dict, int]:
                     "medidas no disponibles"), side
 
 
+def _source_skin(brief: dict) -> dict:
+    """Skin of the photograph this image was generated from.
+
+    The orchestrator already measures it before planning and hands it over in
+    the brief, so nothing is measured twice.  A caller that only knows the path
+    still gets the paired test, at the cost of one reading of one photograph.
+    """
+    src = brief.get("source_skin")
+    if isinstance(src, dict) and src.get("ok"):
+        return src
+    path = _source_path(brief)
+    if not path:
+        return {}
+    img = _safe(loader.load_image, str(path), VERIFY_MAX_SIDE)
+    if not isinstance(img, np.ndarray) or img.size == 0:
+        return {}
+    pose_s = _ok_dict(_safe(pose_mod.detect_pose, img), "pose no disponible")
+    face_s = _ok_dict(_safe(face_mod.detect_face, img), "rostro no detectado")
+    return _ok_dict(_safe(skin_mod.skin_stats, img, pose_s, face_s),
+                    "piel no medible")
+
+
 def _source_body(brief: dict) -> tuple[dict, int]:
     """Measurements of the photograph this image was generated from.
 
@@ -674,8 +804,16 @@ def _profile_ratio(gen_profile: Any, src_profile: Any) -> dict | None:
         ratios.append(float(val) / ref)
     if len(ratios) < PROFILE_MIN_SAMPLES:
         return None
-    return {"median": float(np.median(ratios)), "n": len(ratios),
-            "spread": float(np.std(ratios))}
+    arr = np.asarray(ratios, dtype=float)
+    med = float(np.median(arr))
+    # How far the rows disagree with EACH OTHER, as a fraction of what they
+    # agree on.  The median above says how much the silhouette changed; this
+    # says whether the rows are telling one story or several, which is the
+    # difference between a body that was narrowed and a mask that found a
+    # different amount of body.  See HEAD_ROWS_MAD_MAX for the measurements.
+    mad = float(np.median(np.abs(arr - med))) / max(abs(med), 1e-6)
+    return {"median": med, "n": len(ratios),
+            "spread": float(np.std(arr)), "mad": mad}
 
 
 def _paired_metric(body: dict, metric: str) -> float | None:
@@ -730,6 +868,12 @@ def _paired_noise(brief: dict, src_body: dict, gen_side: int,
     the reading already in hand was taken at that very size, and the whole
     thing skipped when the caller never said which photograph this image came
     from.
+
+    Only the head-profile entry is read now that the head profile is the only
+    ruler that can reject anything; the rest are left in because they cost
+    nothing beyond arithmetic on readings already taken, and because the entry
+    a caller most wants when a verdict looks wrong is the one for the ruler it
+    did not use.
     """
     path = _source_path(brief)
     if not path or gen_side <= 0 or not src_body.get("ok"):
@@ -799,11 +943,18 @@ def _paired_noise(brief: dict, src_body: dict, gen_side: int,
     return noise
 
 
-def _noise_aware_tol(base_tol: float, observed_noise: Any) -> tuple[float, bool]:
+def _noise_aware_tol(base_tol: float, observed_noise: Any,
+                     max_tol: float = PAIRED_TOL_MAX) -> tuple[float, bool]:
     """The limit for one metric: never under the floor, never over the cap.
 
     Also reports whether the cap had to bite, so the verdict can admit that what
     could not be resolved was the instrument rather than the body.
+
+    The cap is a parameter because the one ruler that still gates - the head
+    profile - has its own.  The faintest 12% slim measured on it read 11.4%, so
+    a limit that widened past HEAD_TOL_MAX would quietly forgive the change the
+    client complained about, where the wider PAIRED_TOL_MAX was sized for rulers
+    that no longer reject anything.
     """
     value = _f(observed_noise, None)
     if value is None or value <= 0.0:
@@ -811,7 +962,7 @@ def _noise_aware_tol(base_tol: float, observed_noise: Any) -> tuple[float, bool]
     wanted = PAIRED_NOISE_FACTOR * float(value)
     if wanted <= base_tol:
         return float(base_tol), False
-    return float(min(wanted, PAIRED_TOL_MAX)), bool(wanted > PAIRED_TOL_MAX)
+    return float(min(wanted, max_tol)), bool(wanted > max_tol)
 
 
 def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
@@ -832,16 +983,24 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
     is why every metric is judged against a limit sized from the noise measured
     on this very pair instead of against a constant.
 
-    Three rulers take part.  The skeletal ratios and the width profile divide
-    by torso length, and both need the hips in frame; the head profile divides
-    by the length of her face and hangs its rows from the chin, so it is the
-    one that still pairs exactly when the engine re-framed the result to a half
-    body or a closeup - the case the other two either abstain on or, worse,
-    read as a wider body (see HEAD_TOL).  A result with no torso frame at all
-    is therefore still judged here whenever its head profile has rows to pair.
+    Three rulers are measured and exactly ONE of them decides.  The skeletal
+    ratios and the width profile divide by torso length; tested against
+    constructed ground truth they report the framing rather than the body - the
+    numbers are in the note above HEAD_TOL - so they are written into every
+    verdict in plain Spanish and never reject anything.  The head profile
+    divides by the length of her face and hangs its rows from the chin, came
+    back within 1.6% of zero on every untouched and every reframed photograph,
+    and read a known slim within about two points of the truth; it is the gate.
 
-    Returns None when there is no usable source measurement, so the caller can
-    fall back to the profile bands.
+    The two kinds are not averaged.  A ruler that measures the crop and a ruler
+    that measures the body do not disagree about her shape, they disagree about
+    what they are measuring, and the mean of the two is a number about nothing.
+
+    Returns None when there is no usable source measurement and nothing at all
+    could be read, so the caller can fall back to the profile bands.  When
+    something was measured but the head profile had no rows to pair, the check
+    comes back with computed=False: it reports what it saw and neither rejects
+    the image nor moves its score.
     """
     if not (isinstance(src_body, dict) and src_body.get("ok")):
         return None
@@ -850,75 +1009,61 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
 
     brf = brief if isinstance(brief, dict) else {}
     base_tol = _f(thresholds.get("paired_tol"), PAIRED_TOL)
-    noise = _paired_noise(brf, src_body, gen_side, src_side)
     gen_usable = _usable(gen_body)
     src_usable = _usable(src_body)
 
     offenders: list[str] = []
     notes: list[str] = []
-    # Widths a new garment is allowed to have grown; reported together
-    # at the end so the sentence reads as one fact and not as a list of
-    # near-misses.
+    # What the two demoted rulers read.  It goes into the verdict in plain
+    # Spanish every time so she can see the number, and it never rejects the
+    # image - see the shoot-out written above HEAD_TOL for why neither of them
+    # is allowed to spend one of her paid generations.
+    observed: list[str] = []
     excused_widths: list[str] = []
-    records: list[tuple[float, float]] = []   # (deviation, limit applied to it)
     widened = False
     too_noisy = False
-    compared = 0
 
     # A wool coat makes a person wider, and that is not the generator taking a
-    # liberty with her body.  When the request changed the clothes, the
-    # silhouette is expected to move outwards, so the width profile stands
-    # down and the skeletal ratios carry the verdict - shoulder and hip widths
-    # come from pose landmarks, which clothing barely shifts.  Gating the
-    # silhouette both ways here would reject every jacket she ever asks for and
-    # teach her to distrust the check that exists to protect her.
-    # New clothes can only ADD fabric over her body: every garment in the
-    # catalogue is something worn on top of the skin and not one of them takes
-    # anything away, so a figure that comes back WIDER may be the jacket, while
-    # a figure that comes back NARROWER cannot be.  The head-length ruler is
-    # therefore kept when the request changed the clothes and judged one-sided,
-    # instead of being switched off - switching it off is what let the paid
-    # engine slim her unnoticed.  Measured on her own two source photographs
-    # delivered the way the engine delivers them (square crop to 1024, no
-    # generator in the loop) the median of that ruler moves 0.008 and 0.012;
-    # the same photographs compressed by a known factor read 0.032 at x0.97,
-    # 0.058 at x0.94 and 0.105 at x0.90, so the existing HEAD_TOL floor of 0.04
-    # sits between honest delivery and a real slim-down and needs no new
-    # constant.  The width profile stays off: it divides by torso length and a
-    # coat moves it for honest reasons at every height.
+    # liberty with her body.  New clothes can only ADD fabric over her body:
+    # every garment in the catalogue is something worn on top of the skin and
+    # not one of them takes anything away, so a figure that comes back WIDER
+    # may be the jacket, while a figure that comes back NARROWER cannot be.
+    # The head-length ruler is therefore kept when the request changed the
+    # clothes and judged one-sided, instead of being switched off - switching
+    # it off is what let the paid engine slim her unnoticed.  The measurement
+    # backing the one-sided rule is in the HEAD_TOL note: a 6% garment-bulk
+    # proxy read 4.1..6.7% on that ruler, under the 8% line, so the excuse now
+    # only has to cover a genuinely bulky coat rather than every shirt.
     dressed = _clothing_changed(brf)
     head_one_sided = dressed
-    prof_ratio = None if dressed else _profile_ratio(
-        gen_body.get(WIDTH_PROFILE_KEY), src_body.get(WIDTH_PROFILE_KEY))
-    head_ratio = _profile_ratio(
-        gen_body.get(HEAD_PROFILE_KEY), src_body.get(HEAD_PROFILE_KEY))
-    if dressed:
-        notes.append("Ropa distinta: la ropa nueva puede ensancharte, asi que "
-                     "solo se te compara por si el motor te ha estrechado.")
+    prof_ratio = _profile_ratio(gen_body.get(WIDTH_PROFILE_KEY),
+                                src_body.get(WIDTH_PROFILE_KEY))
+    head_ratio = _profile_ratio(gen_body.get(HEAD_PROFILE_KEY),
+                                src_body.get(HEAD_PROFILE_KEY))
+    # Said here only when the ruler came back inside its limit.  When it did
+    # not, the sentence built for the verdict below already says all of this
+    # about a concrete measured percentage, and saying it twice reads like the
+    # check arguing with itself.
+    dressed_note = ("Ropa distinta: la ropa nueva puede ensancharte, asi que "
+                    "solo se te compara por si el motor te ha estrechado.")
 
-    # Before any torso-length ruler testifies, the two silhouette rulers must
-    # agree on the unit.  They read the same mask, so what is left when one
-    # median is divided by the other is how far the torso length moved against
-    # the head length between the two images - see UNIT_SHIFT_MAX.  When it
-    # moved, the picture was re-framed (or the pose changed), the torso rulers
-    # would report the framing as a body, and only the head ruler can judge.
-    reframed = False
-    unit_shift = 0.0
+    # The width profile and the head profile read the very same mask, so the
+    # ratio between their two medians is how far the torso unit (pose
+    # landmarks) moved against the head unit (face mesh) between the two
+    # images.  It no longer switches anything off, because nothing that divides
+    # by torso length gates any more; it is kept because it is the cheapest
+    # available explanation of WHY the torso numbers below disagree with the
+    # verdict, and she is owed that explanation rather than two contradictory
+    # percentages.
+    unit_shift = None
     if prof_ratio is not None and head_ratio is not None \
             and head_ratio["median"] > 1e-6:
         unit_shift = abs(prof_ratio["median"] / head_ratio["median"] - 1.0)
-        reframed = unit_shift > UNIT_SHIFT_MAX
-    if reframed:
-        notes.append("Encuadre distinto: el torso mide un %d%% distinto respecto "
-                     "a tu cabeza, asi que las medidas sobre el torso no se "
-                     "comparan y cuenta la figura en cabezas."
-                     % int(round(unit_shift * 100.0)))
 
-    for metric in () if reframed else GATED_METRICS:
-        # Waist and bust are read off the silhouette, so new clothes move them
-        # for honest reasons; shoulders, hips and head come from the skeleton.
-        if dressed and metric in SILHOUETTE_METRICS:
-            continue
+    # ---------------------------------------------------------------- demoted
+    # Ruler one: the skeletal ratios, each width divided by torso length.
+    # Reported when it moves more than the old 8% line, never a rejection.
+    for metric in GATED_METRICS:
         gen_val = _paired_metric(gen_body, metric)
         src_val = _paired_metric(src_body, metric)
         if gen_val is None or src_val is None or abs(src_val) < 1e-9:
@@ -927,101 +1072,89 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
             continue
         ratio = gen_val / src_val
         deviation = abs(ratio - 1.0)
-        tol, capped = _noise_aware_tol(base_tol, noise.get(metric))
-        widened = widened or tol > base_tol + 1e-9
-        too_noisy = too_noisy or capped
-        # The same one-sided rule the head-length figure gets below, and for the
-        # same reason - see WIDTH_METRICS.  An excused widening counts as
-        # nothing rather than as a pass: a jacket allowed to widen her is not
-        # evidence that her shape survived, and letting it score would print
-        # "tus proporciones se mantienen" on the strength of a ruler that was
-        # never allowed to fail.
-        excused = dressed and ratio > 1.0 and metric in WIDTH_METRICS
-        if not excused:
-            compared += 1
-            records.append((deviation, tol))
-        if deviation <= tol:
+        if deviation <= base_tol:
             continue
         label, down, up = METRIC_ES.get(metric, (metric, "menor", "mayor"))
-        pct = int(round(deviation * 100.0))
-        if excused:
-            excused_widths.append("%s un %d%% %s" % (label, pct, up))
-            continue
-        offenders.append("%s un %d%% %s que en tu foto original"
-                         % (label, pct, down if ratio < 1.0 else up))
+        observed.append("%s un %d%% %s" % (label, int(round(deviation * 100.0)),
+                                           down if ratio < 1.0 else up))
 
-    # The silhouette profile: the same torso sampled at nine heights in both
-    # images.  Individually each sample is noisy, but a uniform slim-down moves
-    # all of them the same way, so the median ratio is a far steadier signal
-    # than any single width - and a uniform slim-down is exactly the failure the
-    # client experienced.
-    if prof_ratio is not None and not reframed:
+    # Ruler two: the same silhouette sampled at nine heights of the torso.
+    if prof_ratio is not None:
         deviation = abs(prof_ratio["median"] - 1.0)
-        tol, capped = _noise_aware_tol(base_tol, noise.get(WIDTH_PROFILE_KEY))
-        widened = widened or tol > base_tol + 1e-9
-        too_noisy = too_noisy or capped
-        compared += prof_ratio["n"]
-        records.append((deviation, tol))
-        if deviation > tol:
-            pct = int(round(deviation * 100.0))
-            offenders.append(
-                "tu silueta es un %d%% %s en toda la altura del torso"
-                % (pct, "mas estrecha" if prof_ratio["median"] < 1.0 else "mas ancha"))
-        else:
-            notes.append("Silueta comparada en %d alturas del torso."
-                         % prof_ratio["n"])
+        if deviation > base_tol:
+            observed.append("tu silueta un %d%% %s medida sobre el torso"
+                            % (int(round(deviation * 100.0)),
+                               "mas estrecha" if prof_ratio["median"] < 1.0
+                               else "mas ancha"))
+    if unit_shift is not None and unit_shift > UNIT_SHIFT_MAX:
+        notes.append("El encuadre cambio: el torso mide un %d%% distinto "
+                     "respecto a tu cabeza, asi que lo medido sobre el torso "
+                     "habla del encuadre y solo se informa."
+                     % int(round(unit_shift * 100.0)))
 
-    # The head-length profile: the same silhouette read on rows hung from the
-    # chin, in units of her own head.  Nothing from the pose enters it, so a
-    # result cropped to a half body or a closeup still pairs row for row with
-    # the source on whatever rows both keep, where the torso rulers above have
-    # already lost their unit.  It is clothing too, so the same rule applies -
-    # the ratio itself was measured above, where the unit shift needed it.
-    if head_ratio is not None:
-        deviation = abs(head_ratio["median"] - 1.0)
-        tol, capped = _noise_aware_tol(HEAD_TOL, noise.get(HEAD_PROFILE_KEY))
-        widened = widened or tol > HEAD_TOL + 1e-9
-        too_noisy = too_noisy or capped
-        # A widening the new clothes can explain is reported and not held
-        # against the image.  It is also not evidence that her shape survived,
-        # so it counts as nothing: neither a compared measurement nor a record.
-        # Otherwise an excused jacket would score as a passing measurement and
-        # the caller would print "tus proporciones se mantienen" on the
-        # strength of a ruler that was never allowed to fail.
-        excused = head_one_sided and head_ratio["median"] > 1.0
-        if not excused:
-            compared += head_ratio["n"]
-            records.append((deviation, tol))
-        if deviation > tol and excused:
-            notes.append("Sales un %d%% mas ancha de arriba abajo, pero eso lo "
-                         "puede hacer la ropa que pediste: se informa y no "
-                         "rechaza la imagen." % int(round(deviation * 100.0)))
-        elif deviation > tol:
-            pct = int(round(deviation * 100.0))
-            offenders.append(
-                "tu figura es un %d%% %s de arriba abajo (silueta medida en "
-                "%d alturas, en cabezas)"
-                % (pct, "mas estrecha" if head_ratio["median"] < 1.0
-                   else "mas ancha", head_ratio["n"]))
-        else:
-            notes.append("Figura comparada en %d alturas sobre el tamano de "
-                         "tu cabeza." % head_ratio["n"])
+    # ------------------------------------------------------------- the verdict
+    # Only the head-length profile decides, and only when it has rows to pair.
+    # When it has none - a headshot with no body under the chin, a result with
+    # no face mesh - there is no ruler here that survives a reframe, and the
+    # honest move under the client's instruction is to report what was seen and
+    # charge her nothing for it.  The check comes back uncomputed so it neither
+    # rejects the image nor moves its score.
+    if head_ratio is None:
+        detail = ("No se pudo medir tu figura en cabezas en esta imagen (hace "
+                  "falta el rostro y algo de cuerpo por debajo de la barbilla), "
+                  "asi que las proporciones se informan y no rechazan.")
+        if observed:
+            detail += (" Medido sobre el torso: %s. Esa regla se mueve con el "
+                       "encuadre, asi que no decide."
+                       % "; ".join(observed[:4]))
+        if dressed:
+            notes.append(dressed_note)
+        if notes:
+            detail += " " + " ".join(notes)
+        if not observed and not notes:
+            return None
+        check = _mk(name_body(), 0.0, HEAD_TOL, True, detail)
+        check["mode"] = "pareado"
+        check["compared"] = 0
+        check["advisory"] = True
+        return check, 1.0, False, []
 
-    # No measurement, or none that was allowed to fail, means this test has
-    # nothing to say and the caller must fall back to the population bands.
-    if compared == 0 or not records:
-        return None
+    # The noise floor costs two more readings of the source photograph, so it is
+    # bought only once it is known there is a verdict to size.  It is measured
+    # for the ruler that gates and nothing else: on her photographs it never
+    # reaches the 5.3% that would widen an 8% limit at all, but a new user's
+    # uploads are not her uploads, and a limit that cannot admit its own
+    # instrument is the mistake the demoted rulers were making.
+    deviation = abs(head_ratio["median"] - 1.0)
+    noise = _paired_noise(brf, src_body, gen_side, src_side)
+    tol, capped = _noise_aware_tol(HEAD_TOL, noise.get(HEAD_PROFILE_KEY),
+                                   HEAD_TOL_MAX)
+    widened = tol > HEAD_TOL + 1e-9
+    too_noisy = capped
+    compared = head_ratio["n"]
+    pct = int(round(deviation * 100.0))
+    wider = head_ratio["median"] > 1.0
+    # A widening the new clothes can explain is reported and not held against
+    # the image, and it is not evidence that her shape survived either, so the
+    # summary is told below that only half a test ran.
+    excused = head_one_sided and wider
+    # A reading the rows themselves do not support cannot spend one of her paid
+    # images.  It is still measured, still printed and still says which way it
+    # went; it just does not reject.  See HEAD_ROWS_MAD_MAX.
+    rows_mad = _f(head_ratio.get("mad"))
+    disputed = bool(deviation > tol and not excused
+                    and rows_mad > HEAD_ROWS_MAD_MAX)
+    if deviation > tol and excused:
+        excused_widths.append("tu figura un %d%% mas ancha de arriba abajo" % pct)
+    elif disputed:
+        pass
+    elif deviation > tol:
+        offenders.append("tu figura es un %d%% %s de arriba abajo (silueta "
+                         "medida en %d alturas, en cabezas)"
+                         % (pct, "mas ancha" if wider else "mas estrecha",
+                            head_ratio["n"]))
 
-    # After the noise correction the limits are no longer all the same, so the
-    # measurement worth reporting is the one that came closest to its own limit.
-    # Both halves must come from that same measurement: pairing the largest
-    # deviation with a different metric's limit prints a difference above its
-    # own limit on an image that passed, which reads as a contradiction to the
-    # only person who matters here.
-    worst_rec = (max(records, key=lambda r: r[0] / max(r[1], 1e-6))
-                 if records else (0.0, base_tol))
-    worst_dev, worst_tol = worst_rec[0], worst_rec[1]
-    score = _clamp01(1.0 - (worst_dev / max(worst_tol, 1e-6)) / 2.0)
+    score = _clamp01(1.0 - (deviation / max(tol, 1e-6)) / 2.0)
 
     generative = _is_generative(brf)
     # A difference the engine cannot physically have produced is a measurement
@@ -1037,32 +1170,81 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
                   "de medicion y no rechaza la imagen."
                   % "; ".join(offenders[:4]))
         score = max(score, NON_GENERATIVE_SCORE)
+    elif excused_widths:
+        # The reading is OVER the limit and the image passes anyway, so the
+        # sentence must say that and not "tus proporciones se mantienen".
+        # Printing a difference of 11% against a limit of 8% under the words
+        # "se mantiene" is the contradiction this whole check was rewritten to
+        # stop producing.
+        detail = ("Sales un %d%% mas ancha de arriba abajo que en tu foto "
+                  "original (medida en %d alturas sobre el tamano de tu "
+                  "cabeza, limite del %d%%). Eso lo puede hacer la ropa que "
+                  "pediste - ninguna prenda te estrecha - asi que se informa y "
+                  "no se rechaza la imagen. Lo unico que se ha comprobado aqui "
+                  "es que el motor no te haya estrechado."
+                  % (pct, compared, int(round(tol * 100))))
+    elif disputed:
+        # Over the limit and NOT rejected, so the sentence has to say both and
+        # say why: printing "tus proporciones se mantienen" over a 20% reading
+        # is the contradiction this check was rewritten to stop producing.
+        score = max(score, NON_GENERATIVE_SCORE)
+        detail = ("Medida un %d%% mas %s de arriba abajo, pero las %d alturas "
+                  "no se ponen de acuerdo entre ellas (discrepan un %d%%, "
+                  "maximo %d%%): unas te miden igual que en tu foto y otras "
+                  "mucho mas %s. Eso lo hace un encuadre que deja fuera parte "
+                  "de tu cuerpo, no un adelgazamiento: al estrecharte se "
+                  "mueven todas las alturas por igual. Se informa la "
+                  "diferencia y no se rechaza la imagen."
+                  % (pct, "ancha" if wider else "estrecha", compared,
+                     int(round(rows_mad * 100)),
+                     int(round(HEAD_ROWS_MAD_MAX * 100)),
+                     "ancha" if wider else "estrecha"))
     elif passed:
-        detail = ("Tus proporciones se mantienen respecto a la foto original "
-                  "(%d medidas comparadas, la mas ajustada difiere un %d%% "
-                  "sobre un limite del %d%%)."
-                  % (compared, int(round(worst_dev * 100)),
-                     int(round(worst_tol * 100))))
+        detail = ("Tu figura se mantiene respecto a la foto original: difiere "
+                  "un %d%% sobre un limite del %d%%, medida en %d alturas "
+                  "sobre el tamano de tu cabeza."
+                  % (pct, int(round(tol * 100)), compared))
     else:
         detail = ("Cambiaron tus proporciones respecto a la foto original: %s."
                   % "; ".join(offenders[:4]))
-    if excused_widths:
-        notes.append("La ropa que pediste puede ensancharte, asi que no se "
-                     "rechaza la imagen por eso: %s."
-                     % "; ".join(excused_widths[:4]))
+    if dressed and not excused_widths:
+        notes.append(dressed_note)
+    # Always, on every verdict: the number the demoted rulers read, and why it
+    # is not the verdict.  Two contradictory percentages with no explanation is
+    # what made the old check impossible to believe.
+    if observed:
+        notes.append("Medido ademas sobre el torso: %s. Esa regla se mueve con "
+                     "el encuadre y con la ropa, asi que se informa y no "
+                     "rechaza." % "; ".join(observed[:4]))
     if widened:
         notes.append("Limite ajustado al ruido de medicion de esta pareja.")
     if too_noisy:
         notes.append("La medicion de esta pareja es demasiado ruidosa para "
                      "afinar mas; el limite se queda en el %d%% maximo."
-                     % int(round(PAIRED_TOL_MAX * 100)))
+                     % int(round(HEAD_TOL_MAX * 100)))
     if notes:
         detail += " " + " ".join(notes)
-    check = _mk(name_body(), worst_dev, worst_tol, passed, detail)
+    check = _mk(name_body(), deviation, tol, passed, detail)
     check["mode"] = "pareado"
     check["compared"] = compared
-    if degraded:
+    check["rows_mad"] = round(rows_mad, 4)
+    if degraded or disputed:
         check["advisory"] = True
+    if disputed:
+        # The album shows the one-line summary, not this detail, and an image
+        # whose silhouette nobody could compare must not be presented as one
+        # whose proportions were checked.
+        check["parcial_es"] = ("no se ha podido comparar tu silueta: el "
+                               "encuadre deja fuera parte de tu cuerpo")
+    # When the clothes changed, a widening is excused and only a NARROWING can
+    # still fail, so what survived is half a test.  The detail says so; the
+    # one-line summary the album actually shows used to say "las proporciones
+    # coinciden con tus fotos", which claims more than was measured.
+    if (passed and not degraded and not disputed
+            and (excused_widths or head_one_sided)):
+        check["parcial_es"] = ("solo se ha comprobado que el motor no te haya "
+                               "estrechado, porque la ropa que pediste puede "
+                               "ensancharte")
     return check, score, True, offenders
 
 
@@ -1191,8 +1373,14 @@ def _check_body(gen_body: dict, profile: dict,
     return check, _clamp01(score), True, offenders
 
 
-def _check_skin(gen_skin: dict, profile: dict,
-                thresholds: dict) -> tuple[dict, float, bool]:
+def _check_skin(gen_skin: dict, profile: dict, thresholds: dict,
+                src_skin: dict | None = None) -> tuple[dict, float, bool]:
+    """Has her skin tone changed?
+
+    Measured against the photograph this image was made from whenever the
+    caller says what that was, and against the pooled gallery profile only as
+    the fallback.  See SKIN_PROFILE_VETO for the 168 readings that decided it.
+    """
     name = "skin_tone"
     delta_max = _f(thresholds.get("delta_e_max"), 8.0)
     reference = _flist((profile.get("skin") or {}).get("lab_mean"), 3)
@@ -1226,27 +1414,64 @@ def _check_skin(gen_skin: dict, profile: dict,
     if lightness_max is None:
         lightness_max = _f(thresholds.get("delta_l_max"), 22.0)
 
-    d_chroma = float(np.sqrt((generated[1] - reference[1]) ** 2
-                             + (generated[2] - reference[2]) ** 2))
-    d_light = abs(float(generated[0] - reference[0]))
-    passed = d_chroma <= chroma_max and d_light <= lightness_max
+    def _apart(from_lab):
+        """Distance of the generated skin from one reference, in both senses."""
+        return (float(np.sqrt((generated[1] - from_lab[1]) ** 2
+                              + (generated[2] - from_lab[2]) ** 2)),
+                abs(float(generated[0] - from_lab[0])))
 
-    if passed:
-        detail = ("Tono de piel practicamente igual (color %.1f de %.1f permitido, "
-                  "luminosidad %.1f de %.1f)." % (d_chroma, chroma_max, d_light,
-                                                  lightness_max))
-    elif d_chroma > chroma_max:
-        detail = ("Cambio el color de tu piel (%.1f, el maximo para ti es %.1f). "
-                  "Esto no es cuestion de luz: es el tono."
-                  % (d_chroma, chroma_max))
+    # The pooled profile first, because it is the fallback and it is always
+    # available; then her own source photograph, which takes over the verdict.
+    prof_chroma, prof_light = _apart(reference)
+    source = _flist((src_skin or {}).get("lab_mean"), 3)         if isinstance(src_skin, dict) and src_skin.get("ok") else None
+
+    if source is not None:
+        d_chroma, d_light = _apart(source)
+        paired = True
     else:
-        detail = ("Te aclararon u oscurecieron la piel (%.1f de luminosidad, "
-                  "maximo %.1f)." % (d_light, lightness_max))
+        d_chroma, d_light = prof_chroma, prof_light
+        paired = False
+
+    over = d_chroma > chroma_max or d_light > lightness_max
+    # The veto: a departure so large that no reframe and no light explains it
+    # is still a rejection even when the source photograph forgave it, because
+    # an engine that shifts the whole frame shifts both sides of a pair alike.
+    veto = paired and (prof_chroma > chroma_max * SKIN_PROFILE_VETO
+                       or prof_light > lightness_max * SKIN_PROFILE_VETO)
+    passed = not (over or veto)
+
+    ref_es = "tu foto de origen" if paired else "el conjunto de tus fotos"
+    if passed:
+        detail = ("Tono de piel practicamente igual a %s (color %.1f de %.1f "
+                  "permitido, luminosidad %.1f de %.1f)."
+                  % (ref_es, d_chroma, chroma_max, d_light, lightness_max))
+        if paired and (prof_chroma > chroma_max or prof_light > lightness_max):
+            # Measured and dismissed, with the reason, rather than silently
+            # dropped: the pooled mean disagreeing with her own photograph is
+            # the normal case for a reframe or a light she asked for.
+            detail += (" Frente al conjunto de tus fotos la diferencia sube a "
+                       "color %.1f y luminosidad %.1f, pero eso lo mueve el "
+                       "encuadre y la luz, no tu piel, asi que se informa y no "
+                       "rechaza." % (prof_chroma, prof_light))
+    elif veto and not over:
+        detail = ("Tu piel se aleja demasiado de todas tus fotos (color %.1f, "
+                  "luminosidad %.1f, frente a %.1f y %.1f permitidos): es "
+                  "demasiado para que lo explique el encuadre o la luz."
+                  % (prof_chroma, prof_light, chroma_max, lightness_max))
+    elif d_chroma > chroma_max:
+        detail = ("Cambio el color de tu piel respecto a %s (%.1f, el maximo "
+                  "para ti es %.1f). Esto no es cuestion de luz: es el tono."
+                  % (ref_es, d_chroma, chroma_max))
+    else:
+        detail = ("Te aclararon u oscurecieron la piel respecto a %s (%.1f de "
+                  "luminosidad, maximo %.1f)."
+                  % (ref_es, d_light, lightness_max))
     # The reported value stays delta E so the report page keeps one familiar
     # number, but the threshold shown is the one actually applied.
     check = _mk(name, round(d_chroma, 3), round(chroma_max, 3), passed, detail)
     check["delta_e"] = round(delta_e, 3)
     check["delta_l"] = round(d_light, 3)
+    check["referencia"] = "foto de origen" if paired else "perfil"
     return check, _clamp01(similarity), True
 
 
@@ -1439,6 +1664,23 @@ def _check_anatomy(anomalies: dict, defects: list[dict],
         parts = ["%s (%s)" % (DEFECT_ES.get(d["type"], d["type"]),
                               _severity_es(_f(d.get("severity")))) for d in listed]
         detail = "Se detectaron %d problemas: %s." % (len(defects), ", ".join(parts))
+    # A hand the scan could not judge is not a hand that passed.  On
+    # 2026-09-04 the second paid image of the day was delivered under "Sin
+    # anomalias anatomicas detectadas" with both hands visibly melted against
+    # her thighs: one was cut by the bottom edge and the other measured 75 px
+    # against the 170 px that digit geometry needs, so neither could produce a
+    # severity that reaches the 0.60 gate.  Nothing here rejects the image for
+    # it - there is no free ruler that separates those hands from her own
+    # photographs' (see analysis/anomaly._hand_defects) - but the sentence the
+    # client reads now says which part of her image nobody checked.
+    unjudged = [u for u in (anomalies.get("unjudged") or []) if isinstance(u, dict)]
+    if unjudged:
+        names = _join_es([UNJUDGED_ES.get(str(u.get("where")), "una mano")
+                          + ", " + str(u.get("reason") or "no medible")
+                          for u in unjudged[:3]])
+        detail += (" No se ha podido comprobar %s: %s. Miralas tu antes de "
+                   "darla por buena." % ("una mano" if len(unjudged) == 1
+                                         else "%d manos" % len(unjudged), names))
     if smooth.get("detail"):
         detail = smooth["detail"] + " " + detail
     value = smooth_sev if failed else worst
@@ -1446,6 +1688,12 @@ def _check_anatomy(anomalies: dict, defects: list[dict],
     check = _mk(name, value, threshold, passed, detail)
     if failed:
         check["fail_es"] = "te han suavizado la piel"
+    if unjudged:
+        # Carried separately so the one-line summary can repeat it: the album
+        # shows the summary, not the check detail, and this is the one thing
+        # about an approved image the client has to check with her own eyes.
+        check["unjudged_es"] = ("una mano" if len(unjudged) == 1
+                                else "%d manos" % len(unjudged))
     return check, _clamp01(1.0 - max(worst, smooth_sev)), True
 
 
@@ -1485,21 +1733,37 @@ def _summary(passed: bool, checks: list[dict], repairable: list[dict],
         # passed; it did not verify anything, and the summary says so by leaving
         # it out of the list while its own detail explains what was seen.
         advisory = {c["name"] for c in checks if c.get("advisory")}
+        # A check that only tested half of what its name promises is not a
+        # confirmation of the whole thing either; it is named in its own clause
+        # below instead of being folded into "coinciden con tus fotos".
+        partial = {c["name"]: str(c.get("parcial_es") or "")
+                   for c in checks if c.get("parcial_es")}
         verified = [CHECK_ES[n] for n in ("identity_face", "body_proportions",
                                           "skin_tone")
-                    if n not in skipped and n not in advisory]
+                    if n not in skipped and n not in advisory
+                    and n not in partial]
         if verified:
             text = ("Aprobada: %s %s con tus fotos."
                     % (_join_es(verified),
                        "coincide" if len(verified) == 1 else "coinciden"))
         else:
             text = "Aprobada, aunque no se pudo comparar tu identidad en esta imagen."
+        for check_name, why in partial.items():
+            text += (" Sobre %s, %s." % (CHECK_ES.get(check_name, check_name), why))
         if skipped:
             text += (" No se pudo comprobar %s."
                      % _join_es([CHECK_ES[s] for s in skipped if s in CHECK_ES]))
         elif repairable:
             text += (" Quedan detalles menores que se pueden retocar sin volver "
                      "a generar la imagen.")
+        # And the part of an approved image that was never checked.  See
+        # _check_anatomy: at the size hands come out of these renders no ruler
+        # can tell a good one from a melted one, so this sentence is the only
+        # honest thing the robot can say about them.
+        hands = next((str(c.get("unjudged_es") or "") for c in checks
+                      if c["name"] == "anatomy"), "")
+        if hands:
+            text += (" Revisa %s: no se ha podido comprobar." % hands)
         return text
     reasons: list[str] = []
     for check in checks:
@@ -1575,7 +1839,8 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
         body_check, body_score, body_done, offenders = paired
     else:
         body_check, body_score, body_done, offenders = _check_body(body_d, prof, brf)
-    skin_check, skin_score, skin_done = _check_skin(skin_d, prof, thresholds)
+    skin_check, skin_score, skin_done = _check_skin(
+        skin_d, prof, thresholds, _source_skin(brf))
     # Smoothing is decided before the anatomy check reads the defects, because
     # it is the one defect whose meaning depends on who produced the pixels.
     smoothing = _smoothing_verdict(str(image_path), img, face_d, brf, scan_defects)

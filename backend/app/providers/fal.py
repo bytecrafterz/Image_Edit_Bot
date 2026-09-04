@@ -464,10 +464,33 @@ class FalProvider(ImageProvider):
             if urls:
                 payload["image_urls"] = urls
                 meta["n_references"] = len(urls) - (1 if req.source_path else 0)
+                # A fingerprint of each picture that really went out, so "three
+                # photographs of her" can be checked instead of believed.  The
+                # old code sent her source photograph twice - as the image to
+                # edit and as its own identity reference - and nothing on any
+                # row could have told anybody: two identical digests here say
+                # it at a glance, and they cost one sha1 over bytes that are
+                # already in memory.
+                meta["image_digests"] = [
+                    hashlib.sha1(u.encode("ascii")).hexdigest()[:12]
+                    for u in urls]
 
         if "mask" in knobs and req.mask_path:
             payload["mask_url"] = _encode(str(req.mask_path), side, mask=True)[0]
             meta["masked"] = True
+            # The fill endpoint has no aspect knob: it answers in the shape of
+            # the picture it was given, so the shape ORDERED is the source's
+            # own and there is nothing to ask for.  It is recorded anyway,
+            # because "which shape did this call order?" must have an answer on
+            # every paid row - the square that survived 23 paid images was
+            # invisible precisely because no row carried it - and because a
+            # masked call that came back reframed would have silently moved the
+            # mask off her face.
+            size = meta.get("source_size") or []
+            if len(size) == 2 and size[0] and size[1]:
+                meta["aspect_ratio"] = _aspect_ratio(int(size[0]), int(size[1]))
+                meta["aspect_asked"] = round(int(size[0]) / float(size[1]), 4)
+                meta["aspect_source"] = "mascara"
 
         if "strength" in knobs:
             payload["strength"] = round(_clamp(req.strength, 0.05, 1.0, 0.55), 3)

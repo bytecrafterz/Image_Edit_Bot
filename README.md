@@ -57,7 +57,7 @@ construyeron el perfil, y se compara con **la propia foto de origen**.
 | `identity_face` | firma de reconocimiento facial SFace (128 valores) contra la media de tus fotos, mínimo 0.45 | 30% |
 | `body_proportions` | anchos sobre la longitud del torso, el perfil de silueta a 9 alturas del torso y el perfil de figura a hasta 29 alturas medidas en cabezas | 25% |
 | `skin_tone` | croma a*/b* con tolerancia adaptada a tu propia variación | 15% |
-| `anatomy` | manos, dedos, extremidades, personas de más, texturas fundidas | 20% |
+| `anatomy` | manos, dedos, extremidades, personas de más, texturas fundidas — y **declara la mano que no ha podido juzgar** en vez de darla por buena | 20% |
 | `quality` | nitidez, exposición, contraste, ruido | 10% |
 
 ### La cara: reconocimiento, no parecido geométrico
@@ -69,11 +69,13 @@ no podía dispararse. Desde septiembre de 2026 la firma es un **embedding SFace 
 128 valores** (OpenCV Zoo, Apache-2.0, se ejecuta en local) comparado por coseno
 contra la media de los embeddings de sus fotos, con el mínimo en **0.45**.
 
-Sobre las mismas imágenes: sus fotos 0.6740 - 0.8718 (24 de 24 aceptadas), ocho
-mujeres distintas 0.0194 - 0.1948 (8 de 8 rechazadas) y las dos imágenes de pago
-que la clienta rechazó a mano 0.1829 y 0.2862 (rechazadas). Entre la mejor cara
-ajena y su peor fotografía propia no hay ninguna imagen: el límite se pone dentro
-de esa franja vacía.
+Barrido del 2026-09-04, con la comprobación que realmente decide: sus 24
+fotografías 0.6908 - 0.8737 (24 de 24 aceptadas), dos fotos suyas que el perfil
+no ha visto nunca 0.7624 y 0.8222 (aceptadas), ocho mujeres distintas 0.0201 -
+0.1925 (8 de 8 rechazadas) y las cuatro imágenes de pago que hay en disco y no
+son ella 0.2920 - 0.3968 (4 de 4 rechazadas). Entre la mejor cara ajena (0.3968)
+y su peor fotografía propia (0.6908) no hay ninguna imagen: el límite, 0.45, se
+pone dentro de esa franja vacía.
 
 Los pesos no se versionan (37 MB); se descargan con
 `python scripts\fetch_face_model.py`. Sin ellos la comprobación se informa como
@@ -166,7 +168,7 @@ El sistema funciona **completo desde el primer minuto sin ninguna clave**.
 |---|---|---|
 | Generación | motor local: fondo, color de ropa, luz, grado, encuadre | fal.ai: edición generativa e inpainting real |
 | Lectura de la foto | visión por computador local | Claude lee la foto y redacta el prompt |
-| Coste | **0 USD** | según modelo, siempre a la vista |
+| Coste | **0 USD** | 0.04 USD por imagen en cualquier nivel salvo borrador, con el perfil construido; siempre a la vista |
 | Recorrido completo | sí | sí |
 
 El motor local **no es IA generativa** y no pretende serlo: es transformación
@@ -203,6 +205,14 @@ Tres reglas, escritas en el código y no sólo prometidas:
 Además: límite diario, límite mensual, coste por imagen visible antes de
 generar, y la métrica que importa — **intentos por foto conseguida**.
 
+Los tres ajustes que gobiernan el gasto de una tirada — `max_retries`,
+`max_repair_rounds` y `autorepair` — **llegan a la tirada desde el 2026-09-04**;
+hasta entonces se guardaban y no los leía nadie. La misma lectura alimenta el
+techo que se enseña antes de pagar, así que la promesa de la pantalla y lo que
+la tirada puede llegar a gastar son un solo número: para 3 imágenes en alta,
+1.7100 USD de serie, 0.2400 con `autorepair` apagado y 0.0800 con 0 reintentos y
+0 reparaciones.
+
 ---
 
 ## Las pantallas
@@ -210,7 +220,7 @@ generar, y la métrica que importa — **intentos por foto conseguida**.
 | Pantalla | Para qué |
 |---|---|
 | **Crear** | El recorrido en 5 pasos: foto → cambios → coste → trabajo → elegir |
-| **Álbum** | Todo lo generado, con visor, descarga, favoritos y ficha |
+| **Álbum** | Todo lo generado, con visor, descarga, favoritos, ficha y *Marcar final* (pasa a "Finales" por 0.00 USD lo que ya pasó todas las comprobaciones) |
 | **Favoritos** | Lo que guardaste, con descarga en lote |
 | **Mis fotos** | Fotos de referencia y el perfil de identidad |
 | **Ajustes** | Saldo, avisos, uso, límites, comportamiento, claves, cuenta |

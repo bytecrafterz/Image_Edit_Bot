@@ -182,7 +182,10 @@ def classify_shot(img_bgr, pose: dict, face: dict) -> dict
 ### `analysis/anomaly.py`
 ```python
 def scan_anomalies(img_bgr, pose: dict, face: dict, masks: dict) -> dict
-# {"ok", "defects": [Defect], "score": 0..1}
+# {"ok", "defects": [Defect], "score": 0..1,
+#  "unjudged": [{"where": "left_hand"|"right_hand"|"hand",
+#                "reason": str,        # Spanish, e.g. "sale del encuadre"
+#                "bbox": [x, y, w, h]}]}
 ```
 `Defect`:
 ```python
@@ -197,6 +200,16 @@ def scan_anomalies(img_bgr, pose: dict, face: dict, masks: dict) -> dict
 ```
 Hand checks use MediaPipe Hands: finger count, digit length ratios, palm area
 vs wrist width, and count of detected hands vs count of detected wrists.
+
+`unjudged` is the other half of the contract and it is not optional: a hand that
+is cut by the frame, or smaller than `HAND_MIN_PX` (170), cannot produce a
+severity that reaches `ANATOMY_SEVERITY_MAX` (0.60) however deformed it is, so an
+empty `defects` list does NOT mean the hands were checked. Measured 2026-09-04
+over the 24 originals and every generated frame on disk, 26 of 38 detected hands
+survive the truncation test and none of them reaches 170 px (largest 157,
+median 68); no geometric or edge-energy measure separates her real hands from
+melted generated ones at that size. Callers must report `unjudged` rather than
+imply the hands passed.
 
 ---
 
@@ -253,7 +266,12 @@ Returns the **Verdict**:
 {"passed": bool,
  "score": 0..1,                       # weighted mean of check scores
  "checks": [{"name": str, "value": float, "threshold": float,
-             "passed": bool, "weight": float, "detail": str}],
+             "passed": bool, "weight": float, "detail": str,
+             # optional, and every one of them means "this check passed but
+             # did not verify what its name promises":
+             "advisory": bool,        # the engine could not have caused it
+             "parcial_es": str,       # body: only a NARROWING could still fail
+             "unjudged_es": str}],    # anatomy: "2 manos" nobody could judge
  "defects": [Defect],
  "repairable_defects": [Defect],
  "summary": str,                      # Spanish, shown to the user
@@ -324,9 +342,24 @@ def choose_provider(req_kind: str, quality: str, budget_usd: float,
 # price; when only that provider is left it is still returned - the run never
 # fails - and `reason` names, in Spanish, the changes that will not be applied.
 def unsupported_changes(provider, changes=None) -> list[str]
-def estimate_run_cost(plan: dict, quality: str) -> dict
+def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
+                      user_id: str = "") -> dict
 # {"total_usd": f, "per_image_usd": f, "provider": str, "model": str,
-#  "breakdown": [...], "free": bool}
+#  "breakdown": [...], "free": bool, "total_max_usd": f, "intentos_maximos": int,
+#  "aviso_coste": str, "aviso_opciones": str, ...}
+
+# The retry/repair limits this user set in Ajustes, clamped by the configured
+# maxima.  The CALLER passes the same dict to the run: reading the setting twice
+# is how an estimate that prices two attempts ends up beside a run that buys
+# three.  {"max_retries": int, "max_repair_rounds": int}
+def user_limits(user_id: str) -> dict
+
+# Paid images per catalogue option and how many were really her, seeded from a
+# hand-measured table (SEED_HISTORY, re-scored 2026-09-04 off the files on disk)
+# and extended from the database for everything paid after SEED_UNTIL.  Only
+# attempts whose stored verdict carries identity_face.threshold == 0.45 count:
+# 0.72 is the retired blind descriptor that read 0.99 on a stranger.
+def option_history(user_id: str = "") -> dict[tuple[str, str], tuple[int, int]]
 ```
 
 ### `generation/repair.py`
@@ -468,6 +501,11 @@ GET    /api/album?kind=&limit=&offset=   -> {images, total}
 DELETE /api/album/{image_id}
 GET    /api/album/{image_id}/download
 POST   /api/album/{image_id}/feedback    {verdict, reason}
+POST   /api/album/{image_id}/final       -> {ok, kind: "final", cost_usd: 0.0, mensaje}
+       # Relabels an image that ALREADY passed every check as a final, for
+       # 0.00 USD.  409 if the verdict did not pass, 410 if the file is gone.
+       # run_final re-renders and bills; this does not, because the pixels are
+       # already bought.
 
 GET    /api/favorites                    -> {images}
 POST   /api/favorites/{image_id}
