@@ -58,9 +58,19 @@ html, body {
   margin: 0; padding: 0;
   background: var(--bg); color: var(--text);
   font-family: var(--font); font-size: 16px; line-height: 1.5;
-  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Only the root clips sideways.  The same rule on <body> used to be here too,
+   and it quietly killed every sticky element in the app: an overflow other
+   than visible turns <body> into the scrollport for its descendants, and that
+   scrollport never scrolls (the page scrolls the viewport, not the body), so
+   nothing inside it ever reaches a sticky edge.  The app bar simply scrolled
+   away, and the selection bar of the album stayed parked at the bottom of a
+   four thousand pixel grid where nobody could ever press Eliminar.  Clipping
+   on the root propagates to the viewport, so the sideways clipping we wanted
+   is still there. */
+html { overflow-x: hidden; }
 
 body { padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom)); }
 
@@ -233,7 +243,15 @@ textarea { min-height: 96px; resize: vertical; }
   color: var(--accent-text); font-size: .8rem; font-weight: 700;
   display: grid; place-items: center; line-height: 1;
 }
-.selection-bar { box-shadow: 0 -4px 18px rgba(36,31,27,.14); }
+/* The bar rides above the grid while picking.  It has to clear the fixed
+   tabbar: that sits at the bottom with a higher stacking order, so a bar
+   parked at bottom: 10px is drawn underneath it and swallows the taps meant
+   for Eliminar. */
+.selection-bar {
+  position: sticky; z-index: 20; margin-top: 14px;
+  bottom: calc(var(--bar-h) + env(safe-area-inset-bottom) + 10px);
+  box-shadow: 0 -4px 18px rgba(36,31,27,.14);
+}
 
 /* --------------------------------------------------------------- feedback */
 

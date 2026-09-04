@@ -100,6 +100,32 @@ def create_app() -> FastAPI:
         }
 
     # ------------------------------------------------------- static assets
+    # The app ships as plain ES modules with no build step and no hash in their
+    # names, so /js/pages/album.js is the same URL forever.  Served without a
+    # Cache-Control header - which is what StaticFiles does - a browser is free
+    # to invent its own freshness from Last-Modified and keep serving a copy it
+    # already has, without ever asking.  Chrome did exactly that: the album kept
+    # posting to an endpoint that had since been renamed and answered "Method
+    # Not Allowed", while the file on disk and the file the server returned were
+    # both correct and every reload showed the same stale behaviour.  That is
+    # unfalsifiable from the user's side and it cost a day.
+    #
+    # no-cache does NOT mean "do not store": the browser still caches and still
+    # gets a 304 on an unchanged file thanks to the ETag, so the traffic is a
+    # conditional request, not a re-download.  It only removes the browser's
+    # licence to skip asking.  Applied to the shell (html/js/css) alone; icons
+    # and generated images keep the default, because those really are immutable
+    # and are the only ones big enough for it to matter.
+    @app.middleware("http")
+    async def revalidate_app_shell(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if (path in ("/", "/sw.js", "/manifest.webmanifest")
+                or path.startswith("/js/") or path.startswith("/css/")
+                or not path.startswith(("/api/", "/icons/", "/assets/"))):
+            response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
     if FRONTEND_DIR.exists():
         app.mount("/css", StaticFiles(directory=FRONTEND_DIR / "css"), name="css")
         app.mount("/js", StaticFiles(directory=FRONTEND_DIR / "js"), name="js")

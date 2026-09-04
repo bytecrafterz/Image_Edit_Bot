@@ -208,10 +208,9 @@ export function selectionBar({ onSelectAll, onClear, onCancel, actions }) {
       onClick: () => action.onClick(),
     }, action.label));
 
-  const bar = el('div', {
-    class: 'card selection-bar', hidden: true,
-    style: { position: 'sticky', bottom: '10px', zIndex: '20', marginTop: '14px' },
-  }, [
+  // Placement lives in .selection-bar so it can measure itself against the
+  // tabbar with env() and var(), which an inline style object cannot reach.
+  const bar = el('div', { class: 'card selection-bar', hidden: true }, [
     el('div', { class: 'card__row', style: { flexWrap: 'wrap', gap: '10px' } }, [
       el('span', {}, [count, document.createTextNode(' seleccionadas')]),
       el('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } }, [
