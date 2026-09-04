@@ -1,13 +1,21 @@
 # Calibración del control de identidad
 
 Este documento recoge **medidas reales**, no opiniones, sobre si el control
-automático de identidad funciona. Se obtiene ejecutando:
+automático de identidad funciona. Cubre las dos mitades del control, y cada una
+se reproduce por su lado:
 
-```
-python scripts\calibrate_identity.py --paired --measurable-only
-```
+* **el cuerpo** (¿detecta que la han adelgazado?) con
 
-Reprodúcelo cada vez que cambien los umbrales o lleguen fotos nuevas.
+  ```
+  python scripts\calibrate_identity.py --paired --measurable-only
+  ```
+
+* **el rostro** (¿distingue su cara de la de otra persona?) puntuando con los
+  módulos del robot las fotos que ya están en disco; la receta exacta está en
+  «Cómo reproducirlo», más abajo.
+
+Ninguna de las dos llama a un servicio de pago ni saca una imagen de la máquina.
+Reprodúcelas cada vez que cambien los umbrales o lleguen fotos nuevas.
 
 ---
 
@@ -37,6 +45,97 @@ Dos números importan, y tiran en direcciones opuestas:
 La detección se mide **neta** a propósito: un control que rechaza todo obtiene
 100% de detección y no vale nada. Solo cuentan las fotos que el sistema aceptó
 cuando estaban intactas.
+
+---
+
+## El rostro: de un control ciego a uno que separa
+
+Hasta septiembre de 2026 la comprobación de la cara **no podía funcionar**, y
+conviene que quede escrito con números porque es el defecto que más caro salió.
+
+La firma era un descriptor geométrico y fotométrico de 64 valores
+(`analysis/face.py`). Medido contra el perfil almacenado:
+
+| población | parecido con el descriptor viejo |
+|---|---|
+| Sus 24 fotografías reales | 0.9832 - 0.9993 |
+| 8 fotografías de **8 mujeres distintas** | 0.9577 - 0.9945 |
+| Las 2 imágenes de pago que ella rechazó de un vistazo | 0.9905 y 0.9960 |
+
+Las dos poblaciones **se solapan** (la peor foto suya, 0.9832, cae por debajo de
+la mejor impostora, 0.9945) y el umbral exigido era 0.72, un cuarto de escala por
+debajo de todo. La puerta no es que fallara: **no podía disparar nunca**, y por
+eso aprobó dos imágenes de otra mujer.
+
+Hoy la firma es un **embedding SFace de 128 valores** (`identity/embedding.py`,
+pesos del OpenCV Zoo, Apache-2.0, se descargan con
+`python scripts\fetch_face_model.py`). Cada imagen se compara por coseno contra
+la **media de los embeddings de sus fotos**, guardada en el perfil.
+
+| población | parecido medido hoy | veredicto con el límite 0.45 |
+|---|---|---|
+| Sus 24 fotografías, cada una contra la media de **las otras 23** | 0.6429 - 0.8715 | 24 de 24 **aceptadas** |
+| Sus 24 fotografías contra la media guardada en el perfil | 0.6740 - 0.8718 | 24 de 24 **aceptadas** |
+| 2 fotos suyas que el perfil **no ha visto nunca** | 0.7624 y 0.8222 | aceptadas |
+| 8 fotografías de 8 mujeres distintas | 0.0194 - 0.1948 | 8 de 8 **rechazadas** |
+| 6 imágenes generadas cuya cara no es la suya | 0.1829 - 0.3968 | 6 de 6 **rechazadas** |
+| - de ellas, las 2 de pago que ella rechazó | 0.1829 y 0.2862 | **rechazadas** |
+| 32 imágenes generadas cuya cara sí es la suya | 0.5279 - 0.7925 | aceptadas |
+
+**Separación medida: +0.2461.** Entre la mejor cara ajena (0.3968) y su peor
+fotografía propia (0.6429) no hay ninguna imagen. El límite **0.45** se pone
+dentro de esa franja vacía: queda 0.056 por encima de la peor impostora y 0.19
+por debajo de su peor foto. No es un número redondo elegido a mano, es el centro
+de un hueco que se puede medir.
+
+Con galerías más pequeñas el hueco aguanta: repitiendo 300 sorteos con perfiles
+de 6, 8, 10, 12, 16 y 20 fotos y puntuando las que quedaban fuera (21.600
+puntuaciones), **ninguna** bajó de 0.5618.
+
+### Cómo reproducirlo
+
+`calibrate_identity.py` mide el cuerpo, no la cara. Los números de arriba salen
+de puntuar los archivos que ya están en disco con los propios módulos del robot,
+sin llamar a nadie ni gastar un céntimo:
+
+```python
+from app.identity import embedding as emb
+from app.analysis import face as face_mod
+v = emb.face_embedding(img, face_mod.detect_face(img))   # 128 valores
+emb.similarity(v, profile["face"]["embedding_mean"])     # 0..1, 1 = idéntica
+```
+
+### Lo que hizo falta para que funcionara
+
+Tres de sus fotografías están guardadas giradas (son selfies de móvil), y
+MediaPipe les ajustaba la malla del revés: el recorte alineado salía invertido y
+el reconocedor leía a una desconocida (0.1835, 0.1554, 0.1549, **por debajo de
+cualquier impostora**). El embedding recorta la cabeza con la malla y después
+elige, entre los cuatro ángulos rectos, el que YuNet reconoce con más confianza.
+Eso subió esas tres a 0.7180 / 0.8435 / 0.7447 y la peor fotografía del conjunto
+de 0.1549 a 0.6362.
+
+Por el mismo motivo, cuando la malla cae sobre algo que no es una cara (foto
+girada, muy pequeña o muy recortada) se pide una segunda opinión sobre el
+fotograma entero, y solo gana si es **claramente** más segura
+(`MESH_TRUSTED_CONF` 0.90, `RESCUE_MARGIN` 0.10, ambos medidos y comentados en
+`identity/embedding.py`). Con eso, sus 24 fotos espejadas, giradas en los cuatro
+ángulos rectos y en +/-15 y +/-25 grados, oscurecidas, sobreexpuestas, a
+contraluz, recortadas y comprimidas a JPEG de calidad 20 **pasan las 24**.
+
+### Lo que no está garantizado
+
+* La puerta acepta una cara que sea hasta un **60-65% de otra persona** por peso
+  de píxel: mezclando su recorte alineado con el de una desconocida, la mitad de
+  las mezclas deja de pasar en torno a alfa 0.65. Es una propiedad del coseno
+  contra una media, no un fallo, y ningún umbral dentro de la franja vacía lo
+  cambia.
+* Entradas destruidas (una cara de 30-40 px, una sobreexposición que quema más
+  de la mitad del cuadro) sí se rechazan. No es un error de la puerta, pero se
+  cuenta como rechazo y **se paga otra generación**.
+* Sin los pesos en disco, o con un perfil construido antes de este cambio, la
+  comprobación se informa como **no realizada** ("no se pudo comprobar el
+  rostro") y se queda fuera de la nota. Nunca pasa en silencio.
 
 ---
 
@@ -150,6 +249,9 @@ Umbrales relevantes, todos en un sitio:
 
 | constante | archivo | valor | qué hace |
 |---|---|---|---|
+| `face_embed_min` | `identity/profile.py` | 0.45 | parecido facial mínimo: coseno del embedding SFace contra la media de sus fotos |
+| `MESH_TRUSTED_CONF` | `identity/embedding.py` | 0.90 | confianza por debajo de la cual el recorte de la malla pide una segunda opinión |
+| `RESCUE_MARGIN` | `identity/embedding.py` | 0.10 | cuánto más segura tiene que ser esa segunda opinión para ganar |
 | `PAIRED_TOL` | `identity/verify.py` | 0.08 | cambio máximo de forma frente a la foto de origen |
 | `HEAD_TOL` | `identity/verify.py` | 0.04 | lo mismo, con la regla que no depende del encuadre (en cabezas) |
 | `SMOOTH_TEXTURE_LOSS_MAX` | `identity/verify.py` | 0.14 | grano de piel perdido a partir del cual se rechaza |

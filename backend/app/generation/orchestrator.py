@@ -898,6 +898,14 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             if not settled:
                 billing.release(hold)
 
+        # What was ordered and what arrived, on the attempt row, before
+        # anything downstream can resize or repaint the file and make the two
+        # agree by accident.
+        shape = _shape_facts(result)
+        merged.update(shape["params"])
+        if shape["note"]:
+            _plan_note(run_id, shape["note"])
+
         # The engine keeps her shape and her colour and sands off the band
         # underneath: her pores, her fine lines, the grain her camera really
         # recorded.  Give it back from her own photograph before anything is
@@ -1036,6 +1044,50 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
 
     return {"accepted": False, "cost": cost, "attempts": attempts,
             "repaired": repaired}
+
+
+def _shape_facts(result) -> dict:
+    """The shape ordered, the shape delivered, and one sentence when they differ.
+
+    This is the half of the 1:1 defect that was never fixed.  request_geometry
+    now orders her 3:4 instead of a square, but NOTHING read the answer: the
+    two images she rejected on 2026-09-04 are 1024x1024 rows whose meta_json
+    says only {choices, seed}, so which ratio was sent could not be told from
+    the database at all and had to be inferred from the endpoint that billed
+    them.  The provider reports both numbers now; here they are turned into a
+    row on the attempt and, when they disagree, into one Spanish line on the
+    run - because a shape she was promised and did not get is a defect she is
+    entitled to read about without measuring the file herself.
+
+    A rehearsal is excluded from the FIRST of the two warnings on purpose:
+    MODO ENSAYO answers from a folder of old squares, and letting that accuse
+    fal of ignoring the request would be a warning about a call that never
+    happened.  The second one is a property of the request itself - the
+    endpoint has no such shape to sell - so it is true with or without a
+    network, and a rehearsal must show it.
+    """
+    meta = getattr(result, "meta", None) or {}
+    asked = str(meta.get("aspect_ratio") or "")
+    got = str(meta.get("delivered_aspect") or "")
+    params: dict = {}
+    if asked:
+        params["forma_pedida"] = asked
+    if got:
+        params["forma_entregada"] = got
+    note = ""
+    if asked and got and asked != got and not meta.get("replay"):
+        note = ("Aviso: se pidio la imagen en %s y %s la ha devuelto en %s "
+                "(%sx%s px). El recorte no es el que elegiste."
+                % (asked, result.provider, got, meta.get("width"),
+                   meta.get("height")))
+    elif asked and meta.get("aspect_exact") is False:
+        note = ("Aviso: %s no acepta la forma exacta del encuadre elegido "
+                "(%.2f); se pide %s, la mas parecida que ofrece, asi que la "
+                "imagen sale un poco mas estrecha que la vista previa del "
+                "motor gratuito."
+                % (result.provider, float(meta.get("aspect_asked") or 0.0),
+                   asked))
+    return {"params": params, "note": note}
 
 
 def _local_hints(choices: dict) -> dict:

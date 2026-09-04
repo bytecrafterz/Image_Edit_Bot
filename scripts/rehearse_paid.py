@@ -135,6 +135,7 @@ def install_spies() -> None:
                 "aspect": meta.get("aspect_ratio", "-"),
                 "endpoint": result.model,
                 "entregado": "%sx%s" % (meta.get("width"), meta.get("height")),
+                "aspect_dado": meta.get("delivered_aspect", "-"),
                 "coste": float(result.cost_usd or 0.0),
                 "archivo": meta.get("replay_file", "-"),
                 "ensayo": bool(meta.get("replay")),
@@ -446,20 +447,30 @@ def main() -> int:
 
     # ----------------------------------------------------- 8. lo que se envio
     print("\n8. Lo que se envio a fal (y lo que habria costado)")
-    print("     %-9s %-28s %-10s %-6s %-10s %-8s %s"
-          % ("operacion", "endpoint", "pedido", "aspec", "entregado", "USD",
-             "archivo"))
+    print("     %-9s %-28s %-10s %-6s %-10s %-6s %-8s %s"
+          % ("operacion", "endpoint", "pedido", "aspec", "entregado", "dado",
+             "USD", "archivo"))
     for call in CALLS:
-        print("     %-9s %-28s %-10s %-6s %-10s %-8s %s"
+        print("     %-9s %-28s %-10s %-6s %-10s %-6s %-8s %s"
               % (call["operation"], call["endpoint"], call["pedido"],
-                 call["aspect"], call["entregado"], money(call["coste"]),
-                 call["archivo"]))
+                 call["aspect"], call["entregado"], call["aspect_dado"],
+                 money(call["coste"]), call["archivo"]))
     check("ninguna llamada salio a la red",
           bool(CALLS) and all(c["ensayo"] for c in CALLS),
           "%d llamadas, todas en modo ensayo" % len(CALLS))
     check("se pidio SU forma, no un cuadrado",
           bool(CALLS) and all(c["aspect"] in ("3:4", "-") for c in CALLS),
           "aspectos pedidos: %s" % sorted({c["aspect"] for c in CALLS}))
+    # Asking for the right shape and never looking at the answer is how the
+    # square survived 23 paid images: both halves are recorded now, so a run
+    # can be audited from its own rows.  The shape DELIVERED here is the shape
+    # of a file copied out of the ensayo folder, not fal's, so it is printed
+    # and not judged.
+    with_aspect = [c for c in CALLS if c["aspect"] != "-"]
+    check("de cada llamada consta la forma pedida y la entregada",
+          bool(with_aspect) and all(c["aspect_dado"] != "-" for c in with_aspect),
+          "%d de %d llamadas llevan las dos formas"
+          % (len(with_aspect), len(CALLS)))
 
     # ------------------------------------------------------------- 9. dinero
     print("\n9. Dinero: lo cotizado, lo retenido y lo liquidado")

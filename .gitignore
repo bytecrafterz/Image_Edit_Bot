@@ -68,3 +68,16 @@ $RECYCLE.BIN/
 *.log
 logs/
 tmp/
+
+# =====================================================================
+#  Face recognition weights
+#
+#  backend/app/models holds the two OpenCV Zoo ONNX files the identity
+#  check runs on (Apache-2.0, github.com/opencv/opencv_zoo).  The SFace
+#  recogniser alone is 37 MB - larger than the whole rest of this
+#  repository - so it is fetched instead of committed:
+#      python scripts/fetch_face_model.py
+#  The script verifies the sha256 of the exact revision the threshold in
+#  identity/profile.py was calibrated against.
+# =====================================================================
+backend/app/models/*.onnx

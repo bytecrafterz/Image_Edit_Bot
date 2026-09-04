@@ -153,7 +153,7 @@ contra una media de nadie. Cinco comprobaciones:
 
 | Comprobacion | Que mide | Limite | Peso |
 |---|---|---|---|
-| **El rostro** | firma geometrica y fotometrica de la cara, 64 valores | parecido >= 0.72 | 30% |
+| **El rostro** | firma de reconocimiento facial, 128 valores (SFace), comparada con la media de tus fotos | parecido >= 0.45 | 30% |
 | **Las proporciones** | tu figura a hasta 29 alturas desde la barbilla, **en unidades del largo de tu cabeza**, mas la silueta del torso a 9 alturas y las medidas del esqueleto | cambio de forma <= 4% con la regla de la cabeza, <= 8% con las del torso | 25% |
 | **El tono de piel** | color a*/b* de la piel, sin contar la luminosidad, que cambia con la luz | banda adaptada a tu propia variacion | 15% |
 | **La anatomia** | manos, dedos, extremidades, personas de mas, zonas fundidas y **piel demasiado suavizada** | gravedad <= 0.6 | 20% |
@@ -197,9 +197,17 @@ Sobre tus fotos reales, esa comprobacion mide hoy
    *el rostro no coincide con el tuyo*, *cambiaron tus proporciones*, *cambio tu
    tono de piel*, *hay errores anatomicos*, *la calidad tecnica es baja*.
 
-En el ensayo de hoy, de 5 intentos: 3 aceptadas, 2 descartadas por *hay errores
-anatomicos*, 3 rondas de reparacion de las que 2 mejoraron y 1 se revirtio
-entera, 1.67 intentos por foto conseguida.
+En el ensayo de hoy (`python scripts\rehearse_paid.py`, calidad alta, 3 vistas,
+coste real 0.00 USD porque las imagenes salen de disco y la red esta cerrada):
+7 intentos, **1 aceptada y 6 descartadas**, 6 rondas de reparacion de las que 4
+mejoraron, 7.0 intentos por foto conseguida.
+
+Las 6 descartadas lo fueron por **el rostro no coincide con el tuyo**, y eso es
+nuevo: hasta septiembre esa comprobacion no podia rechazar nada (ver *La cara*,
+mas abajo), asi que el mismo ensayo aceptaba imagenes de otra cara. El numero
+tiene su cara amarga: en ese ensayo se llamo 16 veces al proveedor y se
+liquidaron 1.01 USD frente a los 0.43 estimados, dentro del techo anunciado de
+2.07 USD. Es el precio de que el control por fin funcione con este motor.
 
 Si en cualquier punto el saldo no cubre la siguiente llamada, la tirada se
 **detiene**, guarda lo que ya habia aceptado y te avisa de cuanto falta. Nunca
@@ -240,7 +248,7 @@ esta comprobacion.
 
 | | resultado |
 |---|---|
-| Cara reconocida en las 15 | parecido 0.9901 a 0.9983, con un minimo exigido de 0.72 |
+| Cara reconocida | ver el apartado siguiente: con la firma de hoy, **6 de las 17** imagenes de pago que hay en disco NO son tu cara |
 | Salieron **mas estrechas** de lo que eres, por encima del limite | **1 de 15** (-4.2%), y la puerta la rechaza |
 | Salieron mas anchas por encima del limite | 7 de 15, de +4% a +19%, explicable por el abrigo o la chaqueta que se pidio: se informa, no se rechaza |
 | Desviacion mediana de la figura | 4.1% |
@@ -249,9 +257,68 @@ Es decir: de las 15 imagenes de pago, **el motor te estrecho una sola vez, y esa
 la caza el control**. El resto de la desviacion va en la direccion que la ropa
 nueva explica.
 
+### La cara: lo que antes no se media
+
+Hasta septiembre de 2026 esta comprobacion estaba **ciega**, y hay que decirlo
+claro porque tu pagaste dos imagenes por ese fallo. La firma antigua daba 0.9832
+a 0.9993 en tus 24 fotos y 0.9577 a 0.9945 en fotos de **ocho mujeres
+distintas**: los dos rangos se solapan, asi que el minimo de 0.72 no podia
+rechazar a nadie. Las dos imagenes de pago que tu rechazaste de un vistazo
+sacaron 0.9905 y 0.9960 y **fueron aprobadas**.
+
+Hoy la firma es un reconocedor facial de verdad (SFace, 128 valores, funciona en
+tu maquina, no sale ninguna foto de aqui). Sobre las mismas imagenes:
+
+| | parecido de hoy |
+|---|---|
+| Tus 24 fotografias | 0.6740 a 0.8718 - **las 24 pasan** |
+| Fotos tuyas que el perfil nunca vio | 0.7624 y 0.8222 - pasan |
+| Fotos de 8 mujeres distintas | 0.0194 a 0.1948 - **las 8 se rechazan** |
+| Las 17 imagenes de pago que hay en disco | 6 entre 0.1829 y 0.3968 (**se rechazan**), 11 entre 0.5279 y 0.7173 (pasan) |
+| Las 2 que tu rechazaste | 0.1829 y 0.2862 - **se rechazan** |
+| Las 21 del motor gratuito | 0.7233 a 0.7925 - todas pasan |
+
+Entre la mejor cara ajena (0.3968) y tu peor fotografia (0.6429 en la prueba mas
+dura) **no hay ninguna imagen**. El minimo se pone en 0.45, en mitad de ese
+hueco.
+
+**Lo que garantiza:** si la imagen lleva la cara de otra mujer, no llega a tu
+album, la ficha lo dice con el numero y el motivo es *"el rostro no coincide con
+el tuyo"*.
+
+**Lo que cuesta cuando rechaza por la cara.** Una cara equivocada **no se puede
+reparar por zonas**: un retoque local puede devolver grano a una mejilla, pero no
+puede convertir a otra mujer en ti. Asi que:
+
+* la imagen rechazada **ya esta pagada** (0.04 USD en vista previa, 0.08 USD en
+  alta): la llamada se hizo y el proveedor cobra igual;
+* el robot **genera otra entera**, a ese mismo precio, no al de reparacion
+  (0.05 USD), que aqui no se usa, y como mucho **2 reintentos por vista** antes
+  de descartarla con el motivo escrito;
+* el saldo se comprueba **antes de cada llamada**, asi que nunca se gasta mas de
+  lo que tienes, y el aviso de coste de la pantalla ya cuenta con que 1 de cada
+  3 se repita (factor 1.35) y te ensena el techo del peor caso.
+
+**Lo que NO garantiza:**
+
+* No promete que la imagen se te parezca *mucho*, solo que la cara es la tuya y
+  no la de otra persona. Un parecido de 0.53 pasa el control y puede seguir sin
+  gustarte: **la ultima palabra es tuya**.
+* Si el motor devuelve una cara mezclada, el control la acepta mientras quede
+  algo menos de dos tercios de la otra persona. Medido con mezclas artificiales:
+  la mitad dejan de pasar en torno al 65% de cara ajena.
+* Si la cara sale minuscula (30-40 px) o quemada por la luz, el control no puede
+  leerla y **rechaza**. Es un rechazo honesto, pero se paga otra generacion.
+* Si faltan los pesos del reconocedor en la maquina, el control **no inventa un
+  aprobado**: dice "no se pudo comprobar el rostro" y se queda fuera de la nota.
+  Se instalan con `python scripts\fetch_face_model.py`.
+
 ### Resumen para decidir
 
-- La cara y las proporciones **estan protegidas y medidas**.
+- La cara **esta protegida y medida de verdad desde septiembre de 2026**: 6 de
+  las 17 imagenes de pago que hay en disco no son tu cara y hoy se rechazan,
+  incluidas las dos que tu rechazaste a mano. Las proporciones siguen medidas
+  como antes.
 - La piel **es el punto debil del modelo de pago**, y por eso 7 de 15 se
   descartan. Cuenta con que una parte de lo que pagues se vaya en reintentos:
   eso es exactamente el factor 1.35 y el techo que te ensena la pantalla.

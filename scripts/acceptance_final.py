@@ -14,8 +14,8 @@ her own photograph - never against a constant measured on somebody else:
               than the 0.04 the gate allows on the head ruler and far above
               the instrument's own scatter (0.4% between two resolutions of
               the same file, 1.1% in the worst case measured).
-    rostro    the identity_face check the gate computed, >= 0.95 - well past
-              the 0.72 it needs to pass, because an engine that only replaced
+    rostro    the identity_face check the gate computed, >= 0.65 - well past
+              the 0.45 it needs to pass, because an engine that only replaced
               the background has no excuse for having moved her face.
     tono      the skin_tone check must have passed.
     veredicto verify_image itself, printed with the detail string of every
@@ -47,7 +47,26 @@ from app.identity import verify as verify_mod             # noqa: E402
 
 TEXTURE_TOL = verify_mod.SMOOTH_TEXTURE_LOSS_MIN          # 0.09
 PROFILE_TOL = 0.03
-FACE_MIN = 0.95
+# The strictest bar that never calls one of her own photographs a stranger.
+# The gate stopped reading the geometric descriptor and reads the SFace
+# embedding instead, so the old 0.95 was a line on a scale that no longer
+# exists: on the descriptor her photographs and eight other women all sat
+# between 0.958 and 0.999, while on the embedding, measured over the 24
+# photographs in input/Nayane with each one scored against the mean of the
+# other 23, she comes out 0.6565 .. 0.8763 (p5 0.7117, median 0.8218).  Left at
+# 0.95 this script called every genuine result a failure: the six local images
+# of run_3c48c00f69bf40ad9edc8c9b that the gate accepts with "Eres tu" read
+# 0.7694 and were printed FALLA.
+#
+# 0.65 sits just under her own worst photograph, which is the tightest promise
+# this ruler can keep, and it is still far above everything that is not her:
+# the 21 results of the composite-only local engine - the engine this script
+# was written to judge, which never redraws a face - measure 0.7242 .. 0.8019,
+# so they clear it by 0.074 at worst, while eight photographs of eight other
+# women read 0.0365 .. 0.2054 and the six paid results whose faces are visibly
+# wrong read 0.1871 .. 0.3943, every one of them at least 0.25 below the line.
+# It keeps the original intent too: 0.20 above the 0.45 the gate itself needs.
+FACE_MIN = 0.65
 
 
 # ------------------------------------------------------------------ measuring

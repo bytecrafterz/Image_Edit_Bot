@@ -28,6 +28,7 @@ from ..analysis import quality as quality_mod
 from ..analysis import segment as segment_mod
 from ..analysis import shot as shot_mod
 from ..analysis import skin as skin_mod
+from . import embedding as embedding_mod
 
 # ------------------------------------------------------------------- tuning
 
@@ -39,7 +40,29 @@ BAND_MAX_REL = 0.12           # widest useful band: +/-12% of the measured mean
 GATE_MIN_SAMPLES = 3          # usable photos needed before a metric may reject
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
+    # Kept because stored profiles carry it and the report page prints it, but
+    # nothing gates on it any more: the geometric descriptor it belongs to
+    # cannot separate her from anybody (0.9832..0.9993 on her own photographs
+    # against 0.9577..0.9945 on eight other women, so 0.72 sits a quarter of the
+    # scale below both populations and can never fire).
     "face_min": 0.72,
+    # The line the identity check actually reads: cosine between the SFace
+    # embedding of a result and the mean of her own photographs.  Calibrated,
+    # not chosen - measured on this profile with the photographs held out of
+    # the profile they are scored against:
+    #
+    #   her 24 photographs, leave-one-out   0.6362 .. 0.8785
+    #   8 photographs of 8 other women      0.0408 .. 0.1962
+    #   the 2 paid results she rejected     0.1867 and 0.2886
+    #
+    # Every value in (0.2886, 0.6362] separates the two perfectly, and the next
+    # generated images above the negatives sit at 0.2943, 0.3262, 0.3682 and
+    # 0.3990 - four more paid results whose faces are visibly not hers - with
+    # nothing at all between 0.3990 and 0.5305.  0.45 lands in the middle of
+    # that empty band: 0.19 of room below her worst photograph, which is what
+    # pays for a faithful generation being noisier than a photograph, and 0.05
+    # above the worst face the check has to reject.
+    "face_embed_min": 0.45,
     # Skin is gated on chroma, not on raw CIE76 distance: exposure moves L by
     # far more than a real change of skin tone moves a and b.  The effective
     # limit is widened per person from their own measured spread, so a woman
@@ -548,9 +571,17 @@ def analyse_source(path: str) -> dict:
         descriptor = _safe(face_mod.face_descriptor, img, face_d)
     if not isinstance(descriptor, (list, tuple, np.ndarray)):
         descriptor = []
+    # The descriptor above says "this is a human face"; the embedding says
+    # WHOSE.  Both are kept: the geometric one still feeds the report page and
+    # the anomaly notes, the embedding is what identity/verify.py gates on.
+    # See identity/embedding.py for the measurement that made the swap
+    # necessary - the old signature scored eight other women 0.958..0.995
+    # against her own 0.983..0.999.
+    embedding = _safe(embedding_mod.face_embedding, img, face_d) or []
     out["face"] = {
         "ok": bool(face_d.get("ok")),
         "descriptor": [round(_f(v), 6) for v in list(descriptor)],
+        "embedding": list(embedding),
         "yaw": _f(face_d.get("yaw")), "pitch": _f(face_d.get("pitch")),
         "roll": _f(face_d.get("roll")),
         "bbox": _flist(face_d.get("bbox"), 4) or [],
@@ -677,7 +708,22 @@ def _coverage(accepted: list[dict]) -> dict:
 
 
 def _aggregate_face(accepted: list[dict]) -> dict:
+    """The face half of the profile: the old descriptor and the real signature.
+
+    Every photograph's embedding is kept, not just their average.  Three
+    reasons, and the first one is the only one that had to be measured: the
+    average is what the gate reads (it separated her from the impostors by
+    +0.3476, where the best single photograph managed +0.2894 - see
+    embedding.gallery_mean), but keeping the individuals costs 24 x 128 floats,
+    about 30 kB of JSON, and buys back the ability to fit a better rule, to
+    drop one bad photograph, or to tell her which of her own photographs is the
+    odd one out, none of which is possible once they have been averaged and the
+    originals deleted.  ``self_consistency`` is stored for that last purpose:
+    it is her worst photograph measured exactly the way a generated image will
+    be, so the report page can show how much room is left above the line.
+    """
     rows: list[list[float]] = []
+    embeddings: list[list[float]] = []
     yaws: list[float] = []
     for item in accepted:
         face = item.get("face") or {}
@@ -688,11 +734,28 @@ def _aggregate_face(accepted: list[dict]) -> dict:
             vals = [_f(v, None) for v in list(raw)]
             if all(v is not None for v in vals):
                 rows.append([float(v) for v in vals])
+        emb = face.get("embedding") or []
+        if isinstance(emb, (list, tuple, np.ndarray)) \
+                and len(emb) == embedding_mod.DIMS:
+            vals = [_f(v, None) for v in list(emb)]
+            if all(v is not None for v in vals):
+                embeddings.append([float(v) for v in vals])
         yaw = _f(face.get("yaw"), None)
         if yaw is not None:
             yaws.append(float(yaw))
+
+    mean_emb = embedding_mod.gallery_mean(embeddings) or []
+    out = {
+        "embeddings": [list(e) for e in embeddings],
+        "embedding_mean": list(mean_emb),
+        "embedding_n": len(embeddings),
+        "embedding_model": embedding_mod.SFACE_FILE if mean_emb else "",
+        "embedding_self": embedding_mod.self_consistency(embeddings),
+    }
     if not rows:
-        return {"descriptor": [], "descriptor_std": [], "n": 0, "yaw_range": [0.0, 0.0]}
+        out.update({"descriptor": [], "descriptor_std": [], "n": 0,
+                    "yaw_range": [0.0, 0.0]})
+        return out
     modal = Counter(len(r) for r in rows).most_common(1)[0][0]
     arr = np.asarray([r for r in rows if len(r) == modal], dtype=np.float64)
     mean, std, n = _robust_mean_rows(arr)
@@ -700,10 +763,11 @@ def _aggregate_face(accepted: list[dict]) -> dict:
     if norm > 1e-9:  # std rescaled with the mean so both live in one unit system
         mean = mean / norm
         std = std / norm
-    return {"descriptor": _round_list(mean, 6), "descriptor_std": _round_list(std, 6),
-            "n": int(n),
-            "yaw_range": ([round(min(yaws), 2), round(max(yaws), 2)]
-                          if yaws else [0.0, 0.0])}
+    out.update({"descriptor": _round_list(mean, 6),
+                "descriptor_std": _round_list(std, 6), "n": int(n),
+                "yaw_range": ([round(min(yaws), 2), round(max(yaws), 2)]
+                              if yaws else [0.0, 0.0])})
+    return out
 
 
 def _aggregate_body(accepted: list[dict], thresholds: dict) -> dict:

@@ -54,11 +54,30 @@ construyeron el perfil, y se compara con **la propia foto de origen**.
 
 | Comprobación | Qué mide | Peso |
 |---|---|---|
-| `identity_face` | firma geométrica y fotométrica del rostro (64 valores) | 30% |
+| `identity_face` | firma de reconocimiento facial SFace (128 valores) contra la media de tus fotos, mínimo 0.45 | 30% |
 | `body_proportions` | anchos sobre la longitud del torso, el perfil de silueta a 9 alturas del torso y el perfil de figura a hasta 29 alturas medidas en cabezas | 25% |
 | `skin_tone` | croma a*/b* con tolerancia adaptada a tu propia variación | 15% |
 | `anatomy` | manos, dedos, extremidades, personas de más, texturas fundidas | 20% |
 | `quality` | nitidez, exposición, contraste, ruido | 10% |
+
+### La cara: reconocimiento, no parecido geométrico
+
+`identity_face` usaba un descriptor geométrico de 64 valores que **no separaba a
+nadie**: sus 24 fotografías puntuaban 0.9832 - 0.9993 y ocho fotografías de ocho
+mujeres distintas 0.9577 - 0.9945, solapadas, con un mínimo exigido de 0.72 que
+no podía dispararse. Desde septiembre de 2026 la firma es un **embedding SFace de
+128 valores** (OpenCV Zoo, Apache-2.0, se ejecuta en local) comparado por coseno
+contra la media de los embeddings de sus fotos, con el mínimo en **0.45**.
+
+Sobre las mismas imágenes: sus fotos 0.6740 - 0.8718 (24 de 24 aceptadas), ocho
+mujeres distintas 0.0194 - 0.1948 (8 de 8 rechazadas) y las dos imágenes de pago
+que la clienta rechazó a mano 0.1829 y 0.2862 (rechazadas). Entre la mejor cara
+ajena y su peor fotografía propia no hay ninguna imagen: el límite se pone dentro
+de esa franja vacía.
+
+Los pesos no se versionan (37 MB); se descargan con
+`python scripts\fetch_face_model.py`. Sin ellos la comprobación se informa como
+**no realizada**, nunca como aprobada.
 
 ### Por qué "hombros contra caderas" no basta
 

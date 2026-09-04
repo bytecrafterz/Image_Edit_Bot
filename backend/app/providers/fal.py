@@ -157,6 +157,13 @@ _REPLAY_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 _ASPECTS = ((21 / 9, "21:9"), (16 / 9, "16:9"), (4 / 3, "4:3"), (3 / 2, "3:2"),
             (1.0, "1:1"), (2 / 3, "2:3"), (3 / 4, "3:4"), (9 / 16, "9:16"),
             (9 / 21, "9:21"))
+# The same nine keyed by their name, so a caller can ask how far the ratio it
+# is really getting is from the one it asked for without parsing "3:4" again.
+_ASPECT_VALUE = {name: value for value, name in _ASPECTS}
+# Within one part in a hundred is "the shape that was ordered": 1232x1536 is
+# 0.8021 and 4:5 is 0.8000, and calling those two different pictures would put
+# a warning on every headshot for nothing.
+_ASPECT_TOLERANCE = 0.01
 
 
 # ------------------------------------------------------------------ helpers
@@ -176,6 +183,29 @@ def _aspect_ratio(width: int, height: int) -> str:
         return "1:1"
     ratio = width / float(height)
     return min(_ASPECTS, key=lambda row: abs(row[0] - ratio))[1]
+
+
+def _record_shape(meta: dict, width: Any, height: Any) -> None:
+    """Write down the shape that ARRIVED, beside the one that was ordered.
+
+    Her photographs are 2316x3088 and the 23 fal images this installation has
+    bought are 1024x1024 without exception, yet nothing on disk records which
+    aspect_ratio was asked for on any of them - the payload was built, sent and
+    forgotten - so the square could only be found weeks later by measuring the
+    files.  Both numbers now ride in the provider meta, which the orchestrator
+    copies onto the attempt row, so the next time the answer does not have the
+    shape of the request that is visible on the ficha instead of on the invoice.
+    """
+    try:
+        wide, tall = int(width or 0), int(height or 0)
+    except (TypeError, ValueError):
+        return
+    if wide <= 0 or tall <= 0:
+        return
+    meta["delivered_aspect"] = _aspect_ratio(wide, tall)
+    asked = str(meta.get("aspect_ratio") or "")
+    if asked:
+        meta["aspect_kept"] = bool(meta["delivered_aspect"] == asked)
 
 
 def _encode(path: str, max_side: int, mask: bool = False) -> tuple[str, tuple[int, int]]:
@@ -461,6 +491,24 @@ class FalProvider(ImageProvider):
             height = int(req.height or (size[1] if len(size) == 2 else 0))
             if width and height:
                 payload["aspect_ratio"] = _aspect_ratio(width, height)
+                # Recorded on the way out, here and not in the rehearsal
+                # branch, because the paid path is the one that had no record
+                # of what it ordered: every fal image on disk is a square and
+                # not one row says whether a square was asked for.
+                meta["aspect_ratio"] = payload["aspect_ratio"]
+                ratio = width / float(height)
+                meta["aspect_asked"] = round(ratio, 4)
+                # Kontext accepts only the nine ratios in _ASPECTS, and three
+                # framings in the catalogue are 4:5 (0.8000) - medio cuerpo,
+                # primer plano y retrato de cabeza - which is not one of them
+                # and lands on 3:4 (0.7500), a picture 6.3% narrower for its
+                # height.  The free engine crops those exactly, so the same
+                # click gives two different shapes depending on who paints it;
+                # said here so the run can warn her instead of letting her
+                # discover it in the album.
+                meta["aspect_exact"] = bool(
+                    abs(_ASPECT_VALUE[payload["aspect_ratio"]] - ratio)
+                    <= _ASPECT_TOLERANCE)
 
         return payload, meta
 
@@ -599,8 +647,6 @@ class FalProvider(ImageProvider):
         # would be announced as a JPEG by anything reading the extension.
         meta["content_type"] = _REPLAY_TYPES.get(chosen.suffix.lower(),
                                                  "image/jpeg")
-        if payload.get("aspect_ratio"):
-            meta["aspect_ratio"] = payload["aspect_ratio"]
         try:
             with Image.open(out) as img:
                 meta["width"], meta["height"] = img.size
@@ -608,11 +654,18 @@ class FalProvider(ImageProvider):
             raise ProviderError(
                 "MODO ENSAYO: %s no es una imagen legible (%s)."
                 % (chosen.name, exc), retryable=False, code="bad_image") from exc
+        # The shape of a file copied out of a folder is not fal's answer, so it
+        # is recorded exactly like a real one and the orchestrator refuses to
+        # warn the user about it (see _shape_facts): a rehearsal must not be
+        # able to accuse the paid engine of returning the wrong picture.
+        _record_shape(meta, meta.get("width"), meta.get("height"))
         # Loud on purpose and on every call: an ensayo that goes unnoticed is
         # an installation that thinks it has tested the paid path.
         log.warning("MODO ENSAYO fal (%s): no se llama a la red. %s -> %s, "
-                    "endpoint que se habria usado %s, coste simulado %.4f USD.",
+                    "endpoint que se habria usado %s, aspecto pedido %s, "
+                    "coste simulado %.4f USD.",
                     REPLAY_ENV, chosen.name, out.name, endpoint,
+                    payload.get("aspect_ratio", "sin aspecto"),
                     self.estimate_cost(req))
         return GenResult(
             ok=True,
@@ -683,6 +736,7 @@ class FalProvider(ImageProvider):
         for field in ("width", "height", "content_type"):
             if image.get(field) is not None:
                 meta[field] = image[field]
+        _record_shape(meta, meta.get("width"), meta.get("height"))
         if result.get("timings"):
             meta["timings"] = result["timings"]
 

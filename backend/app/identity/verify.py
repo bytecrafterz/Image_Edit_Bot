@@ -29,6 +29,7 @@ from ..analysis import pose as pose_mod
 from ..analysis import quality as quality_mod
 from ..analysis import segment as segment_mod
 from ..analysis import skin as skin_mod
+from . import embedding as embedding_mod
 from .profile import DEFAULT_THRESHOLDS, GATED_METRICS, usable_metrics
 
 VERIFY_MAX_SIDE = 1600
@@ -471,19 +472,58 @@ def _unreliable_metrics(body: dict) -> set[str]:
 def _check_identity_face(img: np.ndarray, face_d: dict, profile: dict,
                          thresholds: dict, brief: dict,
                          defects_out: list[dict]) -> tuple[dict, float, bool]:
-    name = "identity_face"
-    face_min = _f(thresholds.get("face_min"), 0.72)
-    reference = (profile.get("face") or {}).get("descriptor") or []
-    if not isinstance(reference, (list, tuple, np.ndarray)) or len(reference) < 8:
-        return (_mk(name, face_min, face_min, True,
-                    "El perfil no guarda descriptor facial, comprobacion omitida."),
-                1.0, False)
+    """Is this HER face, measured against the embeddings of her photographs.
 
-    descriptor = face_d.get("descriptor") if face_d.get("ok") else None
-    if face_d.get("ok") and not descriptor:
-        descriptor = _safe(face_mod.face_descriptor, img, face_d)
-    if not face_d.get("ok") or not isinstance(descriptor, (list, tuple, np.ndarray)) \
-            or len(descriptor) < 8:
+    What this check reads changed, and the reason is the worst defect the
+    product had.  It used to compare the 64 float geometric descriptor from
+    analysis/face.py, and that descriptor cannot tell one woman from another:
+    her own 24 photographs scored 0.9832 .. 0.9993 against the stored profile
+    and eight photographs of eight OTHER women scored 0.9577 .. 0.9945, so both
+    populations sat about a quarter of the scale above the 0.72 line and the
+    gate could not fire even in principle.  Two paid results the client
+    rejected on sight - visibly a different woman, different face shape,
+    different hair - scored 0.9905 and 0.9960 and were approved.  It now reads
+    the SFace embedding instead (see identity/embedding.py), where the very
+    same images come out 0.6362 .. 0.8785 for her and 0.0408 .. 0.2886 for the
+    strangers.  The check keeps its shape and value is still higher-is-better
+    on 0..1, so the report page and the album need no change; only the number
+    underneath is real.
+
+    Degrading is deliberate and it is never a silent pass.  No weights on disk,
+    no signature in the profile, or no face SFace can read, and the check is
+    reported as NOT computed: it stays out of the weighted score and the
+    summary tells her "no se pudo comprobar el rostro" instead of claiming she
+    was recognised.  It does not fall back to the geometric descriptor either.
+    A fallback that cannot separate anybody is worse than an admission, because
+    it prints a passing identity check on an image nobody verified - which is
+    precisely how the two rejected results got through.
+    """
+    name = "identity_face"
+    face_min = _f(thresholds.get("face_embed_min"),
+                  DEFAULT_THRESHOLDS["face_embed_min"])
+    reference = (profile.get("face") or {}).get("embedding_mean") or []
+    if not isinstance(reference, (list, tuple, np.ndarray)) \
+            or len(reference) != embedding_mod.DIMS:
+        reason = embedding_mod.unavailable_reason()
+        return (_mk(name, 0.0, face_min, True,
+                    ("No se pudo comprobar que seas tu: %s." % reason) if reason
+                    else ("El perfil no guarda tu firma facial, asi que no se "
+                          "ha podido comprobar que seas tu. Vuelve a construir "
+                          "el perfil con tus fotos.")), 0.0, False)
+
+    embedding = _safe(embedding_mod.face_embedding, img, face_d)
+    if not embedding:
+        # "The recogniser is not installed" and "there is no face in this
+        # picture" are two different sentences and only one of them is about
+        # her.  Without this branch a machine with no weights on disk still
+        # carries a profile that HAS a signature, so every single image falls
+        # into the no-face path below and is rejected with "no se detecto
+        # ningun rostro" - a rejection the client cannot act on, about a face
+        # that is plainly there.
+        if not embedding_mod.available():
+            return (_mk(name, 0.0, face_min, True,
+                        "No se pudo comprobar que seas tu: %s."
+                        % embedding_mod.unavailable_reason()), 0.0, False)
         if _expects_face(brief):
             # An engine that only composites, recolours and crops never draws a
             # face: every face pixel in its output came from her own photograph.
@@ -494,11 +534,11 @@ def _check_identity_face(img: np.ndarray, face_d: dict, profile: dict,
             # failure below is untouched for engines that do invent pixels,
             # which is the case it was written for.
             if not _is_generative(brief) and _source_had_face(brief):
-                return (_mk(name, face_min, face_min, True,
+                return (_mk(name, 0.0, face_min, True,
                             "No se detecto rostro en la imagen generada, pero "
                             "este motor no dibuja caras: los pixeles del rostro "
                             "vienen de tu propia foto. Se avisa y no se rechaza."),
-                        1.0, False)
+                        0.0, False)
             defects_out.append({
                 "type": "face_distorted", "where": "face", "bbox": [],
                 "severity": 0.9, "repairable": False,
@@ -507,28 +547,39 @@ def _check_identity_face(img: np.ndarray, face_d: dict, profile: dict,
             return (_mk(name, 0.0, face_min, False,
                         "No se detecto ningun rostro en la imagen generada, "
                         "pero el encuadre pedido si lo lleva."), 0.0, True)
-        return (_mk(name, face_min, face_min, True,
+        return (_mk(name, 0.0, face_min, True,
                     "No se detecto rostro y el encuadre no exige que se vea; "
-                    "comprobacion omitida."), 1.0, False)
+                    "comprobacion omitida."), 0.0, False)
 
-    similarity = _f(_safe(face_mod.compare_faces, list(descriptor), list(reference)), None)
+    similarity = _f(embedding_mod.similarity(embedding, reference), None)
     if similarity is None:
-        return (_mk(name, face_min, face_min, True,
-                    "No se pudo comparar el rostro, comprobacion omitida."), 1.0, False)
+        return (_mk(name, 0.0, face_min, True,
+                    "No se pudo comparar el rostro con tu firma facial, "
+                    "comprobacion omitida."), 0.0, False)
     similarity = _clamp01(similarity)
     passed = similarity >= face_min
     if not passed:
         bbox = _int_bbox(face_d.get("bbox"))
+        # The distance below the line is worth far more than it was against the
+        # old descriptor, whose entire population lived inside 0.04 of scale:
+        # here the two rejected paid results sit 0.16 and 0.26 under the line,
+        # so this reads 0.79 and 0.94 instead of everything piling up at 0.55.
+        # Not repairable, and that is the point: a local patch can put grain
+        # back on a cheek, but a different woman's face has to be generated
+        # again.
         severity = min(1.0, 0.55 + (face_min - similarity) * 1.5)
         defects_out.append({
             "type": "face_distorted", "where": "face", "bbox": bbox,
-            "severity": round(severity, 3), "repairable": bool(bbox),
-            "detail": "Los rasgos del rostro no coinciden con los del perfil.",
+            "severity": round(severity, 3), "repairable": False,
+            "detail": "El rostro no es el tuyo: no coincide con tus fotos.",
         })
-    detail = ("Parecido facial %.2f (minimo %.2f). %s"
+    detail = ("Parecido facial %.2f (minimo %.2f), medido sobre la firma de "
+              "tus %d fotos. %s"
               % (similarity, face_min,
-                 "El rostro se mantiene." if passed
-                 else "El rostro fue modificado respecto a tus fotos."))
+                 int(_f((profile.get("face") or {}).get("embedding_n"), 0)),
+                 "Eres tu." if passed
+                 else "Esta cara no es la tuya: cambian los rasgos, no solo el "
+                      "peinado o la luz."))
     return _mk(name, similarity, face_min, passed, detail), similarity, True
 
 

@@ -79,6 +79,31 @@ eye/eyebrow spacing, plus normalised colour statistics of eye/lip/hair regions.
 It must be invariant to scale and in-plane rotation, and reasonably stable
 across +/- 25 degrees of yaw.
 
+**It is NOT the identity gate and must never be used as one.** Measured against
+the stored profile it cannot separate people at all: 24 photographs of the
+subject scored 0.9832-0.9993 and 8 photographs of 8 other women 0.9577-0.9945 -
+overlapping populations, with the old `face_min` of 0.72 a quarter of the scale
+below both. Identity is decided by `identity/embedding.py` (below); this
+descriptor survives only as a consistency signal.
+
+### `identity/embedding.py`
+```python
+def available() -> bool                 # weights present and loadable
+def unavailable_reason() -> str         # Spanish, for the client, "" when available
+def face_embedding(img_bgr, face: dict | None) -> list[float] | None   # len 128
+def similarity(a, b) -> float | None    # cosine, 0..1, 1 = same person
+def self_consistency(embeddings) -> dict   # {"n", "min", "mean"}
+DIMS = 128
+```
+SFace (`cv2.FaceRecognizerSF`) plus YuNet (`cv2.FaceDetectorYN`), weights from
+the OpenCV Zoo (Apache-2.0) under `backend/app/models/*.onnx`, gitignored and
+fetched by `scripts/fetch_face_model.py` with sha256 verification. Runs entirely
+locally; no image ever leaves the machine. The head is cut out with the mesh and
+the orientation YuNet is most confident about over the four right angles is the
+one embedded - three of the subject's photographs are stored rotated and were
+being embedded upside down, reading 0.15-0.18, below every impostor. Degrades to
+`None` instead of raising; callers must report "not computed", never a pass.
+
 ### `analysis/body.py`
 ```python
 def measure_body(img_bgr, pose: dict, mask=None, face=None) -> dict
@@ -190,7 +215,11 @@ Returns the **IdentityProfile** stored across the `profiles` columns:
  "coverage": {"closeup": int, "half": int, "full": int, "unknown": int,
               "ready_for_body_check": bool, "missing": [str], "advice": [str]},
  "face":  {"descriptor": [64 floats], "descriptor_std": [...],
-           "n": int, "yaw_range": [min,max]},
+           "n": int, "yaw_range": [min,max],
+           # the signature identity is actually decided on, see embedding.py:
+           "embeddings": [[128 floats], ...], "embedding_mean": [128 floats],
+           "embedding_n": int,
+           "embedding_self": {"n": int, "min": f, "mean": f}},
  "body":  {metric: {"mean": f, "std": f, "n": int, "lo": f, "hi": f,
                     "spread": f, "dropped": int,
                     "gated": bool,        # may this band reject on its own?
@@ -198,7 +227,13 @@ Returns the **IdentityProfile** stored across the `profiles` columns:
  "skin":  {"lab_mean": [...], "lab_std": [...], "ita_deg": f, "n": int},
  "hair":  {"lab_mean": [...], "length": "short"|"medium"|"long", "n": int},
  "marks": [{"type":"tattoo","region":str,"bbox_norm":[..],"seen_in":int}],
- "thresholds": {"face_min": 0.72, "delta_e_max": 8.0,
+ # face_embed_min is the identity gate: cosine of the SFace embedding
+ # against embedding_mean. Calibrated on measured populations - her own
+ # photographs 0.6429-0.8715 leave-one-out, 8 other women 0.0194-0.1948, six
+ # generated faces that are not her 0.1829-0.3968 - so 0.45 sits inside an
+ # empty band. face_min (0.72) is the retired geometric-descriptor threshold,
+ # kept only so old stored profiles still load; nothing reads it to decide.
+ "thresholds": {"face_embed_min": 0.45, "face_min": 0.72, "delta_e_max": 8.0,
                 "metric_tol_sigma": 2.5, "metric_tol_floor": 0.06},
  "sources": [{"path":str,"sha256":str,"shot_type":str}]
 }
