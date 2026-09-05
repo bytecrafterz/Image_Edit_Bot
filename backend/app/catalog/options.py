@@ -581,6 +581,67 @@ def resolve_choices(choices: dict, shot_type: str) -> dict:
     return out
 
 
+# What a photograph of each kind is called, for the one sentence that has to
+# explain why a garment is not on the menu for this picture.
+SHOT_ES: dict[str, str] = {"closeup": "un primer plano (solo cara y hombros)",
+                           "half": "de medio cuerpo",
+                           "full": "de cuerpo entero",
+                           "unknown": "de un encuadre que no se ha podido leer"}
+
+
+def dropped_choices(choices: dict, shot_type: str) -> list[dict]:
+    """What she asked for that this photograph cannot carry, and why.
+
+    ``resolve_choices`` above simply drops it, which is right - a floor length
+    gown on a head and shoulders crop has nowhere to be - but until 2026-09-04
+    NOBODY TOLD HER.  Measured in the rehearsal of that day, 24 garments over
+    four of her photographs at two qualities: 6 of the 24 are full body only,
+    so on her half body IMG_8944 twelve requests and on her closeup IMG_7580
+    twenty-four requests arrived with NOTHING left to change.  The run made
+    them anyway - kontext/multi, her face redrawn, 0.040 USD each, 1.44 USD of
+    the 36 - and 21 of those 36 came back unusable and were discarded.  She
+    would have paid to be told "no ha salido ninguna buena" about a garment
+    that was never going to be put on.
+    """
+    valid = {g["group_key"]: {v["value_key"] for v in g["values"]}
+             for g in groups_for_shot(shot_type)}
+    plano = SHOT_ES.get(str(shot_type or "unknown"), SHOT_ES["unknown"])
+    out: list[dict] = []
+    for group, values in (choices or {}).items():
+        allowed = valid.get(group) or set()
+        if not isinstance(values, (list, tuple, set)):
+            values = [values]
+        for value in values:
+            key = str(value)
+            if key in allowed:
+                continue
+            spec = value_of(str(group), key)
+            if spec is None:
+                # Not in the catalogue at all: nothing useful can be said about
+                # a value this installation has never heard of.
+                continue
+            out.append({
+                "grupo": str(group),
+                "valor": key,
+                "etiqueta": str(spec.get("label_es") or key),
+                "motivo": ("%s solo se puede poner en una foto de %s, y esta es %s"
+                           % (spec.get("label_es") or key,
+                              _shots_es(spec.get("shot_types")), plano)),
+            })
+    return out
+
+
+def _shots_es(shots: Any) -> str:
+    names = [SHOT_ES.get(s.strip(), s.strip())
+             for s in str(shots or "").split(",") if s.strip()]
+    names = [n.replace("un ", "").replace("de ", "") for n in names]
+    if not names:
+        return "distinta"
+    if len(names) == 1:
+        return names[0]
+    return "%s o %s" % (", ".join(names[:-1]), names[-1])
+
+
 def value_of(group_key: str, value_key: str) -> dict[str, Any] | None:
     group = GROUPS_BY_KEY.get(group_key)
     if not group:

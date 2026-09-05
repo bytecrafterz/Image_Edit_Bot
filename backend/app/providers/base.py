@@ -106,12 +106,24 @@ class Capabilities:
 
 
 class ProviderError(RuntimeError):
-    """Raised for provider side failures that the orchestrator may retry."""
+    """Raised for provider side failures that the orchestrator may retry.
 
-    def __init__(self, message: str, *, retryable: bool = True, code: str = ""):
+    ``billed`` is the difference between "the call never happened" and "the
+    call happened, the vendor charged for it, and what came back is unusable".
+    Measured on this installation on 2026-09-04: two fal jobs ran to completion
+    on fal-ai/flux-pro/v1/fill - 19.1 s and 3.3 s of GPU, HTTP 200 - and
+    returned an all black PNG because fal's own safety checker had flagged the
+    result.  The orchestrator handed the reservation back, so the run reported
+    0.0000 USD for work a vendor bills at 0.050 USD an image.  A ledger that
+    only records the calls that went well is not a ledger.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True, code: str = "",
+                 billed: bool = False):
         super().__init__(message)
         self.retryable = retryable
         self.code = code
+        self.billed = billed
 
 
 class InsufficientBalance(ProviderError):

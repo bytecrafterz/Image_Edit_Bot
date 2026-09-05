@@ -362,6 +362,38 @@ def user_limits(user_id: str) -> dict
 def option_history(user_id: str = "") -> dict[tuple[str, str], tuple[int, int]]
 ```
 
+### `generation/protect.py`
+```python
+def plan_mask(choices: dict) -> dict
+# {"safe": bool, "regions": [str], "blocked": [str], "groups": [str],
+#  "reason": str} - from the option GROUPS alone, before any photograph is
+# opened.  Safe when nothing the user asked for moves the person inside the
+# frame (clothing, colour, scene); not safe for pose, framing, expression,
+# hair.
+
+def shield_for(source_path, choices, work_dir=None) -> dict
+# {"masked": bool, "mask_path": str, "cover": float, "regions": [str],
+#  "blocked": [str], "groups": [str], "reason": str,
+#  "estado": "dibujada"|"reutilizada"|"sin dibujar"|"sin zona"|"bloqueado"}
+# THE ONE DECIDER.  Runs plan_mask AND draws the real mask once, into the run's
+# own folder, under a name made of the photograph and the region set; a lock
+# makes it safe for the parallel variants.  Both the ESTIMATE and the RUN call
+# this, so the model that is priced is the model that is sent.  It can answer
+# "not masked" for pixel reasons too: no face found, no region located, cover
+# below MIN_COVER 2% or above MAX_COVER 92%.
+
+def compose(source_path, painted_path, mask_path, out_path, quality=96) -> dict
+# {"ok": bool, "fuera_cambiado": int, "cover": float, "comprobante": str,
+#  "reason": str}
+# Puts her own pixels back everywhere the mask is black and REFUSES to write
+# the file unless exactly 0 pixels outside the mask differ from her photograph.
+```
+White repaints, black stays hers. The face and both hands are grown by
+`PROTECT_MARGIN` and forced back to black after the feather, so nothing bleeds
+into them. `verify` is told which area was repainted (`brief["repaint_mask"]`)
+and a finding whose box is under 10% inside it is reported as `de_tu_foto`: it
+can never fail the image, never buy a repaint and never teach the learner.
+
 ### `generation/repair.py`
 ```python
 def repair(image_path: str, defects: list[dict], brief: dict, profile: dict,
@@ -373,6 +405,15 @@ and repaints **only** that region.
 
 ### `generation/orchestrator.py`
 The robot. Single entry points, both synchronous, both safe to run in a thread:
+
+`prepare_run` also reads the source photograph with a vision provider through
+`_read_photo(user, original, analysis)`, which is the only place in the product
+that spends money BEFORE the user presses the button. It is gated with
+`billing.can_spend`, charged to the ledger under `"anthropic"`, cached inside
+`originals.analysis_json["vision"]` so a photograph is read once, and it puts
+the sentence into the estimate warnings. With no balance it falls back to the
+free local reader and says so.
+
 ```python
 def run_previews(user: dict, run_id: str) -> dict
 def run_final(user: dict, run_id: str) -> dict

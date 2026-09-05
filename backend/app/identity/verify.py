@@ -36,6 +36,37 @@ VERIFY_MAX_SIDE = 1600
 QUALITY_MIN = 0.45
 ANATOMY_SEVERITY_MAX = 0.6
 
+# WHAT A DEFECT FOUND OUTSIDE THE REPAINTED ZONE IS WORTH.
+# On the masked path (generation/protect.py) the engine may only paint inside
+# the white part of the mask; everything else is written back from her own
+# photograph and protect.compose refuses to save the file unless exactly 0
+# pixels outside the mask differ.  So a reading taken out there is a reading of
+# her own camera, not of the engine's work, and it must never discard an image
+# the engine did not damage - nor be bought a repaint, which would repaint her
+# own hand.
+#
+# It is a rule about EVIDENCE, so it applies only to the defects whose claim is
+# about the pixels inside their own box.  A count - "more hands than wrists",
+# "two people" - is a claim about the whole picture, and on this path an extra
+# hand can only have come from the repainted zone whichever box the scanner
+# chose to point at, so those still gate.  Measured on the 156 masked clothing
+# requests of the 2026-09-04 rehearsal, over every reading that discarded an
+# image: 19 hand_malformed and 3 missing_limb, every one of them sitting 88% to
+# 100% INSIDE the repainted zone - the engine really had painted a hand into
+# the clothes - against 26 extra_limb, 14 of whose boxes fell outside it, which
+# is exactly why a count is judged on the whole image and not on its box.  What
+# the rule takes out of the verdict on that corpus is the hands the scanner
+# could not judge: the difference between telling her "revisa una mano: no se
+# ha podido comprobar" and telling her the truth, that the hand was never
+# redrawn at all.
+REPAINT_MIN_OVERLAP = 0.10
+
+# The defects whose evidence is the box they carry.  Anything not here is a
+# statement about the whole image and is judged on the whole image.
+PIXEL_EVIDENCE_DEFECTS = ("hand_malformed", "missing_limb", "texture_smear",
+                          "oversmoothed_skin", "face_distorted",
+                          "eye_asymmetry", "blurred_region", "artifact")
+
 # --- oversmoothed skin -------------------------------------------------------
 # The defect the client actually came here with: "it removes any retouching and
 # manipulates the image to look exactly like her".  A generator keeps her shape
@@ -369,12 +400,17 @@ CHECK_ES: dict[str, str] = {
     "quality": "la calidad tecnica",
 }
 
+# WHAT WENT WRONG, SAID SO SHE CAN PICTURE IT.  Read as the client reads them:
+# "cambiaron tus proporciones" and "cambio tu tono de piel" name HER as the
+# thing that changed, when what changed is the picture the engine drew, and
+# "hay errores anatomicos" is a phrase from a medical textbook.  Same meaning,
+# same measurements behind them, aimed at the image and not at her.
 FAIL_ES: dict[str, str] = {
-    "identity_face": "el rostro no coincide con el tuyo",
-    "body_proportions": "cambiaron tus proporciones",
-    "skin_tone": "cambio tu tono de piel",
-    "anatomy": "hay errores anatomicos",
-    "quality": "la calidad tecnica es baja",
+    "identity_face": "la cara que ha salido no es la tuya",
+    "body_proportions": "el cuerpo ha salido con otra forma",
+    "skin_tone": "tu piel ha salido de otro tono",
+    "anatomy": "hay algo mal dibujado, por ejemplo una mano",
+    "quality": "la imagen ha salido borrosa",
 }
 
 
@@ -1643,10 +1679,84 @@ def _smoothing_verdict(image_path: str, img: np.ndarray, face_d: dict,
     return out
 
 
+def _repaint_area(brief: dict, shape) -> Any:
+    """The pixels the engine was allowed to paint, at the size measured here.
+
+    ``repaint_mask`` is written on the brief by the orchestrator ONLY after
+    generation/protect.compose has returned ok - which means the mask was
+    checked against this very photograph and 0 pixels outside it differ.  With
+    no mask, or an unreadable one, this returns None and nothing below changes:
+    the whole image is treated as the engine's work, which is what it is.
+    """
+    path = str((brief or {}).get("repaint_mask") or "")
+    if not path:
+        return None
+    mask = _safe(loader.load_image, path, 0)
+    if not isinstance(mask, np.ndarray) or mask.size == 0:
+        return None
+    if mask.ndim == 3:
+        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    height, width = int(shape[0]), int(shape[1])
+    if mask.shape[:2] != (height, width):
+        mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+    return mask > 127
+
+
+def _repainted_fraction(area: Any, box: Any) -> float | None:
+    """How much of this box the engine was allowed to touch.  None: no box."""
+    coords = _int_bbox(box)
+    if not coords or area is None:
+        return None
+    x, y, w, h = coords
+    height, width = area.shape[:2]
+    x0, y0 = max(0, min(width - 1, x)), max(0, min(height - 1, y))
+    x1, y1 = max(0, min(width, x + max(1, w))), max(0, min(height, y + max(1, h)))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    patch = area[y0:y1, x0:x1]
+    total = float(patch.size)
+    if total <= 0:
+        return None
+    return float(np.count_nonzero(patch)) / total
+
+
+def _split_by_repaint(items: list[dict], area: Any) -> tuple[list[dict], list[dict]]:
+    """Split findings into what the engine painted and what is her own photograph."""
+    if area is None:
+        return list(items), []
+    mine: list[dict] = []
+    hers: list[dict] = []
+    for item in items:
+        kind = str(item.get("type") or "")
+        # ``where``-less entries (the unjudged hands) carry no type and are
+        # always a statement about one box, so they split by position too.
+        counts_the_frame = bool(kind) and kind not in PIXEL_EVIDENCE_DEFECTS
+        share = _repainted_fraction(area, item.get("bbox"))
+        if counts_the_frame or share is None or share >= REPAINT_MIN_OVERLAP:
+            mine.append(item)
+            continue
+        copy = dict(item)
+        copy["repintado"] = round(float(share), 4)
+        copy["de_tu_foto"] = True
+        # Nothing may be BOUGHT to repair a pixel the run promised not to
+        # touch: a paid repaint aimed at her own hand is the damage this path
+        # exists to prevent, so the flag that lets money reach it is cleared
+        # here and not merely ignored downstream.
+        copy["repairable"] = False
+        hers.append(copy)
+    return mine, hers
+
+
 def _check_anatomy(anomalies: dict, defects: list[dict],
-                   smoothing: dict | None = None) -> tuple[dict, float, bool]:
+                   smoothing: dict | None = None,
+                   own_defects: list[dict] | None = None,
+                   own_unjudged: list[dict] | None = None,
+                   ) -> tuple[dict, float, bool]:
+    """``defects`` are the engine's; ``own_*`` were found on her own pixels."""
     name = "anatomy"
     smooth = smoothing if isinstance(smoothing, dict) else {}
+    hers = [d for d in (own_defects or []) if isinstance(d, dict)]
+    hers_unjudged = [u for u in (own_unjudged or []) if isinstance(u, dict)]
     if not anomalies.get("ok") and not smooth.get("failed"):
         return (_mk(name, 0.0, ANATOMY_SEVERITY_MAX, True,
                     "No se pudo revisar la anatomia, comprobacion omitida."), 1.0, False)
@@ -1681,6 +1791,18 @@ def _check_anatomy(anomalies: dict, defects: list[dict],
         detail += (" No se ha podido comprobar %s: %s. Miralas tu antes de "
                    "darla por buena." % ("una mano" if len(unjudged) == 1
                                          else "%d manos" % len(unjudged), names))
+    if hers:
+        # Said plainly, because it is the difference between "the robot broke
+        # your hand" and "your hand is exactly as your camera recorded it".
+        parts = ", ".join(sorted({DEFECT_ES.get(d["type"], d["type"])
+                                  for d in hers}))
+        detail += (" Fuera de la zona repintada el robot lee esto: %s. Pero esa "
+                   "parte de la imagen no se ha vuelto a dibujar, son los "
+                   "pixeles de tu propia foto: se te ensena tal cual salio de "
+                   "tu camara y no se toca." % parts)
+    if hers_unjudged:
+        detail += (" Tus manos no se han vuelto a dibujar en esta imagen: son "
+                   "las de tu foto.")
     if smooth.get("detail"):
         detail = smooth["detail"] + " " + detail
     value = smooth_sev if failed else worst
@@ -1773,9 +1895,12 @@ def _summary(passed: bool, checks: list[dict], repairable: list[dict],
         if check["name"] == "body_proportions" and body_offenders:
             reason += " (" + body_offenders[0] + ")"
         reasons.append(reason)
-    text = "Rechazada: " + ", ".join(reasons) + "."
-    text += (" Se puede reparar solo la zona afectada sin regenerar toda la foto."
-             if repairable else " Conviene generar de nuevo con el ajuste corregido.")
+    # "Rechazada" is what a bank says to a card.  The image is what was thrown
+    # away, she is not, and the sentence says what happens next instead of
+    # leaving her with a verdict.
+    text = "No te la ensenamos porque " + ", ".join(reasons) + "."
+    text += (" Se puede retocar solo esa zona sin volver a hacer la foto entera."
+             if repairable else " El robot lo intenta otra vez con otro ajuste.")
     return text
 
 
@@ -1819,6 +1944,19 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
 
     scan_defects = [d for d in (_defect(x) for x in (anom_d.get("defects") or []))
                     if d is not None]
+    # WHO PAINTED THE PIXELS THIS WAS READ ON.  On the masked path everything
+    # outside the mask is her own photograph, byte for byte, so a finding out
+    # there says something about her camera and nothing about the engine.  It
+    # is still reported - she is entitled to read it - but it cannot reject an
+    # image the engine did not damage, and it cannot be bought a repair.
+    repaint = _repaint_area(brf, img.shape[:2])
+    scan_defects, own_defects = _split_by_repaint(scan_defects, repaint)
+    own_unjudged: list[dict] = []
+    if repaint is not None:
+        judged = [u for u in (anom_d.get("unjudged") or []) if isinstance(u, dict)]
+        keep_unjudged, own_unjudged = _split_by_repaint(judged, repaint)
+        anom_d = dict(anom_d)
+        anom_d["unjudged"] = keep_unjudged
     identity_defects: list[dict] = []
 
     checks: list[dict] = []
@@ -1844,7 +1982,9 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
     # Smoothing is decided before the anatomy check reads the defects, because
     # it is the one defect whose meaning depends on who produced the pixels.
     smoothing = _smoothing_verdict(str(image_path), img, face_d, brf, scan_defects)
-    anat_check, anat_score, anat_done = _check_anatomy(anom_d, scan_defects, smoothing)
+    anat_check, anat_score, anat_done = _check_anatomy(anom_d, scan_defects,
+                                                       smoothing, own_defects,
+                                                       own_unjudged)
     qual_check, qual_score, qual_done = _check_quality(qual_d)
 
     for chk, chk_score, computed in ((face_check, face_score, face_done),
@@ -1864,6 +2004,9 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
     defects = [d for d in (_defect(x) for x in identity_defects) if d is not None]
     defects.extend(scan_defects)
     repairable = [d for d in defects if d["repairable"] and d["bbox"]]
+    # Reported after the repairable list is closed, on purpose: these are hers,
+    # so they are shown and never repaired.
+    defects.extend(own_defects)
 
     total_weight = sum(w for w, _ in scored)
     score = (sum(w * s for w, s in scored) / total_weight) if total_weight > 0 else 0.0

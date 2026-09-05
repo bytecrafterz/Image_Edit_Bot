@@ -84,7 +84,12 @@ def create_app() -> FastAPI:
                   traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content={"detail": "Error interno del servidor. Revisa los registros."},
+            # Read by a client who does not write software: no "servidor",
+            # no "registros" she cannot open, and it says what it cost her.
+            content={"detail": "Algo se ha atascado por dentro y no se ha "
+                               "podido completar lo que pediste. No se te "
+                               "ha cobrado nada. Vuelve a intentarlo en un "
+                               "momento."},
         )
 
     # -------------------------------------------------------------- health
@@ -157,7 +162,10 @@ def create_app() -> FastAPI:
             index = FRONTEND_DIR / "index.html"
             if index.exists():
                 return FileResponse(index, media_type="text/html")
-            return PlainTextResponse("frontend/index.html missing", status_code=500)
+            return PlainTextResponse(
+                "Falta la pantalla de la aplicacion en el servidor. Avisa "
+                "a quien la instalo: hay que volver a copiar la carpeta "
+                "frontend.", status_code=500)
 
     return app
 

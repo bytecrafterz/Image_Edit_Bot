@@ -25,10 +25,10 @@ Coste: **0.00 USD, siempre**. Tarda un par de minutos y termina con una linea
 como esta:
 
 ```
-RESULTADO: 37 correctas, 0 fallidas   |   COSTE REAL: 0.0000 USD
+RESULTADO: 48 correctas, 0 fallidas   |   COSTE REAL: 0.0000 USD
 ```
 
-Comprueba 37 cosas con numeros: que la clave se guarda por la pantalla de
+Comprueba 48 cosas con numeros: que la clave se guarda por la pantalla de
 Ajustes y nunca vuelve al navegador, que la tirada se enruta al motor de pago,
 que se pide tu forma y no un cuadrado, que lo retenido es igual a lo liquidado,
 que cada llamada al proveedor llega al libro mayor, que la puerta de calidad
@@ -43,6 +43,22 @@ backend\.venv\Scripts\python.exe scripts\rehearse_paid.py --recharge 0.30
 ```
 
 La segunda ensaya el caso de quedarse sin saldo a mitad de una tirada.
+
+Y esta ensaya **el unico fallo que se ha cobrado de verdad** en esta
+instalacion: fal ejecuta la imagen, la cobra, su propio revisor de contenido la
+marca y devuelve un archivo completamente en negro.
+
+```powershell
+$env:PHOTOROBOT_FAL_REPLAY_BLOCK = "2"
+```
+
+El ensayo lo hace en su apartado 11b y comprueba lo que importa: que los
+0.1000 USD **se apuntan** en el libro mayor (dos apuntes de 0.0500 con la nota
+"imagen bloqueada por fal"), que la tirada termina sola sin error tecnico, que
+**no se compra un tercer intento** despues de dos negros, y que lo lees en
+castellano. Hasta el 2026-09-05 ese camino existia y no se habia ejecutado
+nunca: la tirada real que le paso a esta cuenta anoto 0.0000 USD por dos
+imagenes que fal si cobro.
 
 **Una tirada que gasta dinero se lanza en segundo plano y con su propio
 registro, nunca en primer plano.** El 2026-09-04, durante la tirada de pago de
@@ -128,19 +144,55 @@ una media.**
 
 ### Precios reales por llamada
 
-Desde que la tirada manda tres fotografias tuyas como referencia, fal cobra
-`kontext/multi` a 0.0400 USD tambien en Alta y Maxima, donde antes cobraba
-`kontext/max` a 0.0800: **las referencias abarataron la calidad alta a la
-mitad**. Sin referencias (perfil sin construir) Alta y Maxima siguen costando
-0.0800 USD.
+**El precio lo decide lo que pides, no el nivel de calidad.** Desde el
+2026-09-04 el robot **protege tu cara con una mascara** siempre que el cambio
+que pides no mueva a la persona dentro de la foto: se repinta solo la ropa (o
+la escena) y tu cara y tus manos **se copian de tu propia fotografia, pixel a
+pixel**. Ese camino es `fal-ai/flux-pro/v1/fill` y cuesta **0.0500 USD** por
+imagen en los cinco niveles.
 
-| Nivel | Modelo de fal | Por imagen | Pide | Entrega | 3 imagenes: estimado / techo |
-|---|---|---|---|---|---|
-| Borrador | `flux/dev` img2img | 0.00625 USD | 384x512 | 512 px | 0.1303 / 1.4062 USD |
-| Vista previa | Kontext `multi` | 0.0400 USD | 576x768 | 1024 px | 0.2670 / 1.7100 USD |
-| Estandar | Kontext `multi` | 0.0400 USD | 768x1024 | 1024 px | 0.2670 / 1.7100 USD |
-| **Alta** | Kontext `multi` | 0.0400 USD | 1152x1536 | 1024 px | 0.2670 / 1.7100 USD |
-| Maxima | Kontext `multi` | 0.0400 USD | 1536x2048 | 1024 px | 0.2670 / 1.7100 USD |
+Cuando pides otra **postura** u otro **encuadre** hay que volver a dibujarte
+entera - cambiar la pose mueve tu cuerpo dentro del cuadro, medido en tus
+fotos: la cabeza se desplaza 1,23 cabezas de mediana - y entonces se usa
+`fal-ai/flux-pro/kontext/multi`, que viaja con tres fotos tuyas y cuesta
+**0.0400 USD**, o `flux/dev` a 0.00625 USD en borrador. Ahi el rostro **se
+comprueba** despues, en vez de conservarse.
+
+Medido el 2026-09-04 sobre 25 combinaciones (5 peticiones x 5 niveles), con la
+estimacion y el ensayo comparados fila a fila: **coinciden las 25**.
+
+| Lo que pides | Nivel | Modelo de fal | Por imagen | Tu cara |
+|---|---|---|---|---|
+| solo ropa | los cinco | `fal-ai/flux-pro/v1/fill` | 0.0500 USD | **no se vuelve a dibujar** |
+| ropa + color | los cinco | `fal-ai/flux-pro/v1/fill` | 0.0500 USD | **no se vuelve a dibujar** |
+| solo escena | los cinco | `fal-ai/flux-pro/v1/fill` | 0.0500 USD | **no se vuelve a dibujar** |
+| postura | borrador | `fal-ai/flux/dev/image-to-image` | 0.00625 USD | se vuelve a dibujar |
+| postura | previa a maxima | `fal-ai/flux-pro/kontext/multi` | 0.0400 USD | se vuelve a dibujar |
+| encuadre | borrador | `fal-ai/flux/dev/image-to-image` | 0.00625 USD | se vuelve a dibujar |
+| encuadre | previa a maxima | `fal-ai/flux-pro/kontext/multi` | 0.0400 USD | se vuelve a dibujar |
+
+**El tamano del archivo tambien cambia con el camino**, y esto es lo que mas se
+nota: con mascara recibes **tu foto entera al tamano de tu camara** (medido:
+2316x3088) porque solo se sustituye la zona repintada; sin mascara recibes lo
+que da Kontext, **1024x1024**. Sin mascara tampoco viajan garantizados tus
+tatuajes ni tus pendientes: se piden en el prompt, pero el modelo redibuja y
+puede perderlos.
+
+Sin referencias (perfil sin construir) Alta y Maxima sin mascara suben a
+`kontext/max`, 0.0800 USD.
+
+### Lo que cuesta *antes* de generar
+
+Pulsar *Calcular coste* no es gratis del todo si tienes clave de Anthropic:
+Claude lee la fotografia para redactar las instrucciones y eso cuesta unos
+**0.0112 USD**. Desde el 2026-09-05 ese gasto **se apunta en tu saldo de
+Anthropic**, se te dice en el mismo aviso de la pantalla de coste, y **se paga
+una sola vez por fotografia**: la lectura se guarda junto a la foto y volver a
+presupuestar esa misma foto ya no cuesta nada. Si te quedas sin saldo de
+Anthropic, la lee el lector local gratuito y se te avisa de que la descripcion
+sera mas pobre. Antes de esa fecha esta llamada se hacia en **cada**
+presupuesto y no aparecia en ninguna parte: 33 presupuestos preparados en esta
+instalacion y 0 apuntes de anthropic en el libro mayor.
 
 El techo de 1.7100 USD es lo maximo que las reservas de la tirada llegan a
 retener: 3 intentos x (3 generaciones a 0.0400 + 3 zonas a 0.0500 por imagen).
@@ -159,6 +211,12 @@ tirada de 3 imagenes en Alta:
 | `autorepair` apagado | 0.1080 USD | 0.2400 USD | 3 |
 | 0 reintentos y 0 reparaciones | 0.0800 USD | 0.0800 USD | 1 |
 
+Esa tabla se midio sobre el camino **sin mascara** (Kontext a 0.0400). La misma
+tirada **con cambio de ropa**, que va por `fill` a 0.0500, se cotizo el
+2026-09-05 en **0.3075 USD estimados con un techo de 1.8000 USD** de serie. La
+regla no cambia: el techo baja a la vez que el estimado cuando bajas
+`max_retries` y `max_repair_rounds`, y con 0 y 0 los dos son el mismo numero.
+
 Con 0 y 0 el estimado y el techo son el mismo numero: la tirada no puede
 gastar ni un centimo mas de lo que te ensena.
 
@@ -173,19 +231,25 @@ que se pide 3:4. Si eliges un encuadre concreto manda ese: cuerpo entero
 
 ## 5. Que nivel elegir
 
-**Los cinco niveles entregan practicamente el mismo tamano de archivo**, unos
-1024 px de lado largo: los modelos de fal no tienen mando de resolucion. Lo que
-compras al subir de nivel es **fidelidad a tus rasgos**, no pixeles.
+**Sin mascara, los cinco niveles entregan practicamente el mismo tamano de
+archivo**, unos 1024 px de lado largo: los modelos de fal no tienen mando de
+resolucion. Lo que compras al subir de nivel es **fidelidad a tus rasgos**, no
+pixeles. **Con mascara da igual el nivel**: el archivo que recibes conserva el
+tamano de tu propia foto, porque solo se sustituye la zona repintada.
 
-- **Vista previa (0.04 USD)** para explorar: cuando quieres ver seis ideas de
-  escena, luz o encuadre y decidir cual te gusta.
-- **Alta (0.04 USD con tu perfil construido)** para la imagen que te vas a
-  quedar. Es el mismo precio que la vista previa y sube tus fotos de referencia
-  a 2048 px en vez de 1536, o sea un 28% mas de cara en cada referencia. Sin
-  perfil construido cuesta 0.08 USD.
-- **Borrador (0.006 USD)** solo para probar el circuito. Es un modelo mas
-  flojo, y como cada reparacion suya cuesta ocho veces lo que costo generarla,
-  sale caro en cuanto falla.
+- **Vista previa** para explorar: cuando quieres ver seis ideas de escena, luz
+  o encuadre y decidir cual te gusta. Cuesta 0.05 USD la imagen si solo cambias
+  ropa o escena, 0.04 USD si cambias la postura.
+- **Alta** para la imagen que te vas a quedar. Con cambio de ropa cuesta lo
+  mismo que la vista previa (0.05 USD, el mismo `fill`); sin mascara sube tus
+  fotos de referencia a 2048 px en vez de 1536, o sea un 28% mas de cara en
+  cada referencia, por los mismos 0.04 USD con el perfil construido (0.08 sin
+  el).
+- **Borrador (0.006 USD)** solo para probar el circuito, y **solo cambia de
+  precio en postura y encuadre**: un cambio de ropa se repinta con mascara y
+  cuesta 0.05 USD en cualquier nivel. Es un modelo mas flojo, y como cada
+  reparacion suya cuesta ocho veces lo que costo generarla, sale caro en cuanto
+  falla.
 - **Maxima** cuesta y entrega hoy lo mismo que Alta; existe para cuando fal
   publique un modelo mayor.
 
@@ -232,9 +296,15 @@ Sobre tus fotos reales, esa comprobacion mide hoy
 
 | adelgazamiento fabricado | lo detecta | falsas alarmas |
 |---|---|---|
-| 6% | 83% (5 de 6) | **0%** |
-| 12% | 100% (6 de 6) | **0%** |
-| 18% | 83% (5 de 6) | **0%** |
+| 6% | 0% (0 de 6) | **0%** |
+| 12% | 50% (3 de 6) | **0%** |
+| 18% | 50% (3 de 6) | **0%** |
+
+Medido el 2026-09-05 con ese mismo comando. Las tres fotos que no detecta son
+aquellas en las que el encuadre no deja medir la figura en cabezas, y ahi el
+robot **lo dice** en vez de dar la imagen por buena en silencio. Un
+adelgazamiento del **6% no se puede separar hoy** del volumen que anade una
+prenda: es la limitacion que hay que conocer antes de fiarse del control.
 
 ## 7. Que pasa cuando una comprobacion falla
 
@@ -251,9 +321,18 @@ Sobre tus fotos reales, esa comprobacion mide hoy
    mala suerte, es el motor dando la misma respuesta, y no se paga un tercer
    intento por ella.
 4. **Si tampoco, se descarta con el motivo escrito en castellano** y aparece en
-   la ficha de la tirada. Los motivos posibles son exactamente estos:
-   *el rostro no coincide con el tuyo*, *cambiaron tus proporciones*, *cambio tu
-   tono de piel*, *hay errores anatomicos*, *la calidad tecnica es baja*.
+   la ficha de la tirada. La frase empieza siempre por *No te la ensenamos
+   porque...* y los motivos posibles son exactamente estos: *la cara que ha
+   salido no es la tuya*, *el cuerpo ha salido con otra forma*, *tu piel ha
+   salido de otro tono*, *hay algo mal dibujado, por ejemplo una mano*, *la
+   imagen ha salido borrosa*.
+5. **Si fal devuelve un archivo en negro** - lo hace cuando su propio revisor de
+   contenido marca la imagen que acaba de dibujar - el trabajo **si se cobra**,
+   porque la inferencia se ejecuto, y se te dice con esas palabras. Se prueba
+   otra semilla; si el segundo intento vuelve a salir en negro, **no se paga un
+   tercero**: eso ya no es mala suerte, es esa peticion. Medido el 2026-09-04
+   sobre las 175 peticiones reales de esta cuenta: 12 bloqueos de 175 (6,9%),
+   repartidos por los tres modelos.
 
 Antes de llegar al punto 1, el robot intenta **arreglarlo gratis**: la textura
 de piel se devuelve desde una de tus propias fotografias, y las manos y el
@@ -261,13 +340,16 @@ rostro tienen su propia correccion local. Nada de eso llama al proveedor ni
 cuesta un centimo, y ninguna de esas tres cosas abre ya una ronda de repintado
 de pago.
 
-En el ensayo del 2026-09-04 (calidad alta, 3 vistas, coste real 0.00 USD porque
-las imagenes salen de disco y la red esta cerrada): 5 intentos, **3 aceptadas y
-2 descartadas**, 1.67 intentos por foto conseguida, **0 rondas de reparacion**,
-y 0.2000 USD liquidados frente a 0.2670 estimados y un techo de 1.7100. Las dos
-descartadas lo fueron por *hay errores anatomicos* y por *el rostro no coincide
-con el tuyo*, y ninguna llego a comprar un repintado, porque todo lo que les
-fallaba pertenece al camino gratuito.
+En el ensayo del 2026-09-05 (calidad alta, 3 vistas con cambio de ropa, coste
+real 0.00 USD porque las imagenes salen de disco y la red esta cerrada): la
+tirada se enruta a `fal-ai/flux-pro/v1/fill`, se cotiza **3 x 0.0500 + factor
+1.35 = 0.3075 USD** con un techo de 1.8000, y liquida **0.4500 USD** en 6
+intentos: 2 aceptadas y 4 descartadas por *hay algo mal dibujado, por ejemplo
+una mano*. Ese numero de descartes es del ensayo y no del robot: en modo ensayo
+la "respuesta de fal" es una imagen ya comprada de otra escena, pegada dentro de
+la zona de la ropa, y eso mete de verdad una mano rota donde el motor tenia
+permiso para pintar. Con una respuesta que si corresponde a la peticion, las
+mismas 156 peticiones enmascaradas dieron **0 descartes**.
 
 Si en cualquier punto el saldo no cubre la siguiente llamada, la tirada se
 **detiene**, guarda lo que ya habia aceptado y te avisa de cuanto falta. Nunca
@@ -343,16 +425,17 @@ dura) **no hay ninguna imagen**. El minimo se pone en 0.45, en mitad de ese
 hueco.
 
 **Lo que garantiza:** si la imagen lleva la cara de otra mujer, no llega a tu
-album, la ficha lo dice con el numero y el motivo es *"el rostro no coincide con
-el tuyo"*.
+album, la ficha lo dice con el numero y el motivo es *"No te la ensenamos porque
+la cara que ha salido no es la tuya"*.
 
 **Lo que cuesta cuando rechaza por la cara.** Una cara equivocada **no se puede
 reparar por zonas**: un retoque local puede devolver grano a una mejilla, pero no
 puede convertir a otra mujer en ti. Asi que:
 
-* la imagen rechazada **ya esta pagada** (0.04 USD en cualquier nivel salvo
-  borrador, con tu perfil construido): la llamada se hizo y el proveedor cobra
-  igual;
+* la imagen rechazada **ya esta pagada** (0.04 USD: un rechazo por la cara solo
+  puede ocurrir en el camino sin mascara, que es el de Kontext, porque en el
+  camino con mascara tu cara no se dibuja): la llamada se hizo y el proveedor
+  cobra igual;
 * esa imagen pagada **ya no se borra**: se conserva, se nombra en la ficha de la
   tirada y no se vuelve a gastar en ella;
 * el robot **genera otra entera**, a ese mismo precio, no al de reparacion

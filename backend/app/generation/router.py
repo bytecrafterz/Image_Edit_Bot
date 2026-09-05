@@ -188,6 +188,21 @@ def _operation(req_kind: Any) -> str:
     return _OPERATION_ALIASES.get(_text(req_kind).lower(), "generate")
 
 
+# The same word, for the one message a client reads.  "inpaint" is the name on
+# fal's price list and belongs on the estimate card next to the money; it does
+# not belong in a sentence that tells her why nothing can be made right now.
+_OPERATION_ES: dict[str, str] = {
+    "generate": "crear la imagen",
+    "inpaint": "repintar solo la zona que cambias",
+    "upscale": "ampliar la imagen",
+    "edit": "editar la imagen",
+}
+
+
+def _operation_es(operation: Any) -> str:
+    return _OPERATION_ES.get(_text(operation).lower(), "hacer este cambio")
+
+
 def _quality(quality: Any) -> str:
     word = _text(quality).lower()
     return word if word in QUALITIES else "preview"
@@ -428,19 +443,56 @@ def _cost(provider: Any, operation: str, quality: str,
         return max(0.0, _f(getattr(caps, "cost_per_image_usd", 0.0), 0.0))
 
 
-def delivered_side(provider: Any, quality: str) -> int:
-    """Longest side this provider really hands back at this tier."""
-    caps = _caps(provider)
-    if caps is None:
-        return 0
-    ceiling = int(_f(getattr(caps, "out_max_side", 0), 0.0)) or \
-        int(_f(getattr(caps, "max_side", 0), 0.0))
+def delivered_side(provider: Any, quality: str,
+                   request: GenRequest | None = None) -> int:
+    """Longest side this provider really hands back FOR THIS REQUEST.
+
+    The provider is asked about the call that will be made whenever there is
+    one, because the answer is per endpoint and not per vendor: fal's
+    Capabilities can only carry one number and it carries the default role's,
+    so a masked run - a different endpoint, a different file - was being
+    described by the Kontext row.
+    """
     asked = QUALITY_LONGEST_SIDE.get(_quality(quality), 768)
+    ceiling = 0
+    fn = getattr(provider, "delivered_side", None)
+    if callable(fn) and isinstance(request, GenRequest):
+        try:
+            ceiling = int(_f(fn(request), 0.0))
+        except Exception:                                # noqa: BLE001
+            ceiling = 0
+    if not ceiling:
+        caps = _caps(provider)
+        if caps is None:
+            return 0
+        ceiling = int(_f(getattr(caps, "out_max_side", 0), 0.0)) or \
+            int(_f(getattr(caps, "max_side", 0), 0.0))
     return min(asked, ceiling) if ceiling else asked
 
 
-def resolution_note(provider: Any, quality: str) -> str:
-    """One Spanish sentence when a tier cannot deliver the pixels it names.
+def photos_sent(provider: Any, request: GenRequest | None = None,
+                references: Any = None) -> int:
+    """How many photographs of her this call really carries.
+
+    Asked of the provider, because only it knows which of its endpoints has a
+    pool: kontext/multi takes the photograph plus up to three others, kontext
+    and img2img take one, and the fill endpoint takes none besides the one it
+    is repainting.  The fallback is what the caller planned, for a provider
+    that has never been asked this question.
+    """
+    fn = getattr(provider, "images_sent", None)
+    if callable(fn) and isinstance(request, GenRequest):
+        try:
+            return max(0, int(_f(fn(request), 0.0)))
+        except Exception:                                # noqa: BLE001
+            pass
+    return min(REFERENCE_COUNT, 1 + len(list(references or [])))
+
+
+def resolution_note(provider: Any, quality: str,
+                    request: GenRequest | None = None,
+                    source_size: Any = None) -> str:
+    """One Spanish sentence about the pixels of the endpoint THAT WILL RUN.
 
     fal's Kontext endpoints expose no size knob at all - see MODELS in
     providers/fal - and answer with about one megapixel whatever was paid.
@@ -449,9 +501,44 @@ def resolution_note(provider: Any, quality: str) -> str:
     stops promising pixels, and putting the local upscaler in between would not
     buy them either - it moved the measured texture loss from +0.018 to +0.050
     over her seven photographs.
+
+    ON THE MASKED PATH THAT SENTENCE IS SIMPLY FALSE, which is why the request
+    is an argument now.  fal's fill endpoint answers with about one megapixel
+    as well, but that answer is not the file she receives: protect.compose puts
+    it back INSIDE the mask over her own photograph at its full size, so the
+    image the album stores is her camera's 2316x3088 - her own pixels
+    everywhere the mask is black, her face included.  Saying "entrega como
+    maximo 1024 px" about that file would understate it threefold in each
+    direction, so what is said instead is where the softness really is: inside
+    the zone that was repainted and enlarged.
     """
     asked = QUALITY_LONGEST_SIDE.get(_quality(quality), 768)
-    gets = delivered_side(provider, quality)
+    gets = delivered_side(provider, quality, request)
+    masked = bool(isinstance(request, GenRequest) and request.mask_path)
+    if masked:
+        # NOT clamped by the tier.  The fill endpoint has no size knob at all,
+        # so it answers with about one megapixel whatever was paid, and
+        # min(asked, ceiling) was announcing 512 px for a draft that comes back
+        # at 1024 px exactly like the top tier does.
+        raw = 0
+        fn = getattr(provider, "delivered_side", None)
+        if callable(fn):
+            try:
+                raw = int(_f(fn(request), 0.0))
+            except Exception:                            # noqa: BLE001
+                raw = 0
+        gets = raw or gets
+        size = ""
+        if isinstance(source_size, (list, tuple)) and len(source_size) == 2 \
+                and int(_f(source_size[0])) > 0 and int(_f(source_size[1])) > 0:
+            size = " (%dx%d px)" % (int(_f(source_size[0])),
+                                    int(_f(source_size[1])))
+        return ("Aviso: como solo se repinta la zona que cambias, el archivo "
+                "que recibes conserva el tamano de tu foto%s. %s devuelve esa "
+                "zona a %d px de lado largo y se amplia para pegarla, asi que "
+                "solo la parte repintada pierde algo de detalle; tu rostro "
+                "conserva todos los pixeles de tu camara."
+                % (size, _name_of(provider), gets or asked))
     if not gets or gets >= asked:
         return ""
     return ("Aviso: %s entrega como maximo %d px de lado largo en esta "
@@ -492,6 +579,28 @@ def _model_name(provider: Any, quality: str,
         if isinstance(value, str) and value.strip():
             return value.strip()
     return _name_of(provider)
+
+
+def endpoint_name(provider: Any, request: GenRequest | None = None,
+                  quality: str = "preview") -> str:
+    """The vendor URL this request will really be posted to, when it is known.
+
+    The role key ('inpaint', 'identity_multi') is what the codebase routes on;
+    it is not what anybody can look up on a price list.  The estimate carries
+    both so that "fill a 0.050 USD" and "kontext/multi a 0.040 USD con tres
+    fotos" can be read off the screen and checked against fal's own pricing
+    page, which is the only way the client can audit the number she is shown.
+    """
+    role = _model_name(provider, quality, request)
+    fn = getattr(provider, "endpoint", None)
+    if callable(fn):
+        try:
+            value = _text(fn(role))
+            if value:
+                return value
+        except Exception:                                # noqa: BLE001
+            pass
+    return role
 
 
 def _quality_score(provider: Any) -> float:
@@ -632,7 +741,7 @@ def _unapplied_note(provider: Any, changes: set[str]) -> str:
         return ""
     return ("Aviso: %s no genera imagen nueva, solo transforma la foto real, "
             "asi que estos cambios NO se aplicaran: %s. Configura la clave "
-            "de un proveedor generativo para poder pedirlos."
+            "de un motor que sepa dibujar para poder pedirlos."
             % (_name_of(provider), _join_es(_change_labels(missing))))
 
 
@@ -688,8 +797,8 @@ def choose_provider(req_kind: str, quality: str, budget_usd: float,
     skipped: list[str] = []
 
     if not providers:
-        raise ProviderError("No hay ningun proveedor de imagen registrado.",
-                            retryable=False, code="no_provider")
+        raise ProviderError("No hay ningun motor de imagen instalado en esta "
+                            "aplicacion.", retryable=False, code="no_provider")
 
     preferred = _text(prefer) or _text(SETTINGS.default_image_provider)
     explicit = bool(_text(prefer))
@@ -710,10 +819,15 @@ def choose_provider(req_kind: str, quality: str, budget_usd: float,
                                            _money(budget)))
             else:
                 why = ("lo pediste explicitamente" if explicit
-                       else "es tu proveedor por defecto")
+                       else "es el motor que elegiste en Ajustes")
+                # The name on fal's price list, not the internal role: "Se usa
+                # fal (inpaint)" told the client a word from this codebase,
+                # while the estimate card beside it said
+                # fal-ai/flux-pro/v1/fill.  One name, and it is the one she can
+                # look up.
                 reason = ("Se usa %s (%s) porque %s. Coste por imagen: %s "
                           "USD." % (_name_of(target),
-                                    _model_name(target, qual, request), why,
+                                    endpoint_name(target, request, qual), why,
                                     _money(cost)))
                 # A stated preference is an instruction and is obeyed, but it
                 # never buys silence: if that engine cannot make one of her
@@ -765,7 +879,8 @@ def choose_provider(req_kind: str, quality: str, budget_usd: float,
         provider, cost = candidates[0]
         model = _model_name(provider, qual, request)
         reason = "Se usa %s (%s) porque %s. Coste por imagen: %s USD." % (
-            _name_of(provider), model, criterion, _money(cost))
+            _name_of(provider), endpoint_name(provider, request, qual),
+            criterion, _money(cost))
         if skipped:
             reason += " Descartados: " + "; ".join(skipped[:3]) + "."
         return provider, model, reason
@@ -773,7 +888,7 @@ def choose_provider(req_kind: str, quality: str, budget_usd: float,
     if local is not None and _supports(local, operation) and _available(local):
         reason = ("; ".join(skipped[:3]) + ", se usa el motor local gratuito."
                   if skipped else
-                  "No hay proveedor de pago disponible, se usa el motor local "
+                  "No hay ningun motor de pago disponible, se usa el motor local "
                   "gratuito.")
         reason = reason[0].upper() + reason[1:]
         # The run never fails for want of an engine - but a free image that
@@ -787,57 +902,113 @@ def choose_provider(req_kind: str, quality: str, budget_usd: float,
     for provider in providers:
         if _supports(provider, operation) and _available(provider):
             reason = ("Sin alternativas dentro del presupuesto: se usa %s, el "
-                      "unico proveedor disponible que puede hacerlo."
+                      "unico motor disponible que puede hacerlo."
                       % _name_of(provider))
             warning = _unapplied_note(provider, wanted)
             if warning:
                 reason += " " + warning
             return provider, _model_name(provider, qual, request), reason
 
+    # ``operation`` is the internal word (generate, inpaint) and ``skipped``
+    # names engines by their key: both were being shown to a client who does
+    # not know what an inpaint is.  The engine names stay, because she chooses
+    # one in Ajustes and pays for it; the operation is said in Spanish.
     raise ProviderError(
-        "Ningun proveedor disponible puede %s ahora mismo (%s)."
-        % (operation, "; ".join(skipped[:3]) or "sin motores activos"),
+        "Ahora mismo no hay ningun motor que pueda %s (%s). Revisa en Ajustes "
+        "que la clave este puesta, o elige 'que decida el robot'."
+        % (_operation_es(operation),
+           "; ".join(skipped[:3]) or "no hay ningun motor activo"),
         retryable=False, code="no_provider")
 
 
 # ----------------------------------------------------------------- estimate
 
-def plan_requests(plan: dict, quality: str) -> list[GenRequest]:
+def plan_references(plan: dict) -> list[str]:
+    """The photographs of her that will really travel with each generation.
+
+    Filtered by ``exists`` exactly as ``run_previews`` filters them, because
+    the count is what chooses the model: with references fal bills
+    identity_multi at 0.040 USD, without them identity_max at 0.080 USD on the
+    top tiers.  Counting a file that is no longer on disk would quote 0.040 and
+    settle 0.080 - an UNDER-quote, the one direction that is not safe.
+    """
+    from pathlib import Path as _Path
+
+    plan_d = plan if isinstance(plan, dict) else {}
+    out: list[str] = []
+    for ref in (plan_d.get("reference_paths") or []):
+        name = _text(ref)
+        if not name or name in out:
+            continue
+        try:
+            if not _Path(name).exists():
+                continue
+        except OSError:
+            continue
+        out.append(name)
+    return out
+
+
+def plan_shields(plan: dict) -> list[dict]:
+    """Will her face be generated?  One answer per variant, from ONE place.
+
+    ``protect.shield_for`` is the same call ``_run_variant`` makes, on the same
+    photograph, into the same folder - so it draws the mask once and the run
+    finds it already there.  That is the whole point: the estimate used to ask
+    ``plan_mask``, which reads the option groups, while the run asked whether a
+    mask could actually be DRAWN on this photograph, and the two are different
+    questions.  When they disagreed the screen priced fal's fill endpoint at
+    0.050 USD for a call that went to kontext/multi at 0.040 USD with three
+    reference photographs, and promised a face that would not be redrawn while
+    the run redrew it.
+    """
+    from . import protect as protect_mod
+
+    plan_d = plan if isinstance(plan, dict) else {}
+    variants = plan_d.get("variants")
+    rows = variants if isinstance(variants, list) and variants else [{}]
+    source_path = plan_d.get("source_path")
+    work_dir = plan_d.get("work_dir")
+    return [protect_mod.shield_for(source_path,
+                                   (v.get("choices") if isinstance(v, dict)
+                                    else {}) or {}, work_dir)
+            for v in rows]
+
+
+def plan_requests(plan: dict, quality: str,
+                  shields: list[dict] | None = None) -> list[GenRequest]:
     """The requests this plan will really send, one per variant.
 
     Built here so the estimate screen and the run cannot drift: same builder,
-    same source photograph, same framing, same size.  A variant that changes
-    the framing changes the shape of its image and, on the per megapixel
-    tiers, its price - so each one is asked separately instead of multiplying
-    the first one by six.
+    same source photograph, same framing, same size, same mask file.  A variant
+    that changes the framing changes the shape of its image and, on the per
+    megapixel tiers, its price - so each one is asked separately instead of
+    multiplying the first one by six.
+
+    ``shields`` is ``plan_shields`` above; it is an argument so that a caller
+    which already has the answers does not ask for them twice.
     """
     plan_d = plan if isinstance(plan, dict) else {}
     variants = plan_d.get("variants")
     rows = variants if isinstance(variants, list) and variants else [{}]
     source_path = plan_d.get("source_path")
     source_size = plan_d.get("source_size")
-    # The references are part of the request and they change which model runs:
-    # with them fal picks identity_multi at 0.040 USD, without them
-    # identity_max at 0.080 USD on the top tiers.  Pricing a probe that has no
-    # references while the run sends three is the same defect as pricing a
-    # request with no source photograph - it quotes a call nobody makes.
-    references = [r for r in (plan_d.get("reference_paths") or []) if r]
-    # And whether her face will be protected, which changes BOTH the endpoint
-    # and the price: a masked variant goes to fal's fill model at 0.050 USD and
-    # carries no reference images, an unmasked one to Kontext multi at 0.040
-    # USD with three.  Pricing every variant as unmasked was the same defect as
-    # pricing a probe with no source photograph - it quotes a call nobody
-    # makes - and here it would understate a masked preview by 25%.
-    from . import protect as protect_mod
+    references = plan_references(plan_d)
+    found = shields if isinstance(shields, list) and len(shields) == len(rows) \
+        else plan_shields(plan_d)
 
     out: list[GenRequest] = []
-    for variant in rows:
+    for variant, shield in zip(rows, found):
         choices = variant.get("choices") if isinstance(variant, dict) else {}
-        masked = bool(protect_mod.plan_mask(choices or {}).get("safe"))
+        masked = bool(shield.get("masked"))
+        # The real mask file when there is one.  Nothing here is invented: the
+        # request that is priced carries the very path the request that is sent
+        # will carry, so provider.pick_model cannot answer differently.
+        mask = _text(shield.get("mask_path")) or ("mask.png" if masked else "")
         out.append(_probe_request("inpaint" if masked else "generate", quality,
                                   source_path=source_path,
                                   source_size=source_size,
-                                  mask_path="mask.png" if masked else None,
+                                  mask_path=mask or None,
                                   reference_paths=[] if masked else references,
                                   framing=(choices or {})))
     return out
@@ -940,6 +1111,42 @@ def _history_note(plan: dict, user_id: str = "") -> str:
     return note
 
 
+def _face_note(shields: list[dict], endpoint: str, per_image: float,
+               n_photos: int) -> str:
+    """Which of the two things is about to happen to her face, in one sentence.
+
+    This is the difference between an image that will look like her and one
+    that may not, so it is said before the money and not in the report
+    afterwards.  The endpoint and the price are in the same sentence on
+    purpose: they are the checkable half of it - a run that promises "no se
+    vuelve a generar" while quoting kontext/multi is contradicting itself, and
+    the client can now see that without reading any code.
+    """
+    rows = [sh for sh in (shields or []) if isinstance(sh, dict)]
+    if not rows:
+        return ""
+    safe = [sh for sh in rows if sh.get("masked")]
+    n_refs = max(0, int(n_photos))
+    price = ("%s (%s USD por imagen)" % (endpoint, _money(per_image))
+             if endpoint else "%s USD por imagen" % _money(per_image))
+    if len(safe) == len(rows):
+        return "%s Se paga %s, que repinta por zonas." % (
+            safe[0].get("reason") or "", price)
+    blocked = next(sh for sh in rows if not sh.get("masked"))
+    if not safe:
+        # The count is what leaves the machine, not what was chosen: at draft
+        # the pose change goes to img2img, which takes ONE photograph, so
+        # promising three would be promising a defence that is not there.
+        carried = ("Viaja 1 foto tuya con cada imagen" if n_refs == 1 else
+                   "Viajan %d fotos tuyas con cada imagen" % n_refs)
+        return "%s %s y se paga %s." % (blocked.get("reason") or "",
+                                        carried, price)
+    return ("En %d de las %d imagenes tu rostro se copia de tu foto; en las "
+            "otras %d hay que volver a dibujarlo. %s"
+            % (len(safe), len(rows), len(rows) - len(safe),
+               blocked.get("reason") or ""))
+
+
 def _cost_ceiling_note(total: float, total_max: float, repair_unit: float,
                        attempts: int) -> str:
     """One Spanish sentence with the worst this run can cost.
@@ -988,7 +1195,15 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
     """
     plan_d = plan if isinstance(plan, dict) else {}
     qual = _quality(quality)
-    requests = plan_requests(plan_d, qual)
+    # ONE decision about her face, taken here and reused by the run: which
+    # endpoint each variant will hit, with which mask and with how many
+    # photographs of her.  Everything below - the model named on the screen,
+    # the price per image, the total, the ceiling, the resolution warning and
+    # the sentence about her face - is computed from these objects and from
+    # nothing else.
+    shields = plan_shields(plan_d)
+    requests = plan_requests(plan_d, qual, shields)
+    references = plan_references(plan_d)
     n_images = len(requests)
     budget = plan_d.get("budget_usd")
     budget_usd = _f(budget, float("inf")) if budget is not None else float("inf")
@@ -1002,17 +1217,38 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
         # variant whose face is protected is an inpaint, and asking the router
         # to price a 'generate' while sending an 'inpaint' is how the quote and
         # the invoice came apart in the first place.
-        provider, model, reason = choose_provider(
+        provider, _chosen, reason = choose_provider(
             _text(requests[0].operation) or "generate", qual, budget_usd,
             plan_d.get("provider"), changes=changes, request=requests[0])
     except ProviderError as exc:
         return {"total_usd": 0.0, "per_image_usd": 0.0, "provider": "",
-                "model": "", "breakdown": [], "free": True,
+                "model": "", "endpoint": "", "modelos": [], "breakdown": [],
+                "free": True,
                 "n_images": n_images, "quality": qual,
                 "factor": REPAIR_FACTOR, "reason": str(exc), "aviso": "",
-                "aviso_resolucion": "", "aviso_coste": "",
+                "aviso_resolucion": "", "aviso_coste": "", "aviso_rostro": "",
+                "rostro": {"protegidas": 0, "de": n_images, "referencias": 0,
+                           "detalle": []},
                 "aviso_opciones": _history_note(plan_d, user_id),
                 "intentos_maximos": 0, "total_max_usd": 0.0}
+
+    # THE SAME FALLBACK THE RUN MAKES, made here so the quote is never of a
+    # call nobody will attempt.  The free engine's inpaint fills a hole from
+    # the pixels around it: handed the mask of a torso it would sample the wall
+    # rather than sew a suit, so ``_run_variant`` drops the mask and makes the
+    # whole image whenever the chosen engine is not generative.  Quoting the
+    # masked path against that engine would put "tu rostro no se va a volver a
+    # generar" on the screen for a run that will not honour it.
+    caps = _caps(provider)
+    if any(sh.get("masked") for sh in shields) and caps is not None \
+            and not bool(getattr(caps, "generative", True)):
+        shields = [{**sh, "masked": False, "mask_path": "", "cover": 0.0,
+                    "estado": "motor no generativo",
+                    "reason": "El motor gratuito no sabe repintar solo una "
+                              "zona, asi que esta imagen se hace entera y se "
+                              "comprueba la identidad."}
+                   for sh in shields]
+        requests = plan_requests(plan_d, qual, shields)
 
     costs = [round(_cost(provider, _text(req.operation) or "generate", qual,
                          req), 6) for req in requests]
@@ -1072,9 +1308,30 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
     total_max = round(attempts * (generation
                                   + n_images * regions * repair_unit), 6)
 
+    # WHAT WILL REALLY BE CALLED, named on the screen.  The role key is what
+    # the code routes on; the endpoint is what fal's price list calls it, and
+    # it is the only form of the answer the client can check herself.
+    roles = [_model_name(provider, qual, req) for req in requests]
+    endpoints = [endpoint_name(provider, req, qual) for req in requests]
+    model = roles[0] if len(set(roles)) <= 1 else " + ".join(sorted(set(roles)))
+    endpoint = endpoints[0] if len(set(endpoints)) <= 1 \
+        else " + ".join(sorted(set(endpoints)))
+    by_model: dict[tuple, dict] = {}
+    for role, url, unit, shield, req in zip(roles, endpoints, costs, shields,
+                                            requests):
+        row = by_model.setdefault((role, url, unit), {
+            "modelo": role, "endpoint": url, "usd": unit, "n": 0,
+            "rostro_protegido": bool(shield.get("masked")),
+            # What really leaves the machine with this call, counted by the
+            # provider from the endpoint's own knobs.
+            "fotos": photos_sent(provider, req, references)})
+        row["n"] += 1
+    modelos = list(by_model.values())
+    masked_n = sum(1 for sh in shields if sh.get("masked"))
+
     detail = ("%d variante(s) x %s USD" % (n_images, _money(per_image))
               if len(set(costs)) <= 1 else
-              "%d variante(s), de %s a %s USD segun el encuadre"
+              "%d variante(s), de %s a %s USD segun lo que cambia cada una"
               % (n_images, _money(min(costs)), _money(max(costs))))
     breakdown = [
         {"item": "generacion", "detail": detail,
@@ -1093,8 +1350,29 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
     return {
         "aviso": _unapplied_note(provider, changes),
         # What the tier can really deliver in pixels, said before she pays for
-        # it rather than discovered in the file properties afterwards.
-        "aviso_resolucion": resolution_note(provider, qual),
+        # it rather than discovered in the file properties afterwards - and
+        # said about the endpoint that will run, because a masked call hands
+        # back her own photograph at her own size and the Kontext sentence
+        # would understate it threefold.
+        "aviso_resolucion": resolution_note(provider, qual, requests[0],
+                                            plan_d.get("source_size")),
+        # And the answer to the question the client actually asked first: will
+        # this look like her?  It is the same decision the run acts on, said in
+        # her language, with the endpoint and the price it implies.
+        "aviso_rostro": _face_note(shields, endpoint, per_image,
+                                   photos_sent(provider, requests[0],
+                                               references)),
+        "rostro": {"protegidas": masked_n, "de": n_images,
+                   "fotos_enviadas": photos_sent(provider, requests[0],
+                                                 references),
+                   "referencias": (0 if masked_n == n_images
+                                   else min(REFERENCE_COUNT,
+                                            1 + len(references))),
+                   "detalle": [{"protegido": bool(sh.get("masked")),
+                                "zona": round(float(sh.get("cover") or 0.0), 4),
+                                "estado": sh.get("estado") or "",
+                                "motivo": sh.get("reason") or ""}
+                               for sh in shields]},
         # And the worst case, in the same breath as the estimate.  She is
         # never surprised by a bill only if the bill cannot exceed a number
         # she was shown.
@@ -1109,6 +1387,8 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
         "per_image_usd": per_image,
         "provider": _name_of(provider),
         "model": model,
+        "endpoint": endpoint,
+        "modelos": modelos,
         "breakdown": breakdown,
         "free": total <= 0.0,
         "n_images": n_images,

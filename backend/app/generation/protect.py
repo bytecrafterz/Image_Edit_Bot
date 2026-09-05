@@ -55,7 +55,9 @@ face is not generated at all, so there is no margin left to defend.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +146,39 @@ REGION_ES: dict[str, str] = {
     "arms": "los brazos", "background": "el fondo",
     "persona": "tu cuerpo entero menos la cabeza y las manos",
 }
+
+# What is being repainted, said as the user asked for it rather than as the
+# segmenter names it.  "se repinta solo la ropa" is the sentence she has to be
+# able to act on; "se repinta el torso, la cadera, las piernas y los brazos" is
+# the same fact told in the language of a mask, and she never asked for a mask.
+CHANGE_ES: dict[str, str] = {
+    "outfit": "la ropa", "clothing_color": "el color de la ropa",
+    "transparency": "la transparencia de la tela",
+    "footwear": "el calzado", "accessories": "los complementos",
+    "scene": "el fondo", "background": "el fondo", "location": "el fondo",
+    "props": "el fondo",
+}
+
+# And the same for the groups that FORBID the mask, in the form the sentence
+# needs: "porque pediste cambiar la postura", not "porque pose".
+BLOCKED_ES_NOUN: dict[str, str] = {
+    "pose": "la postura", "framing": "el encuadre", "camera": "la camara",
+    "expression": "la expresion", "makeup": "el maquillaje",
+    "hair": "el peinado", "lighting": "la luz", "color": "el color",
+    "grade": "el tratamiento de color", "treatment": "el acabado",
+    "mood": "el ambiente", "time_of_day": "la hora del dia",
+    "weather": "el clima", "season": "la temporada", "body": "el cuerpo",
+}
+
+# One mask belongs to one photograph and one set of regions, and BOTH the
+# estimate and the run need it: the estimate to price the endpoint that will
+# really be called, the run to send it.  Drawing it twice is drawing it twice
+# with two chances of a different answer - which is the whole defect this
+# module is being wired against - so it is drawn once, into a file named after
+# the photograph and the regions, and whoever asks second reads it back.  The
+# lock is here because _run_batch runs the variants in parallel threads and two
+# variants that change the same thing land on the same file name.
+_MASK_LOCK = threading.Lock()
 
 # Hands, asked of the hand model and not only of the skeleton.  The protected
 # core used to be built from segment.region_masks, whose "hands" region is a
@@ -252,12 +287,46 @@ def _binding_path(mask_path: Any) -> Path:
     return Path(str(mask_path)).with_suffix(BINDING_EXT)
 
 
-def _write_binding(mask_path: Any, source_path: Any, size: list) -> None:
-    """Record which photograph this mask was drawn on, beside the mask."""
+def _write_binding(mask_path: Any, source_path: Any, size: list,
+                   cover: float = 0.0, regions: Any = ()) -> None:
+    """Record which photograph this mask was drawn on, beside the mask.
+
+    ``cover`` and ``regions`` ride along so that a mask found on disk can be
+    REUSED without redrawing it: the estimate needs the covered fraction for
+    its sentence and the run needs the regions for its ficha, and reading them
+    back out of the PNG would mean recomputing what has already been measured.
+    """
     data = {"fuente": Path(str(source_path)).name,
             "sha256": loader.file_sha256(str(source_path)),
-            "completa": [int(size[0]), int(size[1])]}
+            "completa": [int(size[0]), int(size[1])],
+            "cubre": round(float(cover or 0.0), 4),
+            "regiones": [str(r) for r in (regions or [])]}
     _binding_path(mask_path).write_text(json.dumps(data), encoding="utf-8")
+
+
+def _binding_data(mask_path: Any, source_path: Any) -> dict:
+    """The record beside an existing mask, but only if it is THIS photograph's.
+
+    Empty means "there is no mask here that can be trusted", which is the only
+    answer that may lead to reusing one.  The digest is the same check compose()
+    makes before it believes a single pixel; making it here as well is what lets
+    the run reuse the estimate's mask without ever reusing somebody else's.
+    """
+    path = Path(str(mask_path))
+    record = _binding_path(path)
+    if not path.is_file() or not record.is_file():
+        return {}
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    digest = str(data.get("sha256") or "")
+    mine = _safe(loader.file_sha256, str(source_path))
+    if digest and mine and digest != mine:
+        return {}
+    return data
 
 
 def _check_binding(mask_path: Any, source_path: Any,
@@ -329,14 +398,15 @@ def plan_mask(choices: Any) -> dict:
         parts = []
         for group in blocked[:2]:
             why = BLOCKED_REASON.get(group, "cambia la foto entera")
-            parts.append("%s: %s" % (prompt_mod.group_label_es(group), why))
+            parts.append("%s: %s" % (
+                BLOCKED_ES_NOUN.get(group, prompt_mod.group_label_es(group)),
+                why))
         return {
             "safe": False, "regions": regions, "blocked": blocked,
             "groups": groups,
-            "reason": ("Tu rostro se va a volver a generar porque %s. Se "
-                       "enviaran tus fotos de referencia y se comprobara la "
-                       "identidad antes de ensenarte nada."
-                       % "; ".join(parts)),
+            "reason": ("Tu rostro se va a volver a generar porque pediste "
+                       "cambiar %s. Se comprobara la identidad antes de "
+                       "ensenarte nada." % "; ".join(parts)),
         }
     return {
         "safe": True, "regions": regions, "blocked": [], "groups": groups,
@@ -344,6 +414,130 @@ def plan_mask(choices: Any) -> dict:
                    "cara y tus manos se copian de tu propia foto."
                    % ", ".join(_region_label(r) for r in regions)),
     }
+
+
+def change_label_es(groups: Any, regions: Any = ()) -> str:
+    """What is being repainted, in one noun phrase: "la ropa", "el fondo"."""
+    wanted = [str(g) for g in (groups or [])]
+    if "outfit" in wanted:
+        # The garment itself is being replaced, so "la ropa y el color de la
+        # ropa y la transparencia de la tela" is one change said three times.
+        wanted = [g for g in wanted
+                  if g not in ("clothing_color", "transparency")]
+    names: list[str] = []
+    for group in wanted:
+        label = CHANGE_ES.get(str(group))
+        if label and label not in names:
+            names.append(label)
+    if not names:
+        names = [_region_label(r) for r in (regions or [])] or \
+            ["la zona que cambias"]
+    if len(names) == 1:
+        return names[0]
+    return "%s y %s" % (", ".join(names[:-1]), names[-1])
+
+
+def masked_sentence(groups: Any, cover: float, regions: Any = ()) -> str:
+    """The sentence for the safe path, with the number that makes it checkable."""
+    zone = change_label_es(groups, regions)
+    if cover > 0:
+        return ("Tu rostro no se va a volver a generar: se repinta solo %s "
+                "(%.0f%% de la foto) y tu cara y tus manos se copian de tu "
+                "propia foto." % (zone, 100.0 * float(cover)))
+    return ("Tu rostro no se va a volver a generar: se repinta solo %s y tu "
+            "cara y tus manos se copian de tu propia foto." % zone)
+
+
+def mask_name(source_path: Any, regions: Any) -> str:
+    """The file name a mask for this photograph and these regions must have.
+
+    Named after WHAT IT IS rather than after which variant asked for it: six
+    previews that all change the clothes need one mask, not six identical ones,
+    and the estimate that priced them needs the very same file so that the
+    price it quotes is the price of a call that can really be made.  It keeps
+    the ``v*_mask.png`` shape the rehearsal already looks for.
+    """
+    raw = "%s|%s" % (Path(str(source_path)).name,
+                     ",".join(sorted(str(r) for r in (regions or []))))
+    return "v%s_mask.png" % hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def shield_for(source_path: Any, choices: Any, work_dir: Any = None) -> dict:
+    """WILL HER FACE BE GENERATED?  The one place that answers, for everybody.
+
+    This is the fix to a defect that had already been fixed once from the other
+    end.  The answer was being taken twice: ``plan_mask`` above decided it from
+    the option groups for the estimate, and ``_run_variant`` decided it again
+    from whether a mask could actually be DRAWN on this photograph - which is a
+    different question, because 9 of her 24 photographs are closeups where the
+    regions are found differently, and because a mask under MIN_COVER or over
+    MAX_COVER is refused on pixels the groups know nothing about.  When the two
+    disagreed the client was quoted one endpoint (fill, 0.050 USD) and billed
+    another (kontext/multi, 0.040 USD with three references), and the sentence
+    on the screen promised a face that would not be redrawn while the run
+    redrew it.
+
+    So both callers ask this, and this draws the mask ONCE - into ``work_dir``,
+    under a name made of the photograph and the regions - and hands the second
+    caller the same file, the same coverage and the same sentence.  Without a
+    ``work_dir`` there is nowhere to keep it, and the honest answer is the group
+    one, marked ``sin dibujar`` so nobody mistakes it for a measured one.
+    """
+    plan = plan_mask(choices)
+    out: dict[str, Any] = {
+        "masked": False, "mask_path": "", "cover": 0.0,
+        "regions": list(plan.get("regions") or []),
+        "blocked": list(plan.get("blocked") or []),
+        "groups": list(plan.get("groups") or []),
+        "reason": _text(plan.get("reason")), "estado": "bloqueado",
+    }
+    if not plan.get("safe"):
+        return out
+
+    source = _text(source_path)
+    folder = Path(_text(work_dir)) if _text(work_dir) else None
+    if not source or folder is None:
+        out["masked"] = True
+        out["estado"] = "sin dibujar"
+        out["reason"] = masked_sentence(out["groups"], 0.0, out["regions"])
+        return out
+
+    mask_file = folder / mask_name(source, plan.get("regions") or [])
+    with _MASK_LOCK:
+        record = _binding_data(mask_file, source)
+        if record:
+            out.update({
+                "masked": True, "mask_path": str(mask_file),
+                "cover": float(record.get("cubre") or 0.0),
+                "regions": [str(r) for r in (record.get("regiones")
+                                             or out["regions"])],
+                "estado": "reutilizada"})
+            out["reason"] = masked_sentence(out["groups"], out["cover"],
+                                            out["regions"])
+            return out
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            built = build_mask(source, choices, str(mask_file),
+                               regions=plan.get("regions") or [])
+        except Exception as exc:                          # noqa: BLE001
+            built = {"ok": False,
+                     "reason": "no se pudo preparar la mascara (%s)" % exc}
+
+    if not built.get("ok"):
+        # Not an error: on a closeup there may be no torso to repaint at all.
+        # It IS money, though - this is the branch that pays kontext/multi
+        # instead of fill - so it is said in her language, once, here.
+        out["estado"] = "sin zona"
+        out["reason"] = ("Tu rostro se va a volver a generar: %s. Se comprobara "
+                         "la identidad antes de ensenarte nada."
+                         % (built.get("reason") or "no se pudo aislar la zona"))
+        return out
+    out.update({"masked": True, "mask_path": str(built["mask_path"]),
+                "cover": float(built.get("cover") or 0.0),
+                "regions": list(built.get("regions") or out["regions"]),
+                "estado": "dibujada"})
+    out["reason"] = masked_sentence(out["groups"], out["cover"], out["regions"])
+    return out
 
 
 # ------------------------------------------------------------------ the mask
@@ -482,13 +676,16 @@ def build_mask(source_path: str, choices: Any, out_path: str,
         return result
     # Which photograph this mask was drawn on, written beside the mask, so that
     # compose() can refuse one that belongs to a different frame instead of
-    # repainting her face and reporting that nothing changed.
-    _safe(_write_binding, saved, source_path, [fw, fh])
+    # repainting her face and reporting that nothing changed - and what it
+    # covers, so that shield_for() can hand the same numbers to the estimate
+    # and to the run without drawing the mask a second time.
+    cover_full = round(float(np.count_nonzero(big)) / float(fh * fw), 4)
+    _safe(_write_binding, saved, source_path, [fw, fh], cover_full, used)
 
     result.update({
         "ok": True,
         "mask_path": str(saved),
-        "cover": round(float(np.count_nonzero(big)) / float(fh * fw), 4),
+        "cover": cover_full,
         "regions": used,
         "reason": ("Se repinta solo %s (%.0f%% de la foto). Tu rostro y tus "
                    "manos se copian de tu foto original."

@@ -47,6 +47,49 @@ lo hizo.
 
 ---
 
+## Tu cara no se vuelve a dibujar
+
+Cuando lo que pides **no mueve a la persona dentro de la foto** — otra ropa,
+otro color, otro fondo — el robot no regenera la imagen: dibuja una **máscara**
+sobre la zona que cambia y deja fuera tu cara y tus manos. El motor repinta sólo
+lo blanco de esa máscara y todo lo demás se copia **píxel a píxel de tu propia
+fotografía**.
+
+```
+     tu foto 2316x3088
+          │
+     máscara: blanco = la ropa (22% de la foto en IMG_7871)
+              negro  = tu cara, tus manos, el resto
+          │
+     fal-ai/flux-pro/v1/fill  ── 0.05 USD ── repinta sólo lo blanco
+          │
+     se pega dentro de tu foto ── y se comprueba que fuera de la máscara
+                                   NO ha cambiado ni un píxel
+          │
+     archivo entregado: 2316x3088, el tamaño de tu cámara
+```
+
+Lo que eso significa, y está medido: tu **parecido facial no depende del
+modelo** porque tu cara no pasa por él; tus **manos son las tuyas** y la ficha
+lo dice con esas palabras en vez de avisarte de que no ha podido juzgarlas; tus
+**tatuajes y tus pendientes** siguen ahí; y el archivo conserva la resolución de
+tu foto en vez de bajar a 1024x1024.
+
+Cuando pides **otra postura u otro encuadre** eso no se puede hacer: mover la
+pose mueve tu cuerpo dentro del cuadro (medido en sus fotos: la cabeza se
+desplaza 1,23 cabezas de mediana), así que hay que volver a dibujarte entera con
+`kontext/multi` (0.04 USD, viajan 3 fotos tuyas) y **entonces sí se comprueba el
+rostro antes de enseñarte nada**. La pantalla de coste te dice cuál de los dos
+caminos vas a pagar, con el nombre del modelo, **antes** de gastar.
+
+Verificado sin gastar: 3 regímenes x 192 peticiones enmascaradas, **0 píxeles
+cambiados fuera de la máscara** en todas ellas. Sin gastar también está su
+límite: de las 28 llamadas reales que esta cuenta ha hecho a `fill`, 26 fueron
+reparaciones de zonas y las 2 únicas peticiones de ropa con máscara que han
+salido de verdad las bloqueó el revisor de contenido de fal.
+
+---
+
 ## Cómo se mide la identidad
 
 Cada imagen generada se vuelve a medir con los mismos analizadores que
@@ -105,10 +148,15 @@ reproducen con:
 python scripts\calibrate_identity.py --paired --measurable-only
 ```
 
-Resultado actual sobre las fotos reales: **0% de falsas alarmas** y una
-detección neta del **83% / 100% / 83%** para un adelgazamiento del 6%, 12% y
-18%, disparando siempre la comprobación correcta. El límite hoy no es el
-método: es que faltan fotos de cuerpo entero (ver más abajo).
+Resultado medido hoy (2026-09-05) sobre sus fotos reales, con el mismo comando:
+**0% de falsas alarmas** (0 de 6) y una detección neta del **0% / 50% / 50%**
+para un adelgazamiento del 6%, 12% y 18%, disparando siempre la comprobación
+correcta — nunca rechaza por el motivo equivocado. Ese 50% es **cobertura, no
+puntería**: de las seis fotos de prueba, en tres el encuadre no deja medir la
+figura en cabezas, y en esas tres el robot lo dice en vez de fingir que ha
+mirado. Un adelgazamiento del 6% **no se puede separar hoy** del volumen que
+añade una prenda, y así está escrito en la ficha. El límite no es el método:
+son las fotos de cuerpo entero que faltan (ver más abajo).
 
 ---
 
@@ -167,8 +215,8 @@ El sistema funciona **completo desde el primer minuto sin ninguna clave**.
 | | Sin claves | Con claves |
 |---|---|---|
 | Generación | motor local: fondo, color de ropa, luz, grado, encuadre | fal.ai: edición generativa e inpainting real |
-| Lectura de la foto | visión por computador local | Claude lee la foto y redacta el prompt |
-| Coste | **0 USD** | 0.04 USD por imagen en cualquier nivel salvo borrador, con el perfil construido; siempre a la vista |
+| Lectura de la foto | visión por computador local | Claude lee la foto y redacta el prompt: **0.0112 USD, una sola vez por foto** — se guarda con la foto y la siguiente estimación de esa misma foto no cuesta nada — y se anota en tu saldo de Anthropic |
+| Coste por imagen | **0 USD** | lo decide **lo que pides**, no el nivel: **0.05 USD** si sólo cambias ropa, color o escena (se repinta con máscara y tu cara no se vuelve a dibujar), **0.04 USD** si cambias la postura o el encuadre, **0.006 USD** en borrador; siempre a la vista antes de pagar |
 | Recorrido completo | sí | sí |
 
 El motor local **no es IA generativa** y no pretende serlo: es transformación
@@ -337,6 +385,12 @@ backend\.venv\Scripts\python.exe scripts\import_nayane.py
 
 # Ensayo completo del camino de pago (clave falsa, red cerrada, coste 0 USD)
 backend\.venv\Scripts\python.exe scripts\rehearse_paid.py
+
+# Sus 24 fotos a tres tamaños + las caras que no son suyas (0 de 72 rechazadas)
+backend\.venv\Scripts\python.exe scripts\sweep_identity.py
+
+# Que dos cuentas no se vean nada la una a la otra
+backend\.venv\Scripts\python.exe scripts\multiuser_test.py
 ```
 
 ---

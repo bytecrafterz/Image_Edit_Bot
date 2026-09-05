@@ -39,6 +39,7 @@ import logging
 import os
 import random
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -150,6 +151,21 @@ _BALANCE_WORDS = ("balance", "credit", "quota", "exhausted", "billing")
 # can be turned on and off without restarting the server, and named after the
 # product so it cannot collide with anything else in the process.
 REPLAY_ENV = "PHOTOROBOT_FAL_REPLAY"
+# THE ONE ANSWER A FOLDER OF IMAGES CANNOT REHEARSE.  On 2026-09-04 the only
+# two masked clothing requests this product has ever really sent to fal came
+# back HTTP 200 after 19.1 s and 3.3 s of GPU, with has_nsfw_concepts=[True]
+# and an all black PNG: fal ran the inference, charged for it, and refused to
+# show the result.  That is the path that took the client's last 0.100 USD, and
+# a rehearsal that answers from a folder can never produce it, so the handling
+# written for it - settle the money, say so in her language, and refuse to buy
+# a third seed after two blocks - could not be exercised offline.  This
+# variable makes it reproducible: it names how many of the NEXT rehearsal calls
+# answer the way fal answered that night.  It only has any effect inside
+# ``_replay``, which only runs when REPLAY_ENV points at a folder, so it cannot
+# change what a paying installation does.
+REPLAY_BLOCK_ENV = "PHOTOROBOT_FAL_REPLAY_BLOCK"
+_REPLAY_BLOCK_LOCK = threading.Lock()
+_REPLAY_BLOCKS_USED = 0
 _REPLAY_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 _REPLAY_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".png": "image/png", ".webp": "image/webp"}
@@ -250,6 +266,27 @@ def replay_dir() -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+def _replay_block_due() -> bool:
+    """Rehearsal only: is this the call that fal blocks?
+
+    The counter is kept here and compared against the environment on every
+    call, rather than being read once: a rehearsal turns the seam on halfway
+    through its own script, after other runs have already been replayed, and a
+    value cached at import time would answer for the wrong run.  The lock is
+    there because ``_run_batch`` replays several variants at once.
+    """
+    global _REPLAY_BLOCKS_USED
+    with _REPLAY_BLOCK_LOCK:
+        try:
+            wanted = int((os.environ.get(REPLAY_BLOCK_ENV) or "0").strip())
+        except ValueError:
+            wanted = 0
+        if _REPLAY_BLOCKS_USED >= wanted:
+            return False
+        _REPLAY_BLOCKS_USED += 1
+        return True
+
+
 def _replay_files(folder: Path) -> list[Path]:
     """The images available to replay, sorted so a run is reproducible.
 
@@ -322,15 +359,24 @@ def _check(resp: httpx.Response) -> None:
     if code >= 500:
         raise ProviderError(f"fal.ai devolvio un error {code}.",
                             retryable=True, code="server")
-    raise ProviderError(f"fal.ai devolvio {code}: {body}",
-                        retryable=False, code=f"http_{code}")
+    # The body is fal's own English JSON.  It goes to the log, where whoever
+    # installed this can read it; what the client sees is a sentence about her
+    # picture and her money, because until 2026-09-04 a raw
+    # ``{"detail":"Unprocessable Entity"}`` was shown to her verbatim.
+    log.warning("fal.ai HTTP %d: %s", code, body)
+    raise ProviderError(
+        "fal.ai (el servicio que dibuja las imagenes) no ha aceptado esta "
+        "peticion. No se ha cobrado esta imagen. Prueba a cambiar alguna "
+        "opcion o intentalo mas tarde.",
+        retryable=False, code=f"http_{code}")
 
 
 def _json(resp: httpx.Response) -> dict:
     try:
         data = resp.json()
     except ValueError as exc:
-        raise ProviderError("fal.ai devolvio una respuesta ilegible.",
+        raise ProviderError("La respuesta de fal.ai ha llegado incompleta. "
+                            "No se ha cobrado esta imagen.",
                             retryable=True, code="bad_json") from exc
     return data if isinstance(data, dict) else {"data": data}
 
@@ -414,6 +460,39 @@ class FalProvider(ImageProvider):
         if quality in ("high", "max"):
             return "identity_max"
         return "identity"
+
+    def delivered_side(self, req: GenRequest) -> int:
+        """Longest side the endpoint THIS request will hit really hands back.
+
+        Capabilities can only carry one number and carries the default role's,
+        so a masked run - fill instead of Kontext - was being described by the
+        wrong row.  Every model in MODELS declares its own ``out_max_side``;
+        this asks the one that will actually be called.  0 means "the table
+        does not say", and the caller falls back to the tier it asked for.
+        """
+        return int(self._spec(self.pick_model(req)).get("out_max_side") or 0)
+
+    def images_sent(self, req: GenRequest) -> int:
+        """How many photographs of her really travel with this request.
+
+        Not "how many were chosen": what leaves the machine.  Only the models
+        whose knobs declare ``images`` carry a pool - kontext/multi does, and
+        _payload puts the photograph being edited first and up to three others
+        after it.  The single image endpoints (kontext, kontext/max, img2img)
+        take exactly one, and the fill endpoint takes the photograph and a mask
+        and NO references at all.  The estimate says this number out loud, so
+        it has to be counted from the table rather than assumed: quoting "3
+        fotos tuyas" for a draft that sends one is the same class of promise as
+        quoting a model that will not run.
+        """
+        spec = self._spec(self.pick_model(req))
+        knobs = tuple(spec.get("knobs") or ())
+        has_source = 1 if getattr(req, "source_path", "") else 0
+        if "images" in knobs:
+            return has_source + len(list(req.reference_paths or [])[:3])
+        if "image" in knobs:
+            return has_source
+        return 0
 
     def estimate_cost(self, req: GenRequest) -> float:
         spec = self._spec(self.pick_model(req))
@@ -551,7 +630,8 @@ class FalProvider(ImageProvider):
         if not response_url and request_id:
             response_url = f"{QUEUE_BASE}/{endpoint}/requests/{request_id}"
         if not status_url or not response_url:
-            raise ProviderError("fal.ai no devolvio la URL de la peticion.",
+            raise ProviderError("fal.ai no ha dicho donde recoger la imagen. "
+                                "No se ha cobrado.",
                                 retryable=True, code="bad_submit")
         return request_id, status_url, response_url
 
@@ -580,8 +660,13 @@ class FalProvider(ImageProvider):
                 if status == "COMPLETED":
                     break
                 if status in ("FAILED", "ERROR", "CANCELLED", "CANCELED"):
-                    raise ProviderError(f"fal.ai marco la peticion como {status}.",
-                                        retryable=True, code="job_failed")
+                    # ``status`` is fal's own word (FAILED, CANCELLED): it
+                    # belongs in the log, not on her screen.
+                    log.warning("fal.ai estado %s", status)
+                    raise ProviderError(
+                        "fal.ai no ha podido terminar esta imagen. No se ha "
+                        "cobrado. Se vuelve a intentar.",
+                        retryable=True, code="job_failed")
             nap = min(delay * (0.9 + 0.2 * random.random()),
                       max(0.05, deadline - time.monotonic()))
             time.sleep(nap)
@@ -594,10 +679,31 @@ class FalProvider(ImageProvider):
     def _first_image(self, result: dict) -> dict:
         flags = result.get("has_nsfw_concepts")
         if isinstance(flags, (list, tuple)) and any(bool(f) for f in flags):
+            # PAID FOR, AND WORTH RETRYING.  fal does not refuse the job: it
+            # runs the whole inference, its own safety checker looks at what
+            # came out, and it hands back an all black PNG with this flag set.
+            # Two facts were measured against this account's real history on
+            # 2026-09-04 (175 fal requests over five days, read from
+            # rest.alpha.fal.ai/requests):
+            #
+            #   * it is not the request that is refused, it is one draw.  12 of
+            #     those 175 came back flagged - 6.9% - spread across all three
+            #     endpoints, and 26 of the 28 calls to fill passed.  So the
+            #     answer to a block is another seed, not "give up": marking it
+            #     unretryable turned a 7% event into a 100% loss for that
+            #     image, and did it while the retry budget was still unspent.
+            #   * the GPU time is real: the two blocked jobs of that day ran
+            #     19.1 s and 3.3 s and returned HTTP 200.  The caller must
+            #     therefore treat this as MONEY SPENT (``billed``), because the
+            #     alternative - handing the reservation back - is a ledger that
+            #     shows 0.0000 USD for an image fal charges 0.050 USD for.
             raise ProviderError(
-                "El filtro de contenido de fal.ai bloqueo el resultado. "
-                "Cambia el encuadre o la ropa descrita en las opciones.",
-                retryable=False, code="content_filter")
+                "fal.ai ha revisado la imagen que acababa de dibujar y no la "
+                "ha dado por buena, asi que ha devuelto un archivo en negro. "
+                "El dibujo si se hizo, de modo que esta imagen se cobra "
+                "aunque no puedas verla. Se vuelve a intentar con otra "
+                "semilla, que es lo unico que cambia el resultado.",
+                retryable=True, code="content_filter", billed=True)
         images = result.get("images")
         candidate: Any = None
         if isinstance(images, list) and images:
@@ -607,7 +713,8 @@ class FalProvider(ImageProvider):
         if isinstance(candidate, str):
             candidate = {"url": candidate}
         if not isinstance(candidate, dict) or not candidate.get("url"):
-            raise ProviderError("fal.ai no devolvio ninguna imagen.",
+            raise ProviderError("fal.ai no ha devuelto ninguna imagen esta "
+                                "vez. No se ha cobrado.",
                                 retryable=True, code="empty_result")
         return candidate
 
@@ -617,14 +724,16 @@ class FalProvider(ImageProvider):
             try:
                 payload = base64.b64decode(encoded)
             except (ValueError, TypeError) as exc:
-                raise ProviderError("fal.ai devolvio una imagen ilegible.",
+                raise ProviderError("La imagen que ha llegado de fal.ai no "
+                                    "se puede abrir. No se ha cobrado.",
                                     retryable=True, code="bad_image") from exc
         else:
             resp = client.get(url, timeout=_DOWNLOAD_TIMEOUT)
             _check(resp)
             payload = resp.content
         if not payload:
-            raise ProviderError("La imagen descargada de fal.ai esta vacia.",
+            raise ProviderError("La imagen que ha llegado de fal.ai ha venido "
+                                "vacia. No se ha cobrado.",
                                 retryable=True, code="bad_image")
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -648,6 +757,20 @@ class FalProvider(ImageProvider):
         calls - submit, poll, download - and the money they cost.
         """
         endpoint = str(self._spec(role)["endpoint"])
+        if _replay_block_due():
+            # Word for word the error the real endpoint raises, ``billed`` and
+            # all, so what the rehearsal exercises is the code that runs when
+            # money has been spent on an image nobody will ever see.
+            log.warning("MODO ENSAYO fal (%s): esta llamada se responde como "
+                        "la bloqueo fal el 2026-09-04 (%s).",
+                        REPLAY_BLOCK_ENV, endpoint)
+            raise ProviderError(
+                "fal.ai ha revisado la imagen que acababa de dibujar y no la "
+                "ha dado por buena, asi que ha devuelto un archivo en negro. "
+                "El dibujo si se hizo, de modo que esta imagen se cobra "
+                "aunque no puedas verla. Se vuelve a intentar con otra "
+                "semilla, que es lo unico que cambia el resultado.",
+                retryable=True, code="content_filter", billed=True)
         chosen = _replay_pick(_replay_files(folder), req, out)
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -745,11 +868,17 @@ class FalProvider(ImageProvider):
         except ProviderError:
             raise
         except httpx.TimeoutException as exc:
-            raise ProviderError(f"fal.ai no respondio a tiempo: {exc}",
-                                retryable=True, code="timeout") from exc
+            log.warning("fal.ai timeout: %s", exc)
+            raise ProviderError(
+                "fal.ai ha tardado demasiado en contestar y se ha dejado esta "
+                "imagen. No se ha cobrado. Se vuelve a intentar.",
+                retryable=True, code="timeout") from exc
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Fallo de red hablando con fal.ai: {exc}",
-                                retryable=True, code="network") from exc
+            log.warning("fal.ai red: %s", exc)
+            raise ProviderError(
+                "No se ha podido conectar con fal.ai. Comprueba tu conexion a "
+                "internet. No se ha cobrado esta imagen.",
+                retryable=True, code="network") from exc
 
         seed = result.get("seed")
         try:

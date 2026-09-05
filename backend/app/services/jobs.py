@@ -30,6 +30,29 @@ _jobs: dict[str, Future] = {}
 _cancelled: set[str] = set()
 
 
+# The sentences the product itself writes are already in her language and say
+# something she can act on ("recarga en Ajustes", "esa foto ya no existe").
+# Anything else that reaches here is a programming fault, and until 2026-09-04
+# its text went straight onto her screen under "Algo ha fallado": in the
+# rehearsal of that day a run died with ``'sqlite3.Row' object has no attribute
+# 'get'`` - English, and about code she does not write.  The traceback belongs
+# in the log above; what she gets is one sentence saying what happened, what it
+# cost her and what to do next.
+_OWN_ERRORS = ("ProviderError", "InsufficientBalance", "PermissionError")
+_GENERIC = ("El robot no ha podido terminar este trabajo. No se te cobra lo "
+            "que no se llego a hacer. Vuelve a intentarlo; si vuelve a pasar, "
+            "prueba con otra foto.")
+
+
+def user_message(exc: BaseException) -> str:
+    """What the client reads: her sentence when we wrote one, ours otherwise."""
+    for klass in type(exc).__mro__:
+        if klass.__name__ in _OWN_ERRORS:
+            text = str(exc).strip()
+            return text[:500] if text else _GENERIC
+    return _GENERIC
+
+
 def submit(run_id: str, fn: Callable[[], Any]) -> dict:
     """Queue a run.  Refuses to start the same run twice."""
     with _lock:
@@ -52,9 +75,9 @@ def _wrap(run_id: str, fn: Callable[[], Any]) -> Any:
         log.error("Run %s failed:\n%s", run_id, traceback.format_exc())
         db.execute(
             "UPDATE runs SET status='failed', error=?, finished_at=? WHERE id=?",
-            (str(exc)[:500], db.now(), run_id),
+            (user_message(exc), db.now(), run_id),
         )
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": user_message(exc)}
     finally:
         with _lock:
             _jobs.pop(run_id, None)

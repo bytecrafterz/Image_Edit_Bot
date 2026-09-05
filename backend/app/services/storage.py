@@ -15,6 +15,7 @@ import shutil
 import unicodedata
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .. import db
 from ..config import (OUTPUT_DIR, PREVIEW_DIR, PROFILE_DIR, UPLOAD_DIR,
@@ -61,6 +62,18 @@ def unique_path(directory: Path, filename: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     safe = safe_filename(filename)
     return directory / f"{uuid.uuid4().hex[:12]}_{safe}"
+
+
+# The 12 hex characters that make an upload's name unique are for the disk,
+# not for her.  Until 2026-09-04 they reached her ficha verbatim: "Se devolvio
+# la textura real de tu piel desde tu foto 151b0c0fa5b8_IMG_7871 Nayane.jpeg".
+_STORED_PREFIX = re.compile(r"^[0-9a-f]{12}_")
+
+
+def photo_label(path: Any) -> str:
+    """The name of one of her photographs as SHE knows it."""
+    name = Path(str(path or "")).name
+    return _STORED_PREFIX.sub("", name)
 
 
 def sha256_bytes(data: bytes) -> str:

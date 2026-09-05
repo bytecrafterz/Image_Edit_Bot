@@ -129,6 +129,13 @@ BODY_CONF_MIN = 0.5
 BODY_SPREAD_MAX = 0.15
 BODY_IDENTITY_DROP_MAX = 0.02  # a warp that costs her face is not a fix
 # Rows the widths belong to, as a fraction of the shoulder-to-hip span.
+def _metric_es(name: str) -> str:
+    """The name of one body ruler, in her words.  See verify.METRIC_ES."""
+    from ..identity import verify as verify_mod
+    row = verify_mod.METRIC_ES.get(str(name))
+    return row[0] if row else str(name).replace("_", " ")
+
+
 _BODY_ROWS = {"bust_w_over_torso": 0.25, "waist_w_over_torso": 0.60,
               "hip_w_over_torso": 1.00, "shoulder_w_over_torso": 0.00}
 
@@ -578,11 +585,17 @@ def restore_body(image_path: str, profile: dict, brief: dict | None = None,
         if name not in _BODY_ROWS:
             continue                      # only widths can be corrected at all
         if name in unreliable:
-            skipped.append("%s no se midio con fiabilidad aqui" % name)
+            # The metric key is a column name from identity/profile.py.  It was
+            # being pasted straight into a sentence the client reads on her
+            # ficha - "shoulder_w_over_torso no se midio con fiabilidad aqui" -
+            # so it is said with the word she uses for that part of her body.
+            skipped.append("%s: no se pudo medir bien en esta imagen"
+                           % _metric_es(name))
             continue
         if _f(spread.get(name), 1.0) > BODY_SPREAD_MAX:
             skipped.append("tus fotos discrepan un %d%% en %s"
-                           % (int(round(_f(spread.get(name)) * 100)), name))
+                           % (int(round(_f(spread.get(name)) * 100)),
+                              _metric_es(name)))
             continue
         usable[name] = value
     deviations = _deviations(metrics, usable)
@@ -612,7 +625,7 @@ def restore_body(image_path: str, profile: dict, brief: dict | None = None,
                        "es justo el retoque que no se hace. Hay que generarla "
                        "de nuevo."
                        % (int(round(abs(1.0 / max(value, 1e-3) - 1.0) * 100)),
-                          name),
+                          _metric_es(name)),
                        desviaciones={k: round(v, 4)
                                      for k, v in deviations.items()})
 

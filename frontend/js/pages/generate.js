@@ -152,7 +152,13 @@ async function uploadFiles(view, files) {
     const data = await api.upload('/api/originals', Array.from(files));
     box.remove();
     if (data.skipped && data.skipped.length) {
-      toast(`${data.skipped.length} archivo(s) no se pudieron usar`, 'danger');
+      /* The API already says WHY each file was left out ("no es una imagen",
+         "archivo vacio"); showing only a count told her something went wrong
+         and nothing she could do about it. */
+      const first = data.skipped[0] || {};
+      toast(data.skipped.length === 1
+        ? `No se ha podido usar ${first.filename || 'un archivo'}: ${first.reason || 'no es una foto'}`
+        : `${data.skipped.length} archivos no se han podido usar (${first.reason || 'no son fotos'})`);
     }
     await loadOriginals();
     const first = (data.originals || [])[0];
@@ -196,6 +202,30 @@ async function goStep2(view) {
     state.groups = options.groups || [];
     state.styles = styles.styles || [];
     state.style = state.style || (state.styles[0] || null);
+
+    /* CHOICES MADE ON ANOTHER PHOTOGRAPH.  Picking a photo does not clear what
+       was already chosen - that would throw away her work every time she
+       browses - so a floor length gown chosen on a full body shot survived
+       into a head and shoulders one, where it is not on the menu at all.  It
+       used to travel to the estimate and be dropped there in silence.  Now it
+       is dropped here, where the menu is, and she is told which one and why. */
+    const allowed = {};
+    for (const g of state.groups) {
+      allowed[g.group_key] = new Set((g.values || []).map((v) => v.value_key));
+    }
+    const gone = [];
+    for (const [group, values] of Object.entries(state.choices)) {
+      const keep = (values || []).filter((v) => (allowed[group] || new Set()).has(v));
+      if (keep.length !== (values || []).length) {
+        for (const v of values) if (!keep.includes(v)) gone.push(v);
+      }
+      if (keep.length) state.choices[group] = keep;
+      else delete state.choices[group];
+    }
+    if (gone.length) {
+      toast(`En esta foto no cabe ${gone.length === 1 ? 'una de tus elecciones' : gone.length + ' de tus elecciones'}: elige otra vez`);
+    }
+
     renderStep2(view);
   } catch (err) {
     clear(view);
@@ -378,7 +408,10 @@ async function goStep3(view) {
   } catch (err) {
     clear(view);
     view.appendChild(stepHeader(view));
-    view.appendChild(note('danger', 'No se puede continuar', err.message));
+    /* Guidance, not a failure: what lands here is the estimate refusing for a
+       reason she can act on (a garment this photograph cannot wear, too few
+       photographs to check her identity), and it has cost nothing. */
+    view.appendChild(note('info', 'Con esta foto no se puede', err.message));
     view.appendChild(el('button', { class: 'btn btn--secondary', type: 'button',
       onClick: () => { state.step = 2; renderStep2(view); } }, 'Cambiar opciones'));
   }
@@ -413,6 +446,11 @@ function renderStep3(view) {
       ? kv('Saldo despues', money(after))
       : kv('Motor', 'local gratuito (no gasta saldo)'),
     est.per_image_usd ? kv('Por imagen', moneyExact(est.per_image_usd)) : null,
+    // The endpoint, not the internal role name: it is what fal's price list
+    // calls the model, so she can check the figure above against it herself.
+    // It is also the line that says which of the two paths this run takes -
+    // v1/fill repaints a zone and never redraws her face, kontext does.
+    est.endpoint ? kv('Modelo', est.endpoint) : null,
   ]));
 
   if (lockedRows.length) {
@@ -435,8 +473,13 @@ function renderStep3(view) {
     view.appendChild(el('p', { class: 'tiny', text: line }));
   }
 
-  view.appendChild(note('info', 'Todavia no se ha gastado nada',
-    'El coste solo se aplica cuando pulses Generar.'));
+  // Not 'nothing has been spent': since 2026-09-05 the estimate itself can
+  // charge for reading the photograph with Claude (about 0.0112 USD, once per
+  // photograph), and that charge is written in the avisos just above.  A line
+  // that flatly denied it would be the only false sentence on the screen.
+  view.appendChild(note('info', 'Todavia no se ha generado ninguna imagen',
+    'Las imagenes solo se cobran cuando pulses Generar. Si arriba pone que se '
+    + 'ha pagado la lectura de tu foto, eso ya esta hecho y no se repite.'));
 
   view.appendChild(el('div', { class: 'btn-row' }, [
     el('button', { class: 'btn btn--secondary', type: 'button',
@@ -497,10 +540,31 @@ function renderStep4(view, run) {
     ]) : null,
   ]));
 
+  /* WHAT SHE IS NOT BEING SHOWN, AND WHY.  "El robot ha descartado imagenes"
+     over a list of failed checks reads like a verdict on her: the client asked
+     for no rejection messages, and where one is unavoidable it has to say what
+     happened to the picture, what it cost and what happens next.  The run is
+     still going while this shows, so it is worded as work in progress. */
   if (run && run.discard_reasons && run.discard_reasons.length) {
+    const done = ['done', 'failed', 'cancelled', 'stopped_no_balance']
+      .includes(run.status);
     const text = run.discard_reasons
-      .map((r) => `${r.count} por ${r.reason}`).join(', ');
-    view.appendChild(note('info', 'El robot ha descartado imagenes', text));
+      .map((r) => `${r.count}: ${r.reason}`).join('. ')
+      + (done ? '.' : '. El robot sigue intentandolo.');
+    view.appendChild(note('info', 'Alguna imagen no ha salido bien', text));
+  }
+
+  /* THE RUN FINISHED AND NO IMAGE PASSED.  Without this she was left looking
+     at "Listo: 0 imagenes" and a list of checks, with nothing to do next. */
+  if (run && run.status === 'done' && !run.images.length) {
+    view.appendChild(note('info', 'Esta vez no ha salido ninguna buena',
+      'El robot solo te ensena las imagenes en las que sales tu, y esta vez '
+      + 'ninguna lo ha conseguido. Tus fotos no se han tocado. '
+      + (run.spent_usd > 0
+        ? `Lo que se ha probado ya esta pagado (${moneyExact(run.spent_usd)}) y no se gasta nada mas. `
+        : '')
+      + 'Prueba a cambiar solo la ropa, o elige otra foto tuya donde se te vea '
+      + 'entera y con buena luz.'));
   }
 
   if (run && run.status === 'stopped_no_balance') {
@@ -511,7 +575,12 @@ function renderStep4(view, run) {
     view.appendChild(el('a', { class: 'btn', href: '#/settings' }, 'Ir a Ajustes'));
   }
   if (run && run.status === 'failed') {
-    view.appendChild(note('danger', 'Algo ha fallado', run.error || ''));
+    /* run.error is written by services/jobs.user_message: either a sentence
+       this product wrote for her, or one plain sentence.  A Python exception
+       can no longer land here. */
+    view.appendChild(note('info', 'El robot se ha quedado a medias',
+      run.error || 'No se ha podido terminar. No se te cobra lo que no se hizo. '
+      + 'Vuelve a intentarlo.'));
   }
 
   if (run && run.images.length) {
@@ -619,8 +688,8 @@ async function showReport() {
   const body = frag([
     kv('Intentos', String(report.intentos ?? '-')),
     kv('Aceptadas', String(report.aceptadas ?? '-')),
-    kv('Descartadas', String(report.descartadas ?? '-')),
-    kv('Reparadas con inpainting', String(report.reparadas ?? 0)),
+    kv('No mostradas', String(report.descartadas ?? '-')),
+    kv('Retocadas solo por zonas', String(report.reparadas ?? 0)),
     report.intentos_por_foto ? kv('Intentos por foto', String(report.intentos_por_foto)) : null,
     report.segundos ? kv('Tiempo', `${report.segundos} s`) : null,
     kv('Coste real', report.coste_usd > 0 ? moneyExact(report.coste_usd) : 'gratis'),
@@ -629,13 +698,26 @@ async function showReport() {
 
   const defects = Object.entries(report.defectos_detectados || {});
   if (defects.length) {
-    body.appendChild(el('div', { class: 'section__title', text: 'Defectos detectados',
+    body.appendChild(el('div', { class: 'section__title', text: 'Lo que se vio mal',
       style: { marginTop: '18px' } }));
     for (const [name, count] of defects) body.appendChild(kv(name, String(count)));
   }
 
+  /* Found on pixels that were never redrawn: they come from her own camera, so
+     the ficha says so instead of counting them against the robot's work. */
+  const own = Object.entries(report.ya_en_tu_foto || {});
+  if (own.length) {
+    body.appendChild(el('div', { class: 'section__title',
+      text: 'Visto en la parte que no se ha vuelto a dibujar',
+      style: { marginTop: '18px' } }));
+    body.appendChild(el('p', { class: 'tiny',
+      text: 'Esa parte de la imagen son los pixeles de tu propia foto, tal cual '
+        + 'los grabo tu camara: el robot no los ha tocado.' }));
+    for (const [name, count] of own) body.appendChild(kv(name, String(count)));
+  }
+
   if ((report.motivos_descarte || []).length) {
-    body.appendChild(el('div', { class: 'section__title', text: 'Por que se descartaron',
+    body.appendChild(el('div', { class: 'section__title', text: 'Por que no te las ensenamos',
       style: { marginTop: '18px' } }));
     for (const item of report.motivos_descarte) {
       body.appendChild(el('div', { class: 'check-line check-line--bad' }, [

@@ -14,6 +14,7 @@ provider charges for a bad repair exactly like a good one.
 from __future__ import annotations
 
 import hashlib
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -31,6 +32,8 @@ from ..analysis import segment as segment_mod
 from ..config import CACHE_DIR, ensure_dirs
 from ..providers.base import GenRequest, InsufficientBalance
 from . import prompt as prompt_mod
+
+log = logging.getLogger("photorobot.repair")
 
 DILATE_FRACTION = 0.06      # contract: 6% of the shorter side around the bbox
 MIN_IMPROVEMENT = 0.05      # severity must really drop, not wobble
@@ -249,7 +252,7 @@ def repair(image_path: str, defects: list[dict], brief: dict, profile: dict,
 
     caps = _safe(provider.capabilities) if provider is not None else None
     if caps is None or not getattr(caps, "inpaint", False):
-        result["reason"] = ("el proveedor %s no puede reparar por zonas"
+        result["reason"] = ("el motor %s no sabe repintar solo una zona"
                             % _text(getattr(caps, "name", "")
                                     or getattr(provider, "name", "desconocido")))
         return result
@@ -332,12 +335,19 @@ def repair(image_path: str, defects: list[dict], brief: dict, profile: dict,
                 # repairs had, so the number travels on the exception and the
                 # caller settles it before it stops the run.
                 exc.cost_usd = result["cost_usd"]
-                result["notes"].append("Sin saldo en el proveedor: se detiene "
-                                       "la reparacion.")
+                result["notes"].append("Te has quedado sin saldo, asi que el "
+                                       "retoque por zonas se ha detenido aqui.")
                 raise
             except Exception as exc:
-                result["notes"].append("El proveedor fallo al reparar la zona "
-                                       "%d: %s" % (index + 1, exc))
+                # The exception text is the engine's own, in English, and it
+                # used to be pasted into a note the client reads.  It goes to
+                # the log; she is told which zone was left alone and that she
+                # is not paying for it.
+                log.warning("Reparacion de la zona %d fallida: %s",
+                            index + 1, exc)
+                result["notes"].append(
+                    "No se ha podido retocar la zona %d, asi que se deja como "
+                    "estaba. No se cobra ese retoque." % (index + 1))
                 continue
 
             result["cost_usd"] = round(result["cost_usd"] + _f(

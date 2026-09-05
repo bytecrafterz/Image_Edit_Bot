@@ -927,6 +927,86 @@ def main() -> int:
           "ficha %s USD = libro mayor %s USD"
           % (money(report.get("coste_usd")), money(settled)))
 
+    # ---------------------------------------- 11b. la imagen que fal deja negra
+    #
+    # The last 0.100 USD this client had went on two calls that fal ran, billed
+    # and refused to show: HTTP 200, 19.1 s and 3.3 s of GPU, has_nsfw_concepts
+    # true, an all black PNG both times.  The code that answers that - settle
+    # the money instead of handing the reservation back, tell her in words that
+    # she was charged for a picture she cannot see, and stop buying seeds after
+    # the second block - was written from that invoice and had never been run.
+    # providers/fal.REPLAY_BLOCK_ENV replays it exactly, and this section is
+    # the only place in the suite where the ledger GROWS on a run that delivers
+    # nothing, which is the whole point of it.
+    print("\n11b. Cuando fal cobra el trabajo y devuelve un archivo en negro")
+    from app.providers import fal as fal_mod
+    spends_before = len(db.q(
+        "SELECT id FROM ledger WHERE user_id=? AND kind='spend'", (user_id,)))
+    bal_before_block = billing.balance(user_id, "fal")
+    os.environ[fal_mod.REPLAY_BLOCK_ENV] = "2"
+    # The same photograph as the run above, read back off the run row: by this
+    # point in the script ``source`` has been rebound to a numpy image.
+    blocked_src = db.q1("SELECT original_id FROM runs WHERE id=?",
+                        (run_id,))["original_id"]
+    blocked_plan = client.post("/api/generate/analyze", json={
+        "original_id": blocked_src, "profile_id": profile_id,
+        "options": {"clothing": [args.clothing]},
+        "n_previews": 1, "quality": args.quality, "style": "editorial_moda"})
+    blocked_ok = check("se cotiza la tirada que fal va a bloquear",
+                       blocked_plan.status_code == 200,
+                       "HTTP %d" % blocked_plan.status_code)
+    if blocked_ok:
+        blocked_run = blocked_plan.json()["run_id"]
+        blocked_price = float(blocked_plan.json()["estimate"]["per_image_usd"])
+        client.post("/api/generate/run", json={"run_id": blocked_run})
+        bstate: dict = {}
+        for _ in range(300):
+            time.sleep(2)
+            resp = client.get("/api/generate/status/%s" % blocked_run)
+            if resp.status_code != 200:
+                break
+            bstate = resp.json()
+            if bstate["status"] in ("done", "failed", "cancelled",
+                                    "stopped_no_balance"):
+                break
+        os.environ.pop(fal_mod.REPLAY_BLOCK_ENV, None)
+        new_spends = db.rows_to_dicts(db.q(
+            "SELECT amount_usd, note FROM ledger WHERE user_id=? AND "
+            "kind='spend' ORDER BY created_at", (user_id,)))[spends_before:]
+        charged = round(sum(-float(r["amount_usd"]) for r in new_spends), 6)
+        bal_after_block = billing.balance(user_id, "fal")
+        avisos = ((bstate.get("report") or {}).get("avisos") or [])
+        print("     estado=%s intentos=%d aceptadas=%d"
+              % (bstate.get("status"), bstate.get("attempts", 0),
+                 bstate.get("accepted", 0)))
+        print("     saldo %s -> %s   apuntes nuevos: %d por %s USD"
+              % (money(bal_before_block), money(bal_after_block),
+                 len(new_spends), money(charged)))
+        for aviso in avisos:
+            print("     aviso: %s" % aviso)
+        check("la tirada acaba sola, sin error tecnico y sin imagen",
+              bstate.get("status") == "done" and bstate.get("accepted", 0) == 0,
+              "estado=%s, %d imagenes" % (bstate.get("status"),
+                                          bstate.get("accepted", 0)))
+        check("el trabajo bloqueado SE APUNTA: fal lo ha cobrado",
+              len(new_spends) == 2
+              and abs(charged - 2 * blocked_price) < 1e-6,
+              "%d apuntes por %s USD (2 x %s cotizados)"
+              % (len(new_spends), money(charged), money(blocked_price)))
+        check("no se compra un tercer intento despues de dos negros",
+              bstate.get("attempts", 0) == 2,
+              "%d intentos" % bstate.get("attempts", 0))
+        check("se le dice que se le ha cobrado una imagen que no puede ver",
+              any("no la dio por buena" in a for a in avisos),
+              next((a[:80] for a in avisos if "no la dio por buena" in a), "-"))
+        check("y por que no se sigue intentando",
+              any("dos veces" in a for a in avisos),
+              next((a[:80] for a in avisos if "dos veces" in a), "-"))
+        check("el apunte dice de que era el cobro",
+              bool(new_spends)
+              and all("bloqueada" in str(r["note"]) for r in new_spends),
+              "; ".join(sorted({str(r["note"]) for r in new_spends})))
+
     # --------------------------------------------------------------- 12. cero
     print("\n12. Coste real del ensayo")
     print("     conexiones bloqueadas: %d %s"

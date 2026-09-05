@@ -175,7 +175,12 @@ async function upload(view, files) {
     const data = await api.upload('/api/originals', Array.from(files));
     toast(`${data.added} foto(s) anadidas`, 'ok');
     if ((data.skipped || []).length) {
-      toast(`${data.skipped.length} no se pudieron usar`, 'danger');
+      /* Same as in Crear: the reason travels with each skipped file, and a
+         bare count in red is an alarm she cannot act on. */
+      const first = data.skipped[0] || {};
+      toast(data.skipped.length === 1
+        ? `No se ha podido usar ${first.filename || 'un archivo'}: ${first.reason || 'no es una foto'}`
+        : `${data.skipped.length} archivos no se han podido usar (${first.reason || 'no son fotos'})`);
     }
     await load();
     await render(view);
@@ -325,7 +330,7 @@ export default {
       await load();
     } catch (err) {
       clear(view);
-      view.appendChild(note('danger', 'No se pudo cargar', err.message));
+      view.appendChild(note('info', 'No se ha podido abrir esta pantalla', err.message));
       return;
     }
     await render(view);

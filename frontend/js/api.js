@@ -74,9 +74,12 @@ async function request(method, path, body, opts) {
     throw new ApiError('Tu sesion ha caducado. Entra de nuevo.', 401, payload);
   }
   if (!response.ok) {
-    const detail = payload && payload.detail
-      ? (typeof payload.detail === 'string' ? payload.detail : 'No se pudo completar.')
-      : 'No se pudo completar la operacion.';
+    /* A string detail is a sentence this product wrote for her.  Anything else
+       is FastAPI's own validation shape, a list of English field errors, so it
+       is replaced rather than shown. */
+    const detail = payload && payload.detail && typeof payload.detail === 'string'
+      ? payload.detail
+      : 'No se ha podido hacer lo que pediste. Revisa lo que has elegido y vuelve a intentarlo.';
     throw new ApiError(detail, response.status, payload);
   }
   return payload;

@@ -105,6 +105,14 @@ def _defect_types(source: Any) -> list[str]:
         source = source.get("defects")
     if isinstance(source, (list, tuple)):
         for item in source:
+            # Never learn from a defect the engine did not paint.  On the
+            # masked path everything outside the repainted zone is her own
+            # photograph, and identity/verify marks what it reads there
+            # ``de_tu_foto``: teaching the robot to steer away from her own
+            # camera's hand would make every future render worse for a reason
+            # that has nothing to do with what it drew.
+            if isinstance(item, dict) and item.get("de_tu_foto"):
+                continue
             kind = _text(item.get("type")) if isinstance(item, dict) else _text(item)
             if kind and kind not in out:
                 out.append(kind)

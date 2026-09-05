@@ -151,7 +151,7 @@ function usageSection() {
     el('div', { class: 'card' }, [
       kv('Intentos', String(usage.attempts || 0)),
       kv('Fotos conseguidas', String(usage.accepted || 0)),
-      kv('Descartadas por el robot', String(usage.rejected || 0)),
+      kv('No superaron la revision', String(usage.rejected || 0)),
       kv('Reparadas sin regenerar', String(usage.repaired || 0)),
       el('div', { class: 'kv', style: { borderTop: '2px solid var(--line)',
         marginTop: '6px', paddingTop: '12px' } }, [
@@ -167,7 +167,7 @@ function usageSection() {
         text: 'Imagenes por dia' }) : null,
     ]),
     (usage.reject_reasons || []).length ? el('div', { class: 'card' }, [
-      el('div', { class: 'section__title', text: 'Por que se descartaron' }),
+      el('div', { class: 'section__title', text: 'Por que no se te ensenaron' }),
       ...usage.reject_reasons.map((r) => kv(r.reason, String(r.count))),
     ]) : null,
   ]);
@@ -366,7 +366,7 @@ export default {
     view.appendChild(spinner());
     try { await load(); } catch (err) {
       clear(view);
-      view.appendChild(note('danger', 'No se pudo cargar', err.message));
+      view.appendChild(note('info', 'No se ha podido abrir esta pantalla', err.message));
       return;
     }
     render(view);
