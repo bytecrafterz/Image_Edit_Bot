@@ -571,7 +571,13 @@ GET    /api/admin/audit?limit=           -> audit rows
 GET    /api/admin/providers              -> provider availability matrix
 
 GET    /api/files/{image_id}?variant=full|thumb   (auth-checked file serving)
-GET    /api/health                       -> {ok, version, providers, python}
+GET    /api/health                       -> {ok, app, version, python,
+                                            codigo, providers}
+         codigo = {huella, modulos, mas_reciente, arrancado, al_dia}
+         al_dia is False when a watched module on disk is NEWER than the
+         process that imported it - i.e. the server is serving stale code.
+         Added after a --no-reload server quoted a 0.080 USD whole-frame
+         endpoint for a run the files on disk priced at 0.050 with a mask.
 ```
 
 ---

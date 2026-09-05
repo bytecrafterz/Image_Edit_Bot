@@ -334,6 +334,18 @@ prenda: es la limitacion que hay que conocer antes de fiarse del control.
    sobre las 175 peticiones reales de esta cuenta: 12 bloqueos de 175 (6,9%),
    repartidos por los tres modelos.
 
+   Ya no es la palabra de fal: el 2026-09-05 esta instalacion se quedo con el
+   archivo. Son **19 376 bytes**, 1024x1440, y al medirlo da media **0,0000**,
+   desviacion **0,0000** y **un solo valor distinto en 4 423 680 pixeles**. Negro
+   entero, sin degradado y sin fantasma de la prenda. En tu libro mayor esa
+   llamada aparece como *imagen bloqueada por fal*, con la referencia del intento
+   y los 0.0500 USD, y en la ficha como el aviso *La imagen 1 se hizo pero fal.ai
+   no la dio por buena... se cobra igual*. La fila del intento guarda ademas el
+   `request_id` de fal, el endpoint real, el rectangulo que se subio y lo que
+   tardo, de modo que el proximo bloqueo se puede auditar desde tu maquina; el
+   del 2026-09-05 hubo que reconstruirlo del panel de fal porque esa parte
+   todavia no existia.
+
 Antes de llegar al punto 1, el robot intenta **arreglarlo gratis**: la textura
 de piel se devuelve desde una de tus propias fotografias, y las manos y el
 rostro tienen su propia correccion local. Nada de eso llama al proveedor ni
@@ -478,6 +490,149 @@ puede convertir a otra mujer en ti. Asi que:
 
 ---
 
+## 8b. Que sale de tu maquina en cada llamada de pago
+
+Esto es lo que un tercero llega a ver de tus fotografias, y no es lo mismo en
+los dos caminos.
+
+**Camino con mascara** (`fal-ai/flux-pro/v1/fill`, cambio de ropa, fondo,
+calzado o accesorios). La respuesta del proveedor **solo se conserva dentro de
+lo blanco de la mascara**: `generation/protect.py` vuelve a pegar todo lo demas
+desde tu archivo a resolucion completa. Sale **tu fotografia entera**, con tu
+cabeza y tus hombros.
+
+**Aqui habia un recorte y se ha quitado, porque estaba mal.** Durante un dia se
+subio solo el rectangulo que contiene la zona a repintar mas un 6% de contexto,
+con el argumento de que lo de fuera se tira igual. Ese rectangulo **es la zona
+de la ropa, y empieza en tu barbilla**: lo que recibia el proveedor era un torso
+sin cabeza, el pecho centrado, los hombros y los brazos al aire. Medido sobre
+las dos fotografias de las llamadas de pago, con la misma envoltura de tu piel
+que usa tu propia ficha:
+
+| lo que revisa el proveedor | recorte | foto entera |
+|---|---|---|
+| WhatsApp 2026-09-04, parte del cuadro que sube | 34,85% | **100%** |
+| tu piel descubierta, sobre lo que sube | 27,50% | **9,76%** |
+| tu piel dentro de la zona a repintar | 20,09% | **7,00%** |
+| tu recuadro de cara que viaja | 0,0% | **100%** |
+| IMG_7871, parte del cuadro que sube | 36,18% | **100%** |
+| tu piel descubierta, sobre lo que sube | 33,05% | **12,11%** |
+| tu piel dentro de la zona a repintar | 30,14% | **10,90%** |
+| tu recuadro de cara que viaja | 1,9% | **100%** |
+
+El recorte multiplicaba por **2,8** la densidad de piel de la imagen que se
+revisa, y las **dos** llamadas de pago con mascara volvieron bloqueadas - la
+segunda sobre una fotografia tuya completamente vestida. Ademas le quitaba al
+modelo lo que necesita para ajustar una prenda a una persona: tu escala, tus
+hombros, de donde viene la luz y que hay en la habitacion.
+
+**Tu cara no la protegia el recorte y no la protege el encuadre: la protege la
+mascara.** Sobre tus **25 fotografias**, la zona a repintar toca **0 pixeles**
+del recuadro de tu cara, y encima de todo lo negro de la mascara se vuelven a
+escribir tus propios pixeles a resolucion completa. Eso se mide en cada llamada
+y se escribe en la fila del intento (`envio_completo`, `enviado`) en vez de
+afirmarse.
+
+**Camino sin mascara** (`kontext/multi`, cuando pides otra postura u otro
+encuadre): ahi viajan **tres fotografias tuyas enteras**, porque el modelo tiene
+que volver a dibujarte y necesita reconocerte. La pantalla de coste te dice cual
+de los dos caminos vas a pagar, con el nombre del modelo, antes de gastar.
+
+**El texto.** Ninguno de los seis modelos de fal acepta un campo de negativo
+aparte, asi que el negativo se pega dentro de la instruccion y **sale a la red**.
+El bloque que evitaba una prenda puesta encima de la ropa interior nombraba lo
+que no queria - *underwear*, *lingerie*, *bra*, *thong*, *naked* - y el propio
+`safety/guard.py` de este producto rechaza ese texto si se lo escribes tu. Se ha
+quitado y el mismo requisito se dice en positivo (*la prenda descrita es la unica
+ropa de la imagen: tejido opaco, torso, caderas y piernas cubiertos*). Medido
+sobre las 93 filas de intento que guardan un negativo: se retiran **14 clausulas
+en el camino con mascara** y **0 en kontext**, que es el que ha hecho todas las
+imagenes que tienes. Lo que protege tu cuerpo - *slimmed waist*, *narrowed
+shoulders*, *altered breast size*, *removed tattoos* - se queda entero en los
+dos: una clausula que nombra un **cambio en tu cuerpo** no se retira nunca,
+aunque use una palabra del cuerpo.
+
+**Y lo que el texto seguia llevando despues de aquel filtro.** Medido sobre las
+4 141 letras que fal recibio de verdad el 2026-09-05: *top worn without bottoms*,
+*shirt worn as a dress*, *no trousers*, *missing trousers* - ninguna nombra una
+prenda interior y todas describen a alguien a medio vestir - y *breast* una vez y
+*bust* dos, dentro de clausulas que protegen tu cuerpo. Ahora las cuatro frases
+se retiran **solo en el camino con mascara** (en `kontext` protegen un fallo real
+y nunca han costado nada) y los sustantivos **no se borran, se cambian** por el
+clinico: *altered breast size* sale como *altered chest size* y la proteccion
+viaja entera. Sobre esa misma peticion: **18 clausulas retiradas** en vez de 14 y
+**0 palabras marcadas** en el texto final, frente a 7 antes.
+
+### Lo que revisa el proveedor es tu foto entera, y antes no lo era
+
+Esto costo 0,100 USD averiguarlo y es lo mas util de esta pagina. Mientras hubo
+recorte, el rectangulo que viajaba **concentraba tu piel**, porque ese
+rectangulo *es* la zona de la ropa - la parte mas desnuda de cualquier foto de
+una persona - y ademas dejaba la cabeza fuera:
+
+| | foto entera | rectangulo que viajaba | factor |
+|---|---|---|---|
+| IMG_7871 (bloqueada dos veces) | 12,1% de piel | 33,1% | **2,73x** |
+| la de la cocina, vestida (bloqueada) | 9,8% de piel | 27,5% | **2,82x** |
+
+O sea: cambiar a una fotografia vestida mejoro lo que el revisor vio de **33,1%
+a 27,5%**, un 17% relativo, y no el 36% que se habia calculado sobre el cuadro
+entero. Y lo que estaba mirando en los dos casos era un **torso sin cabeza**.
+El recorte se ha quitado: **sube tu fotografia entera**, y eso **se mide al
+dibujar la mascara y se te dice en la pantalla de coste**, antes de pagar:
+
+> Sale tu foto entera, con tu cabeza y tus hombros: es lo que el modelo
+> necesita para ajustar la ropa a tu cuerpo, y es lo que revisa el proveedor.
+> De esa foto se repinta el 17%. Tu piel descubierta es el 10% de lo que se
+> envia, y el 7% queda dentro de la zona que se repinta. Tu cara viaja entera y
+> no se repinta: la mascara la deja fuera por completo (0 pixeles del recuadro
+> de tu cara dentro de la zona) y encima se vuelven a poner tus propios
+> pixeles.
+
+### Que fotografia tuya conviene como origen
+
+Por orden de lo que de verdad mueve el resultado:
+
+1. **Vestida en la zona que vas a cambiar.** La foto de la cocina (top de canale
+   gris y falda negra) baja la zona a repintar del 22,3% al 18,5% del cuadro y la
+   piel dentro de esa zona del 52,8% al 40,1%.
+2. **Media figura o cuerpo entero.** En un primer plano no hay torso que aislar:
+   la zona pasa a ser toda tu, no hay recorte que hacer y se sube el cuadro
+   entero.
+3. **De tu camara, no de WhatsApp.** El archivo se entrega al tamano de tu foto:
+   1200x1599 (1,9 MP) contra 2316x3088 (7,2 MP), y la cara a resolucion completa
+   baja de 332 px a 201 px. Pasa de sobra el control de identidad (0,872 sobre un
+   limite de 0,45), pero es un cuarto de los pixeles.
+4. Nitida y bien expuesta. Eso el robot ya te lo mide al importarla.
+
+Y lo que **no** basta: cambiar a una foto vestida, por si solo, **no desbloqueo
+nada**. Es el resultado pagado del 2026-09-05.
+
+**Lo que la mascara conserva y lo que no.** Conserva, pixel a pixel de tu propio
+archivo: **tu cara, tus manos y tus pendientes**, y **las marcas de tu piel que la
+prenda que has pedido deja al aire** - se miden sobre tu propia fotografia con el
+color de piel de tu perfil, y se fuerzan a negro junto a la cara y las manos.
+Del **pelo**, solo el de la cabeza: la melena que te cae sobre el hombro cuenta
+como torso y se repinta (medido en la foto de la cocina: lo que el modelo llama
+pelo son 7 907 pixeles, y el resto esta dentro de la zona en un 82,7%).
+
+**Y una marca que la prenda nueva tapa se pierde, siempre.** Una camisa encima de
+un tatuaje lo cubre; protegerlo dejaria un agujero con tu piel dentro de la
+camisa. El robot te lo dice antes de cobrar y con la zona por su nombre: *"La
+ropa que pediste tapa el torso, asi que la marca que llevas ahi no puede
+sobrevivir... Si quieres verla, elige una prenda que deje esa zona al aire."*
+Hasta donde llega: **ninguna de las 24 prendas del catalogo deja el pecho al
+aire**, asi que en un cambio de ropa el tatuaje del pecho se pierde siempre.
+Donde si se conserva es en el antebrazo bajo manga corta, en el muslo bajo un
+vestido de verano, en el cuello - y en **todas** si lo que pides es un cambio de
+color o de transparencia, porque ahi no se viste nada nuevo.
+
+Y lo que se le pide al motor va ahora en el mismo sentido: ya no se le piden a la
+vez «una camisa que cubra el torso por completo» y «el tatuaje del pecho sin
+cambios», que es lo que decia el texto pagado del 2026-09-05.
+
+---
+
 ## 9. Que mirar tu en la imagen final
 
 El robot mide, pero **hay cosas que no mide**. Antes de dar una imagen por
@@ -513,5 +668,40 @@ solo puede vigilar que **no te estrechen**, y desde hoy el resumen lo dice con
 esas palabras en vez de afirmar que tus proporciones coinciden.
 
 Lo que **no** garantiza: un recorte limpio contra el fondo, manos perfectas a
-tamano pequeno, encuadres que tu foto de origen no contiene, ni que la imagen te
-guste.
+tamano pequeno, encuadres que tu foto de origen no contiene, **una marca que la
+prenda nueva tapa**, el pelo que te cae sobre la ropa, ni que la imagen te guste.
+
+### Que hacer cuando fal bloquea un resultado
+
+fal revisa **lo que acaba de dibujar**, no lo que le pides: si su revisor lo
+marca, devuelve un archivo completamente negro con HTTP 200. El dibujo se
+ejecuto, asi que **se cobra** (0,05 USD) y queda apuntado en tu libro mayor como
+*imagen bloqueada por fal*. Por orden, y nada de esto cuesta hasta el ultimo
+punto:
+
+1. **No lo tomes como un fallo del robot ni de tu foto.** Se te dice con esas
+   palabras en los avisos de la tirada. Si sale negro dos veces seguidas, el
+   robot **no paga un tercer intento**.
+2. **Mira el porcentaje de piel del rectangulo**, el de la pantalla de coste. Si
+   es mas del doble que el de tu foto entera, lo que hay que cambiar es la zona,
+   no la foto.
+3. **Prueba una foto de origen mas vestida en esa zona, o una prenda que repinte
+   menos** (una falda repinta menos que un vestido completo).
+4. **O pide otra postura o encuadre**, que va por `kontext/multi` (0,04 USD, tres
+   fotos tuyas): es el camino con 1 bloqueo en unas 42 llamadas, y ahi si se
+   comprueba tu rostro antes de ensenarte nada.
+
+Y lo que todavia **no esta probado**, contado por caminos: **1 bloqueo en unas
+42 llamadas de imagen entera** (`kontext`), contra **4 de 4** en el camino con
+mascara mientras hubo recorte - dos el 2026-09-04, una el 2026-09-05 con el
+texto ya limpio, y otra con una fotografia **vestida**, que tampoco desbloqueo
+nada. Las 26 reparaciones de zona que usan el mismo endpoint pasaron todas, y la
+unica diferencia es que la reparacion sube una imagen **ya vestida que hizo el
+modelo**, mientras que las cuatro bloqueadas subieron el recorte de tu
+fotografia real: un torso sin cabeza.
+
+Esa diferencia es la que se acaba de quitar. Desde ahora el camino con mascara
+sube tu **fotografia entera**, igual que el camino que solo se ha bloqueado 1 vez
+en 42. Todo lo que promete la seccion 8b esta medido en local; **contra la API
+real, el camino con mascara sigue sin entregar una imagen**, y la primera
+llamada que se haga asi es la que lo dira.

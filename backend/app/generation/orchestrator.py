@@ -847,6 +847,14 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     work_dir = PREVIEW_DIR / str(user["id"]) / run_id
     work_dir.mkdir(parents=True, exist_ok=True)
     plan["work_dir"] = str(work_dir)
+    # The three blocks of the profile the mask needs to keep her tattoos: her
+    # skin colour, the tolerances around it, and the marks two or more of her
+    # photographs agreed on.  Only these, because the plan is stored as JSON on
+    # the run row and the whole profile has no business travelling there.
+    if profile:
+        plan["mark_profile"] = {"skin": profile.get("skin") or {},
+                                "thresholds": profile.get("thresholds") or {},
+                                "marks": profile.get("marks") or []}
 
     # Three photographs of her, not one.  The engine was being shown a single
     # picture and, at high quality, was even being sent that same picture twice
@@ -882,7 +890,35 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     plan["face_shield"] = [{"protegido": bool(s.get("masked")),
                             "zona": round(float(s.get("cover") or 0.0), 4),
                             "estado": s.get("estado") or "",
-                            "mascara": s.get("mask_path") or ""}
+                            "mascara": s.get("mask_path") or "",
+                            # What this variant's mask does with her tattoos,
+                            # decided here with the mask itself so the estimate
+                            # screen and the run cannot say different things.
+                            "marcas": s.get("marks_note") or "",
+                            # And what it does with her hair: since
+                            # protect.her_hair the mask keeps the hair she can
+                            # see, not the sliver above her face line, and the
+                            # part of the garment her hair sits on cannot be
+                            # repainted either.  Both halves on the screen that
+                            # asks her to pay.
+                            "pelo": s.get("hair_note") or "",
+                            "marcas_protegidas": len(
+                                [m for m in (s.get("marks") or [])
+                                 if str((m or {}).get("estado")) == "protegida"]),
+                            # WHAT WILL REALLY BE UPLOADED, ON THE SCREEN THAT
+                            # ASKS HER TO PAY.  The masked path used to send
+                            # the mask's bounding box instead of her
+                            # photograph, and the paid call of 2026-09-05 was
+                            # argued for on whole-frame numbers and reviewed
+                            # on that rectangle, where her skin was 2.8x
+                            # denser and her head was not.  The crop is gone,
+                            # so these numbers and the reviewer's picture are
+                            # the same picture again - and they are still
+                            # measured by protect.upload_report when the mask
+                            # is drawn and read here for free, because a
+                            # promise nobody measures is how this went wrong.
+                            "envio": dict(s.get("envio") or {}),
+                            "envio_texto": s.get("envio_note") or ""}
                            for s in shields]
 
     # AND THE SENTENCE ABOUT THOSE REFERENCES ONLY WHEN THEY TRAVEL.  The
@@ -1347,10 +1383,50 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     # is outside the retry loop because neither her photograph nor what she
     # asked for changes between attempts.  Empty means "this image is made
     # whole"; ``mask_note`` says why, in her language, whichever way it went.
-    shield = protect_mod.shield_for(original.get("path"), choices, out_dir)
+    shield = protect_mod.shield_for(original.get("path"), choices, out_dir,
+                                    profile=profile)
     mask_path = str(shield.get("mask_path") or "")
     mask_note = str(shield.get("reason") or "")
     mask_cover = float(shield.get("cover") or 0.0)
+    # WHAT THE SHIELD KEEPS, AND WHAT IT CANNOT.  The sentence above promises
+    # her face, her hair and her hands back from her own file, and that is
+    # true.  It says nothing about her tattoos, and the delivered image of
+    # 2026-09-04 came back with all three of them gone - the script and heart
+    # below her left collarbone, the script down her right forearm, the rose
+    # sleeve across her left thigh - because every one of them lies INSIDE the
+    # repaint zone, where the model paints over pixels it is never shown.  The
+    # prompt asks for "same tattoos, moles and marks in the same places"; on
+    # this path that is a request the engine cannot fill.  So it is said
+    # before she looks for them, from the reading of her own photograph, and
+    # only for the marks the regions being repainted actually cover.
+    # AND WHAT IT NOW KEEPS.  Since 2026-09-05 the mask forces her visible
+    # marks black alongside her face and her hands whenever the garment she
+    # asked for leaves that part of her bare - so the warning is only about
+    # what the garment really covers, and ``marks_note`` says both halves,
+    # measured on this photograph rather than read off a text description.
+    if mask_path:
+        kept_zones = sorted({str(m.get("zona") or "")
+                             for m in (shield.get("marks") or [])
+                             if str((m or {}).get("estado")) == "protegida"})
+        note = str(shield.get("marks_note") or "")
+        if note:
+            _plan_note(run_id, note)
+        # AND WHAT IT DOES WITH HER HAIR.  Measured on her photograph by
+        # protect.her_hair: what the mask keeps, and honestly what keeping it
+        # takes out of the garment when her hair falls over the garment.
+        pelo = str(shield.get("hair_note") or "")
+        if pelo:
+            _plan_note(run_id, pelo)
+        # And what leaves the machine, in the run's own record, so the report
+        # and the estimate say the same thing about the same rectangle.
+        sent = str(shield.get("envio_note") or "")
+        if sent:
+            _plan_note(run_id, sent)
+        risk = protect_mod.marks_at_risk(brief.get("preserve"),
+                                         shield.get("regions"), kept_zones)
+        warn = protect_mod.marks_sentence(risk)
+        if warn:
+            _plan_note(run_id, warn)
 
     for attempt_no in range(1, max_retries + 2):
         # Between attempts, and always before anything reaches a provider: a
@@ -1563,10 +1639,27 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                                "trabajo se cobra igual (%.2f USD): eso es lo "
                                "que cuesta, no un error del robot."
                                % (index + 1, charged))
+                # The same facts a successful attempt records, on the row of
+                # a failure the client has just been charged for: which
+                # endpoint really ran, which request_id it ran under, what was
+                # uploaded, and how long it took.  The 'model' column used to
+                # hold the ROLE key here ("inpaint") while the success path
+                # wrote the endpoint, so the two rows the client paid 0.100 USD
+                # for on 2026-09-04 did not even name the endpoint that billed
+                # them; and latency was written 0 for a job that ran 2.2 s.
+                em = dict(getattr(exc, "meta", None) or {})
+                if em:
+                    merged["envio"] = {k: em[k] for k in
+                                       ("endpoint", "request_id",
+                                        "envio_completo", "enviado",
+                                        "source_size", "negativo_retirado")
+                                       if em.get(k) is not None}
                 _record_attempt(run_id, user["id"], index, attempt_no,
-                                provider.name, model, "generate",
+                                provider.name, str(em.get("endpoint") or model),
+                                "generate",
                                 built["prompt"], negative, merged,
-                                {}, [], "error", str(exc)[:200], charged, 0)
+                                {}, [], "error", str(exc)[:200], charged,
+                                int(getattr(exc, "latency_ms", 0) or 0))
                 # AND A BOUND ON THE RE-ROLL.  One block is a draw the engine
                 # lost; two in a row on the same photograph and the same words
                 # is the request itself, and paying a third time to be told so
@@ -1658,6 +1751,23 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                         % (index + 1, put.get("reason") or "sin motivo"))
                 _plan_note(run_id, note)
                 log.warning(note)
+
+        # WHAT THE PROVIDER WAS REALLY SENT AND WHAT IT REALLY ANSWERED.
+        # The provider builds all of this in ``meta`` and, until now, nothing
+        # kept a word of it: the two calls that came back black on 2026-09-04
+        # left rows whose params_json holds only the planner's knobs, so their
+        # request_id, their timings and the size of the upload could not be
+        # recovered from this installation at all and the incident had to be
+        # reconstructed from fal's own dashboard.  These are half a dozen small
+        # values on a row that already exists, and they are what makes the next
+        # incident auditable from here.
+        pm = getattr(result, "meta", None) or {}
+        envio = {k: pm[k] for k in ("endpoint", "request_id",
+                                    "envio_completo", "enviado", "source_size",
+                                    "bytes", "timings", "negativo_retirado")
+                 if pm.get(k) is not None}
+        if envio:
+            merged["envio"] = envio
 
         # What was ordered and what arrived, on the attempt row, before
         # anything downstream can resize or repaint the file and make the two

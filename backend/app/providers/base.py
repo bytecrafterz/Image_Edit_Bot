@@ -116,14 +116,25 @@ class ProviderError(RuntimeError):
     result.  The orchestrator handed the reservation back, so the run reported
     0.0000 USD for work a vendor bills at 0.050 USD an image.  A ledger that
     only records the calls that went well is not a ledger.
+
+    ``meta`` is the same dictionary a successful GenResult carries, attached
+    to the failure as well.  It exists because of what the block of
+    2026-09-05 cost to investigate: the attempt row said only "fal devolvio un
+    archivo en negro", and the request_id that identifies the job on fal's side
+    had to be read out of an httpx log line, because the provider built it and
+    then dropped it on the way out.  An error that a vendor charges for has to
+    leave the same trail as a success.
     """
 
     def __init__(self, message: str, *, retryable: bool = True, code: str = "",
-                 billed: bool = False):
+                 billed: bool = False, meta: dict | None = None,
+                 latency_ms: int = 0):
         super().__init__(message)
         self.retryable = retryable
         self.code = code
         self.billed = billed
+        self.meta = dict(meta or {})
+        self.latency_ms = int(latency_ms or 0)
 
 
 class InsufficientBalance(ProviderError):

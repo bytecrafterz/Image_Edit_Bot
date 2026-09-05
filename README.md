@@ -72,8 +72,170 @@ fotografía**.
 Lo que eso significa, y está medido: tu **parecido facial no depende del
 modelo** porque tu cara no pasa por él; tus **manos son las tuyas** y la ficha
 lo dice con esas palabras en vez de avisarte de que no ha podido juzgarlas; tus
-**tatuajes y tus pendientes** siguen ahí; y el archivo conserva la resolución de
-tu foto en vez de bajar a 1024x1024.
+**pendientes** siguen ahí, porque cuelgan junto a la cabeza y la máscara los
+deja en negro; y el archivo conserva la resolución de tu foto en vez de bajar a
+1024x1024.
+
+**Y tu pelo sólo el de la cabeza.** La frase de arriba decía «tu cara, tu pelo,
+tus manos», y de las tres sólo dos son exactas. Lo que MediaPipe llama *pelo* en
+la fotografía de la cocina son **7 907 píxeles**, un filo en la coronilla: la
+melena que le cae sobre el hombro y el pecho está clasificada como *torso* y
+queda dentro de la zona a repintar en un **82,7%**. El aviso ya no promete el
+pelo entero; dice cuál se copia y cuál se repinta.
+
+### Tus marcas: las que la prenda deja al aire se conservan
+
+Esta sección decía «tus tatuajes no» y hoy dice menos y más exacto. La máscara
+mide tus marcas **sobre la fotografía** — con el color de piel de tu propio
+perfil como referencia, no con un detector genérico — y las fuerza a negro
+**junto a tu cara y tus manos** siempre que la prenda que has pedido deje esa
+parte de ti al aire. En sus 25 fotografías eso encuentra 21 marcas, 17 reales
+(el nombre bajo la clavícula, la escritura del antebrazo, la manga de rosas del
+muslo) y 4 que no lo son (una sombra, un mechón y dos veces su propio collar);
+las cuatro sólo conservan píxeles suyos en una zona que la ropa no tapa, que es
+lo que ya hacía el escudo con sus pendientes.
+
+**Y una marca que la prenda nueva tapa se repinta, siempre.** No es un fallo, es
+lo único honesto: una camisa encima de un tatuaje lo cubre, y protegerlo dejaría
+un agujero con su pecho dentro de la camisa. El robot lo dice antes de cobrar,
+con la zona por su nombre:
+
+> Tus marcas en el cuello se conservan: esa zona no se repinta, se copia de tu
+> propia foto. La ropa que pediste tapa el torso, asi que la marca que llevas
+> ahi no puede sobrevivir: una prenda encima de un tatuaje lo cubre, y no se te
+> va a decir lo contrario. Si quieres verla, elige una prenda que deje esa zona
+> al aire.
+
+Hay que decir hasta dónde llega: **ninguna de las 24 prendas del catálogo deja
+el pecho al aire.** 18 son partes de arriba o conjuntos completos, y a las 6 de
+abajo el robot les añade una prenda superior para no pedir un torso desnudo. Así
+que en un cambio de ropa su tatuaje del pecho **siempre** se pierde; donde la
+protección sí se nota es en el antebrazo bajo una camiseta de manga corta, en el
+muslo bajo un vestido de verano, y en el cuello, que no tapa ninguna prenda. Si
+lo que quieres es conservarlo, lo que sirve es un **cambio de color o de
+transparencia**: ahí no se viste nada nuevo y se protegen todas.
+
+Y lo que se le pide al motor va ahora **en el mismo sentido que la máscara**. El
+texto pagado del 2026-09-05 le pedía a la vez «una camisa blanca que cubra el
+torso por completo» y «el tatuaje del pecho sin cambios y en el mismo sitio»:
+dos frases sinceras que juntas son imposibles, y pedirle a un modelo una
+contradicción no da la mitad de cada una. Ahora sólo se piden las marcas que la
+prenda deja ver — 5 de 9 con una camisa, las 9 con un cambio de color — y la
+lista de «no cambies esto» que redacta la lectura de la foto ya no cuela la
+prenda que acabas de pedir cambiar (decía, literalmente, *keep unchanged: beige
+tank top* dentro de una petición de camisa blanca).
+
+Si sólo cambias el fondo, no aparece ningún aviso: la lista se calcula contra
+las regiones que se repintan de verdad, y el fondo no toca ninguna marca.
+
+### Lo que sale de tu máquina en una llamada de pago
+
+En el camino con máscara, la respuesta del proveedor **sólo se conserva dentro
+de lo blanco**: todo lo demás se copia de tu archivo a resolución completa. Sube
+**su fotografía entera**, con la cabeza y los hombros.
+
+Durante un día no fue así: se recortaba el rectángulo que contiene la zona a
+repintar más un 6% de contexto, con el argumento de que lo de fuera se tira
+igual. Ese rectángulo **es la zona de la ropa, y empieza en su barbilla**: lo
+que recibía fal era un torso sin cabeza, el pecho centrado, los hombros y los
+brazos al aire, con el **0,0%** de su recuadro de cara en la foto vestida y el
+**1,9%** en IMG_7871. Multiplicaba por **2,8** la densidad de piel de la imagen
+bajo revisión, y las dos llamadas pagadas con máscara volvieron bloqueadas — la
+segunda sobre una fotografía completamente vestida. Además le quitaba al modelo
+lo que necesita para ajustar una prenda a una persona: la escala, los hombros,
+de dónde viene la luz y qué hay en la habitación.
+
+Su cara no la protegía el recorte y no la protege el encuadre: **la protege la
+máscara**. Sobre sus **25 fotografías**, la zona a repintar toca **0 píxeles**
+del recuadro de su cara, y encima de todo lo negro se vuelven a escribir sus
+propios píxeles a resolución completa. El pegado se comprobó con la máscara
+desplazada en las dos direcciones sobre 5 de sus fotografías: el desfase que
+mejor explica la imagen compuesta es **(0, 0) píxeles** en las cinco.
+
+Del texto que se envía también se ha quitado el vocabulario de ropa interior que
+el propio `safety/guard.py` rechaza si se lo escribes tú: 14 cláusulas en el
+camino con máscara, y **0 en `kontext`**, que es el que ha hecho todas las
+imágenes que existen. Lo que protege tu cuerpo — *slimmed waist*, *altered
+breast size*, *removed tattoos* — se queda entero en los dos.
+
+Eso era la mitad del trabajo. Medido sobre las 4 141 letras que fal recibió de
+verdad el 2026-09-05, después de aquel filtro **seguían viajando** *top worn
+without bottoms*, *shirt worn as a dress*, *no trousers*, *missing trousers* —
+ninguna nombra una prenda interior y todas describen a una persona a medio
+vestir — y las palabras *breast* y *bust*, dos veces, dentro de cláusulas que
+protegen su cuerpo. Ahora: las cuatro frases **se caen sólo en el camino con
+máscara** (en `kontext` protegen un fallo real y no le han costado nada nunca), y
+los sustantivos **no se borran, se cambian** por el clínico — *altered breast
+size* sale como *altered chest size*, y la protección viaja entera. Resultado
+medido sobre esa misma petición: 18 cláusulas retiradas en vez de 14, y **0
+palabras marcadas** en el texto final, contra 7 antes.
+
+### Lo que ve el revisor es tu foto entera, y antes no lo era
+
+Éste es el hallazgo que costó 0,100 USD y hay que leerlo antes de pagar.
+Mientras hubo recorte, el rectángulo que viajaba **concentraba la piel**: ese
+rectángulo *es* la zona de la ropa, o sea la parte más desnuda de cualquier foto
+de una persona, y además dejaba la cabeza fuera. Medido en sus dos fotos de
+origen, con la misma envoltura de piel de su propia ficha:
+
+| | foto entera | rectángulo que viajaba | factor |
+|---|---|---|---|
+| IMG_7871 (bloqueada 2 veces) | 12,1% de piel | 33,1% | **2,73x** |
+| la de la cocina, vestida (bloqueada) | 9,8% de piel | 27,5% | **2,82x** |
+
+Así que la mejora que de verdad recibió el proveedor al cambiar a una foto
+vestida fue **33,1% → 27,5%** (un 17% relativo), no el 36% que se había
+calculado sobre el cuadro entero. Y lo que estaba mirando, en los dos casos, es
+un **torso sin cabeza** centrado en el escote. El recorte se ha quitado, y lo
+que sale ahora se mide igual cuando se dibuja la máscara y **se le escribe en la
+pantalla de coste**, con esta frase:
+
+> Sale tu foto entera, con tu cabeza y tus hombros: es lo que el modelo necesita
+> para ajustar la ropa a tu cuerpo, y es lo que revisa el proveedor. De esa foto
+> se repinta el 17%. Tu piel descubierta es el 10% de lo que se envia, y el 7%
+> queda dentro de la zona que se repinta. Tu cara viaja entera y no se repinta:
+> la mascara la deja fuera por completo (0 pixeles del recuadro de tu cara
+> dentro de la zona) y encima se vuelven a poner tus propios pixeles.
+
+Cuesta 0,4 s al dibujar la máscara y 0,012 s cada vez que se reutiliza, así que
+la estimación la puede decir siempre. La regla de la que sale es la más barata
+de todas: **el número que justifica un gasto tiene que estar medido sobre la
+imagen que se envía**, no sobre la que se queda en casa.
+
+### Qué fotografía tuya sirve como origen
+
+La respuesta corta, después de tres llamadas pagadas: **la que menos piel
+descubierta tenga dentro de la zona que vas a cambiar**, y a igualdad de eso, la
+de más resolución.
+
+- **Vestida, y mejor con las piernas cubiertas.** Una foto en ropa interior
+  llega al revisor como un desnudo recortado. La foto de la cocina (top gris de
+  canalé y falda negra, sentada) baja la zona a repintar del 22,3% al 18,5% del
+  cuadro y la piel dentro de esa zona del 52,8% al 40,1%.
+- **Media figura o cuerpo entero, no primer plano.** En un primer plano no hay
+  torso que aislar: la zona pasa a ser toda ella, y lo que se repinta es casi
+  todo el cuadro.
+- **De tu cámara, no de WhatsApp.** El archivo se entrega al tamaño de tu foto:
+  1200x1599 (1,9 MP) desde WhatsApp contra 2316x3088 (7,2 MP) desde el móvil, y
+  la cara a resolución completa baja de 332 px a 201 px. Pasa el listón de
+  sobra, pero es un cuarto de los píxeles.
+- **Nítida y bien expuesta.** El robot lo mide y te lo dice antes de usarla.
+
+Y lo que **no** ha servido: cambiar a una foto vestida, por sí solo, **no
+desbloqueó nada**. Ese es el resultado del 2026-09-05 y está pagado.
+
+### Cuando el proveedor bloquea el resultado
+
+fal revisa **lo que acaba de dibujar**. Si su revisor lo marca, devuelve un
+archivo completamente negro con HTTP 200: medido sobre los 19 376 bytes que esta
+instalación ya tiene guardados, media 0,0000 y un único valor distinto en
+4 423 680 píxeles. La inferencia **se ejecutó**, así que fal lo cobra, y el robot
+lo apunta en tu libro mayor con la nota *imagen bloqueada por fal* y te lo dice
+con esas palabras: «se hizo pero fal.ai no la dio por buena... se cobra igual
+(0.05 USD)». Se prueba otra semilla; si vuelve a salir negro, **no se paga un
+tercer intento**. Y desde hoy la fila del intento guarda el `request_id`, el
+endpoint real, el rectángulo que se subió y lo que tardó, para que el siguiente
+bloqueo se pueda auditar desde aquí en vez de desde el panel de fal.
 
 Cuando pides **otra postura u otro encuadre** eso no se puede hacer: mover la
 pose mueve tu cuerpo dentro del cuadro (medido en sus fotos: la cabeza se
@@ -84,9 +246,45 @@ caminos vas a pagar, con el nombre del modelo, **antes** de gastar.
 
 Verificado sin gastar: 3 regímenes x 192 peticiones enmascaradas, **0 píxeles
 cambiados fuera de la máscara** en todas ellas. Sin gastar también está su
-límite: de las 28 llamadas reales que esta cuenta ha hecho a `fill`, 26 fueron
-reparaciones de zonas y las 2 únicas peticiones de ropa con máscara que han
-salido de verdad las bloqueó el revisor de contenido de fal.
+límite, y hay que decirlo entero. Contadas en la tabla de intentos de esta
+instalación, las llamadas se parten limpiamente por camino:
+
+| camino | llamadas | bloqueadas por fal |
+|---|---|---|
+| imagen entera (`kontext`, `kontext/multi`) | ~42 | **1** |
+| recorte con máscara (`fill`, cambio de ropa) | **4** | **4** |
+
+Las 26 reparaciones de zona que también usan `fill` pasaron todas, y la
+diferencia con las cuatro bloqueadas es qué se sube: la reparación sube una
+imagen **ya vestida** que hizo el modelo; las cuatro bloqueadas subieron el
+recorte de su fotografía real, un torso sin cabeza. Esa diferencia es la que se
+acaba de quitar: el camino con máscara sube ahora la **imagen entera**, igual
+que el camino de la primera fila. **Sigue sin estar probado de punta a punta
+contra la API real**, y mientras no lo esté, todo lo que promete esta sección
+está medido en local y no en una imagen entregada.
+
+**Qué hacer cuando te bloquean un resultado.** Por orden, y ninguno de los
+cuatro cuesta nada hasta el último:
+
+1. **Cóbratelo como lo que es.** Está apuntado en tu libro mayor como *imagen
+   bloqueada por fal*. No es un error del robot ni un fallo de tu foto: fal
+   ejecutó el dibujo y lo cobra. Si sale negro dos veces seguidas, el robot
+   **no paga un tercer intento**.
+2. **Mira lo que se subió, no lo que tienes.** La pantalla de coste te dice qué
+   porcentaje de lo que se envía es piel descubierta y cuánto de eso cae dentro
+   de la zona que se repinta. Ése es el número que mira el revisor.
+3. **Cambia lo que reduce ese número:** una foto de origen más vestida en la
+   zona que vas a cambiar, o una prenda que repinte menos (una falda repinta
+   menos que un vestido completo).
+4. **O pide otra postura o encuadre.** Eso va por `kontext/multi` (0.04 USD, 3
+   fotos tuyas), que es el camino con 1 bloqueo en ~42 llamadas — y ahí sí se te
+   comprueba el rostro antes de enseñarte nada.
+
+Lo que **no** se ha probado todavía: una llamada pagada por el camino con
+máscara **ya sin recorte**. Es lo único que separaba a los dos caminos de la
+tabla, y el precio es privacidad — sale todo el cuadro de tu máquina. A cambio,
+el modelo ve tu cabeza y tus hombros, que es lo que necesita para ajustarte una
+prenda, y el revisor deja de recibir un torso sin cabeza.
 
 ---
 
@@ -386,8 +584,16 @@ backend\.venv\Scripts\python.exe scripts\import_nayane.py
 # Ensayo completo del camino de pago (clave falsa, red cerrada, coste 0 USD)
 backend\.venv\Scripts\python.exe scripts\rehearse_paid.py
 
-# Sus 24 fotos a tres tamaños + las caras que no son suyas (0 de 72 rechazadas)
+# Sus 25 fotos a tres tamaños + las caras que no son suyas (0 de 75 rechazadas)
 backend\.venv\Scripts\python.exe scripts\sweep_identity.py
+
+# Comprobado el 2026-09-05 con las 25 fotos, todo a coste 0.0000 USD:
+#   e2e_test.py           49 correctas, 0 fallidas
+#   rehearse_paid.py      48 correctas, 0 fallidas
+#   sweep_identity.py     75 de 75 pasan (parecido 0.663..0.895, umbral 0.45),
+#                         8 de 8 caras ajenas rechazadas por identidad
+#   calibrate_identity.py 0% de falsas alarmas, 50% de deteccion a -12% y -18%
+#   multiuser_test.py     43 correctas, 0 fallidas
 
 # Que dos cuentas no se vean nada la una a la otra
 backend\.venv\Scripts\python.exe scripts\multiuser_test.py

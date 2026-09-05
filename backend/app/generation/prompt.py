@@ -105,11 +105,22 @@ NO_BARE_TORSO = (
 # clothing, and "change only: a shirt" is an instruction to ADD a shirt to what
 # is already in the frame - which is precisely what the engine did.  Saying
 # replace rather than add costs one sentence.
+# Said forwards, and that is deliberate.  The sentence used to end "leave no
+# underwear and no part of the source clothing visible anywhere in the frame",
+# which is the requirement stated backwards - by naming the thing it forbids.
+# On the FLUX endpoints there is no negative_prompt field, so this text is the
+# text that goes on the wire, and providers/fal.py measured what that costs:
+# the product's own safety/guard.py refuses this very string
+# (is_intimate_request -> True on 'underwear'), and the only two paid calls
+# that ever carried this vocabulary are the two fal reviewed and returned
+# black.  Complete coverage is the same instruction and a stronger one - it
+# says what the picture must contain instead of what it must not.
 OUTFIT_REPLACE = (
     "dress the subject in this outfit and in nothing else: paint the complete "
-    "garment onto the body, replace whatever clothing the source photograph "
-    "shows instead of layering the new garment over it, and leave no "
-    "underwear and no part of the source clothing visible anywhere in the frame"
+    "garment onto the body, replace whatever the source photograph shows "
+    "instead of layering the new garment over it, and let this outfit be the "
+    "only clothing visible anywhere in the frame, opaque fabric, covering the "
+    "torso, the hips and the legs completely"
 )
 
 IDENTITY_CLAUSE = (
@@ -682,21 +693,103 @@ def skin_description(profile: dict) -> str:
                   "kept as they are"])
 
 
-def marks_description(profile: dict, limit: int = 4) -> str:
+def _protect_mod():
+    """generation/protect.py, imported at call time and never at load.
+
+    protect.py imports THIS module, so the dependency can only be taken in one
+    direction at import time.  It is needed all the same: protect is the only
+    place that knows which body zones a garment covers, and a prompt that does
+    not know that asks for things the mask is about to paint over.
+    """
+    from . import protect as mod
+    return mod
+
+
+def _garment_cover(chosen: Any) -> dict:
+    """Which body zones the requested garment hides, or {} if nothing new is worn."""
+    try:
+        return _protect_mod().garment_cover(chosen) or {}
+    except Exception:                                     # noqa: BLE001
+        # A prompt that cannot reach protect.py is not a prompt that fails: it
+        # simply asks for every mark, exactly as it did before this existed.
+        return {}
+
+
+# The words that make a preserve entry a piece of clothing rather than a piece
+# of her.  Deliberately narrow: it has to survive "necklace with pendant",
+# "shoulder tattoo with text and heart symbols", "hair length and dark red
+# color", "face shape and features" and "skin tone", which are the other five
+# entries the reading of the new photograph proposes.
+_GARMENT_WORDS = (
+    "top", "shirt", "t-shirt", "tshirt", "blouse", "tank", "camisole", "vest",
+    "sweater", "jumper", "cardigan", "hoodie", "jacket", "blazer", "coat",
+    "dress", "gown", "skirt", "trousers", "pants", "jeans", "shorts",
+    "leggings", "bodysuit", "jumpsuit", "romper", "suit", "outfit", "clothes",
+    "clothing", "garment", "sleeve", "sleeves", "neckline", "bra", "lingerie",
+    "underwear", "swimsuit", "bikini", "uniform", "robe", "kimono", "poncho",
+    "overalls", "waistcoat", "tie", "scarf", "belt",
+)
+_GARMENT_RE = re.compile(
+    r"(?<!\w)(?:%s)(?!\w)" % "|".join(re.escape(w) for w in _GARMENT_WORDS),
+    re.IGNORECASE)
+
+
+def _names_a_garment(text: str) -> bool:
+    return bool(_GARMENT_RE.search(str(text or "")))
+
+
+def marks_description(profile: dict, limit: int = 4, cover: Any = None) -> str:
+    """Her permanent marks, minus the ones the new garment will be over.
+
+    WHY A GARMENT ARGUMENT BELONGS IN A SENTENCE ABOUT TATTOOS.  The prompt of
+    the paid call of 2026-09-05 asked fal, in the same breath, to paint "a
+    crisp white cotton poplin shirt... covering the torso... completely" and to
+    keep "the tattoo on the chest... unchanged and in the same place".  Both
+    sentences were sincere and together they are impossible: a shirt over a
+    tattoo covers it, and the mask had already decided to repaint those very
+    pixels.  Asking a model for a contradiction does not get half of each - it
+    gets whatever the model settles on, and on this path what it settles on is
+    a chest the shirt does not properly cover, which is the picture an output
+    reviewer flags.
+    So the request is trimmed to what the mask can actually deliver: a mark in
+    a zone the garment leaves bare is asked for, a mark under the new garment
+    is not mentioned at all.  ``cover`` is protect.garment_cover's answer; with
+    no garment in the request nothing is covered and every mark is asked for,
+    which is the behaviour this function always had.
+    """
     marks = (profile or {}).get("marks")
     if not isinstance(marks, list) or not marks:
         return ""
+    zones = cover if isinstance(cover, dict) else {}
+    zone_of: dict = {}
+    if zones:
+        try:
+            zone_of = _protect_mod().MARK_ZONES
+        except Exception:                                 # noqa: BLE001
+            zone_of = {}
     parts: list[str] = []
-    for mark in marks[:limit]:
+    for mark in marks:
         if not isinstance(mark, dict):
             continue
+        raw = _norm_ws(mark.get("region")).lower()
+        # "desconocida" is not "cubierta": a garment nobody described might
+        # leave the mark showing, and dropping it from the prompt would throw
+        # away the only chance of keeping it.  Only a zone the wardrobe says
+        # is covered is silent here.
+        if zone_of and str(zones.get(zone_of.get(raw, ""), "")) == "cubierta":
+            continue
         kind = MARK_EN.get(_norm_ws(mark.get("type")).lower(), "mark")
-        region = REGION_EN.get(_norm_ws(mark.get("region")).lower(), "body")
+        region = REGION_EN.get(raw, "body")
         parts.append("the %s on the %s" % (kind, region))
+        if len(parts) >= limit:
+            break
     if not parts:
         return ""
     text = _join(parts)
-    if len(marks) > limit:
+    if len(parts) >= limit:
+        # Only when the LIMIT is what stopped the list.  It used to count the
+        # profile's marks, which after the filter above would promise "every
+        # other visible mark" and mean the ones under the shirt.
         text += ", and every other visible mark"
     return text + " unchanged and in the same place"
 
@@ -941,23 +1034,57 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
     preserve_bits: list[str] = [_body_clause(prof)]
     if "outfit" not in changed_groups:
         clothing = _vision_text(brf, "clothing", prof)
+        # AND NOT THE ATTRIBUTE THE REQUEST IS CHANGING.  A colour change is
+        # not an outfit change - canon_group("clothing_color") is its own
+        # group - so this sentence still fired, and the prompt built for it
+        # read "change only: in deep black. keep unchanged: ... a ribbed
+        # sleeveless knit top in warm grey with a black skirt, same cut, colour
+        # and fit".  It orders the colour changed and the colour kept in the
+        # same breath.  The garment is still preserved; the word being altered
+        # comes out of the promise.
+        # Only the attribute actually being altered comes out.  A sheerness
+        # change needs nothing removed - cut, colour and fit are all still
+        # promised, and opacity was never in the promise - so "transparency"
+        # is deliberately not in this list.
+        holds = ["cut", "colour", "fit"]
+        if "clothing_color" in changed_groups or "color" in changed_groups:
+            holds.remove("colour")
+        same = ("same " + ", ".join(holds[:-1]) + " and " + holds[-1]
+                if len(holds) > 1 else "same " + holds[0])
         preserve_bits.append(
-            ("the same clothing as in the source photograph: " + clothing +
-             ", same cut, colour and fit") if clothing else
-            "the same clothing as in the source photograph, same cut, colour and fit")
+            ("the same garment as in the source photograph: " + clothing +
+             ", " + same) if clothing else
+            ("the same garment as in the source photograph, " + same))
     if "hair" not in changed_groups:
         hair_style = _vision_text(brf, "hair", prof)
         preserve_bits.append("the same hairstyle" + (": " + hair_style
                                                      if hair_style else ""))
     if "makeup" not in changed_groups:
         preserve_bits.append("the same level of makeup as in the source photograph")
-    marks = marks_description(prof)
+    # The garment decides which of her marks can still be asked for; see
+    # marks_description.  ``kept`` is what was really chosen, after the
+    # catalogue resolved it, which is the same object outfit_plan just read.
+    marks = marks_description(prof, cover=_garment_cover(kept))
     if marks:
         preserve_bits.append(marks)
     extra_preserve = (brf.get("preserve") if isinstance(brf.get("preserve"), list)
                       else [])
+    # AND THE READING'S OWN LIST, WHICH DOES NOT KNOW WHAT WAS ASKED FOR.
+    # Claude's reading of the photograph proposes what is worth keeping, and on
+    # the new source it proposes "beige tank top".  Copied into an outfit
+    # change that already says "change only: a crisp white cotton poplin
+    # shirt", it made the paid prompt of 2026-09-05 order two different tops in
+    # one sentence.  Measured on her 25 readings this drops garment entries and
+    # nothing else: her necklace, her tattoo, her hair colour and her skin tone
+    # are all kept, because none of them is something she takes off.
     for item in extra_preserve[:6]:
-        preserve_bits.append(_strip_name(_norm_ws(item), prof))
+        clean = _strip_name(_norm_ws(item), prof)
+        if "outfit" in changed_groups and _names_a_garment(clean):
+            tokens.append("conserva: se retira \"%s\" de lo que hay que "
+                          "conservar, porque es justo la prenda que has "
+                          "pedido cambiar" % clean)
+            continue
+        preserve_bits.append(clean)
     for bit in preserve_bits:
         if bit:
             tokens.append("conserva: " + bit)

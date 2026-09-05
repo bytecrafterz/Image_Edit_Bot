@@ -1,14 +1,17 @@
-"""Her own 24 photographs must never be called a stranger, and a stranger must.
+"""Her own photographs must never be called a stranger, and a stranger must.
 
 Two questions, one instrument - the gate in identity/verify.py, with her real
-stored profile (prf_dfcea806cba44c779cc8761f, 24 photographs, thresholds as
-they sit in the database today):
+stored profile (prf_dfcea806cba44c779cc8761f, thresholds as they sit in the
+database today):
 
-  1. FALSE ALARMS.  Each of her 24 photographs is handed to the gate as if the
+  1. FALSE ALARMS.  Each of her photographs is handed to the gate as if the
      engine had just returned it, with a clothing change declared, at three
      load sizes (1024, 1600 and 2048 px on the long side).  The load size is
-     the thing that used to move the reading, so 24 x 3 = 72 verdicts.
-     Every one of them must pass.
+     the thing that used to move the reading.  How many photographs there are
+     is COUNTED and not written down here: she had 24 when this was first run
+     and 25 after the kitchen photograph of 2026-09-04 was imported, and a
+     banner that says 24 while the loop runs 25 is the kind of small lie that
+     makes a report unreadable.  Every verdict must pass.
   2. THE FACES THAT ARE NOT HERS.  The photographs in sample/ go through the
      same gate, with the same brief and her own photograph as the source.  Who
      counts as a stranger is decided by the instrument and not by the file
@@ -91,7 +94,8 @@ def main() -> int:
     originals = db.rows_to_dicts(db.q(
         "SELECT * FROM originals WHERE deleted_at IS NULL ORDER BY filename"))
     print("=" * 78)
-    print("BARRIDO: SUS 24 FOTOS A TRES TAMANOS, CON CAMBIO DE ROPA DECLARADO")
+    print("BARRIDO: SUS %d FOTOS A TRES TAMANOS, CON CAMBIO DE ROPA DECLARADO"
+          % len(originals))
     print("=" * 78)
     print("perfil %s (%s, %d fotos)  umbral de rostro %.2f  ropa: %s"
           % (profile["id"], profile["person_name"], profile["n_sources"],

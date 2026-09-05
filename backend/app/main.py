@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -33,6 +34,12 @@ def _setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers, force=True)
     logging.getLogger("PIL").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+# When this process began.  Read once, at import, so that comparing it with
+# the modification time of a module is a comparison between "the code I have"
+# and "the code on disk" rather than between two clocks.
+_STARTED = time.time()
 
 
 def create_app() -> FastAPI:
@@ -93,6 +100,46 @@ def create_app() -> FastAPI:
         )
 
     # -------------------------------------------------------------- health
+    # WHICH CODE IS ACTUALLY RUNNING.  ``version`` is a constant in config.py:
+    # it says what this build calls itself and it cannot tell you whether the
+    # process answering you was started before or after your last edit.  On
+    # 2026-09-05 that difference cost an hour and nearly cost 0.080 USD: the
+    # server on 8130 had been launched with --no-reload the previous morning,
+    # so it was serving code from before HEAD, and the first estimate came back
+    # quoting a whole-frame endpoint at 0.080 USD with no mask at all while the
+    # files on disk said otherwise.  Nothing on the health page contradicted it.
+    # ``codigo`` is the fingerprint of the modules this process imported: the
+    # newest modification time it loaded and a digest over the files that
+    # decide what is sent to a provider and what it costs.  Compare it with the
+    # same numbers taken from disk and a stale process is obvious in one
+    # request, before any money moves.
+    def _code_fingerprint() -> dict:
+        import hashlib
+        base = Path(__file__).resolve().parent
+        watched = ["generation/orchestrator.py", "generation/protect.py",
+                   "generation/prompt.py", "generation/router.py",
+                   "providers/fal.py", "safety/guard.py", "config.py"]
+        digest = hashlib.sha256()
+        newest = 0.0
+        seen = 0
+        for name in watched:
+            f = base / name
+            try:
+                raw = f.read_bytes()
+            except OSError:
+                continue
+            digest.update(name.encode("utf-8"))
+            digest.update(hashlib.sha256(raw).digest())
+            newest = max(newest, f.stat().st_mtime)
+            seen += 1
+        return {"huella": digest.hexdigest()[:16], "modulos": seen,
+                "mas_reciente": round(newest, 3),
+                "arrancado": round(_STARTED, 3),
+                # The one comparison that matters, made here so nobody has to
+                # make it by hand: a file on disk newer than the process that
+                # imported it means the answers below may be from old code.
+                "al_dia": bool(newest <= _STARTED)}
+
     @app.get("/api/health")
     def health() -> dict:
         from .providers import registry
@@ -101,6 +148,7 @@ def create_app() -> FastAPI:
             "app": SETTINGS.app_name,
             "version": SETTINGS.version,
             "python": sys.version.split()[0],
+            "codigo": _code_fingerprint(),
             "providers": registry.availability(),
         }
 

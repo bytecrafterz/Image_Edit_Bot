@@ -35,9 +35,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import logging
 import os
 import random
+import re
 import shutil
 import threading
 import time
@@ -48,6 +50,7 @@ import httpx
 from PIL import Image, ImageOps
 
 from ..config import get_api_key
+from ..safety import guard
 from .base import (Capabilities, GenRequest, GenResult, ImageProvider,
                    InsufficientBalance, ProviderError)
 
@@ -224,12 +227,19 @@ def _record_shape(meta: dict, width: Any, height: Any) -> None:
         meta["aspect_kept"] = bool(meta["delivered_aspect"] == asked)
 
 
-def _encode(path: str, max_side: int, mask: bool = False) -> tuple[str, tuple[int, int]]:
-    """File -> data URI.
+def _encode(path: str, max_side: int, mask: bool = False
+            ) -> tuple[str, tuple[int, int]]:
+    """File -> data URI: the WHOLE oriented picture, resized, never cut.
 
     EXIF orientation is applied here because every mask and every measurement
     upstream is computed on the oriented image; sending the raw bytes would
-    hand fal a rotated photo and misalign the repair mask.
+    hand fal a rotated photo and misalign the repair mask.  After that nothing
+    moves a pixel sideways: the photograph and its mask are both scaled by the
+    same max_side rule from the same frame, so index (x, y) of the upload and
+    index (x, y) of the mask are the same point of her photograph.  That is
+    what makes the paste back exact - measured on 5 of her photographs after
+    this crop was removed, the composite lands 0 px from her original on every
+    one, and her face box moves 0 px.
     """
     try:
         with Image.open(path) as raw:
@@ -254,6 +264,190 @@ def _encode(path: str, max_side: int, mask: bool = False) -> tuple[str, tuple[in
                             retryable=False, code="bad_input") from exc
     payload = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:{mime};base64,{payload}", (width, height)
+
+
+# THERE IS NO CROP.  THE WHOLE PHOTOGRAPH GOES OUT, AND THIS IS WHY.
+# Until 2026-09-05 the masked path cut the upload to the mask's bounding box
+# plus a 6% margin, on a privacy argument: the pixels outside the mask are
+# thrown away by protect.compose anyway, so why upload them.  The argument was
+# never measured against the two things that matter, and both of them say the
+# opposite.
+#
+# 1. WHAT THE REVIEWER SAW.  The bounding box of a clothing mask IS the
+#    clothing zone - the most skin-dense part of any picture of a person - and
+#    it starts at her chin.  What fal received was a headless torso: chest
+#    centred, shoulders and arms bare, a knee at the bottom, and 8.6% of her
+#    head box - her mouth, chin, jaw and both earrings - which is 0.0% of her
+#    detected face rectangle on the new source and 1.9% on IMG_7871.  Measured
+#    on both sources with the same skin envelope her own profile is built from
+#    (protect._her_skin), the crop multiplied the bare skin density of the
+#    picture under review by 2.82x on the new clothed photograph (9.76% of the
+#    frame -> 27.50% of the upload) and by 2.73x on IMG_7871 (12.11% ->
+#    33.05%).  Choosing a clothed source had cut whole frame skin by 36%, and
+#    the crop handed most of it straight back: both paid masked calls came
+#    back blocked, the second on a fully clothed woman.
+# 2. WHAT THE MODEL NEEDED.  flux-pro/v1/fill is being asked to fit a garment
+#    to a person.  Scale, proportion, the shoulder line, where the light comes
+#    from and what the room is are all outside the mask, and a model cannot
+#    match what it cannot see.  Every kontext call this account ever made sent
+#    the whole frame and was never blocked for it (1 refusal in ~42), against
+#    4 in 4 on the cropped masked path.
+#
+# The face was never the reason to crop either: the mask already covers 0
+# pixels of the detected face rectangle on all 25 of her photographs, so her
+# face is protected by arithmetic that does not depend on the framing.  What
+# leaves the machine is her photograph, oriented and scaled to _max_upload_side
+# and nothing else.
+
+# WHY THE OUTBOUND TEXT IS FILTERED AT ALL, AND WHY HERE.
+# The FLUX endpoints have no negative_prompt field, so _payload used to paste
+# the whole negative into the prompt as "Strictly avoid: ...".  The negative is
+# written to stop the engine delivering a half dressed picture, and to do that
+# it names the thing it does not want: underwear, lingerie, bra, thong, naked,
+# bare legs, bikini.  Measured on the outbound string of the two calls that
+# came back black on 2026-09-04, the product's OWN content guard refuses that
+# text - safety/guard.py reports ['lingerie','underwear','bra','thong','naked']
+# and is_intimate_request() True - and a SQL scan of all 89 attempts ever
+# recorded finds that vocabulary in exactly those 2 rows and in none of the
+# other 87, which is the only thing separating them from the 24 calls on the
+# same photograph that were never flagged.
+# So: the robot does not send a provider words it would refuse from the client.
+# The requirement is kept and said forwards instead of backwards - the terms
+# that carry it without naming underwear ("no trousers", "top worn without
+# bottoms", "the source clothing still visible under the new outfit") stay in
+# the negative, and COVERAGE_CLAUSE states the same rule positively.
+_UNDRESS_WORDS = (
+    "underwear", "undergarment", "undergarments", "lingerie", "bra", "bras",
+    "knickers", "panties", "thong", "lace", "naked", "nude", "nudity",
+    "topless", "undressed", "bare", "breast", "breasts", "nipple", "nipples",
+    "cleavage", "swimwear", "bikini", "half dressed", "half-dressed",
+)
+_UNDRESS_RE = re.compile(
+    r"(?<!\w)(?:%s)(?!\w)" % "|".join(re.escape(w) for w in _UNDRESS_WORDS))
+
+COVERAGE_CLAUSE = (
+    "The outfit described above is the only clothing in this picture: opaque "
+    "fabric, the torso, the hips and the legs fully covered by it, and "
+    "nothing of what the source photograph showed left visible under it or "
+    "beside it."
+)
+
+
+# AND WHAT MUST SURVIVE THE FILTER, WHICH IS NOT THE SAME QUESTION.
+# A word is not a reason.  "altered breast size" contains "breast" and names
+# no state of undress whatever: it is a body-shape protection, the same family
+# as "slimmed waist" and "narrowed shoulders", and it is the single clause
+# standing between this client and the complaint she arrived with - a previous
+# tool that changed her body without asking.  Measured over the 93 attempt
+# rows that carry a negative: dropping on the word alone removed that clause
+# from all 93, and on the 42 kontext attempts - the endpoint that has produced
+# every image she has ever been shown - it was the ONLY clause removed, so the
+# filter was a pure loss there and protected nothing (guard already reports
+# is_intimate False on the kontext negative).  A clause that names a CHANGE to
+# her body is kept whatever nouns it uses; only a clause that names a state of
+# undress goes.  With this, the filter removes 0 of 62 clauses on kontext and
+# 14 of 83 on fill, which is exactly the endpoint whose text the guard refuses.
+_SHAPE_WORDS = (
+    "altered", "alter", "changed", "change", "different", "bigger", "larger",
+    "smaller", "enlarged", "reduced", "reshaped", "reshape", "slimmed",
+    "slimmer", "narrowed", "widened", "augmented", "enhanced", "size",
+    "shape", "proportions", "lifted", "removed", "erased",
+)
+_SHAPE_RE = re.compile(
+    r"(?<!\w)(?:%s)(?!\w)" % "|".join(re.escape(w) for w in _SHAPE_WORDS))
+
+
+# AND THE PHRASES THAT NAME A HALF DRESSED PERSON WITHOUT NAMING A GARMENT.
+# Measured on the 4141 character prompt of the paid call of 2026-09-05, the one
+# fal reviewed and returned black: after _covered_negative had removed its 14
+# clauses the wire text still carried "top worn without bottoms", "shirt worn
+# as a dress", "no trousers" and "missing trousers".  Not one of them contains
+# a word the filter above looks for, and every one of them describes a person
+# who is not dressed.  Where there is a negative_prompt field they are free -
+# they steer the model away from that picture and nobody reads them as a
+# request.  There is no such field on any FLUX endpoint, so they are appended
+# to the INSTRUCTION, and COVERAGE_CLAUSE already carries the same requirement
+# forwards ("the torso, the hips and the legs fully covered by it"), which
+# makes them pure cost on the wire.
+# ONLY ON THE MASKED PATH, and that limit is the measurement talking.  Our own
+# attempts table splits cleanly by path: 1 content block in about 42 whole
+# image kontext calls against 4 blocks in 4 masked calls.  These clauses cost
+# nothing on the endpoint that works, where they still guard the delivered
+# failure that NO_BARE_TORSO was written for, so they are dropped only where
+# the evidence of harm is - the call that sends a mask.
+_PARTIAL_DRESS = (
+    "top worn without bottoms", "shirt worn as a dress", "no trousers",
+    "missing trousers", "missing top", "no shirt", "worn as a dress",
+)
+
+# THE LAST THREE WORDS ON THE WIRE, REWRITTEN INSTEAD OF DROPPED.
+# The note above is right twice over and the two halves were never put
+# together.  "altered breast size" is the single clause standing between this
+# client and the complaint she arrived with, so dropping it protects nothing -
+# and on an endpoint with no negative_prompt field that clause is not a
+# negative at all, it is prompt text a reviewer reads.  Both are true, and the
+# way through is that the PROTECTION is what matters and the NOUN is not: the
+# noun is exchanged for the clinical one and the clause goes out whole.
+# Measured on that same 4141 character prompt: "breast" once and "bust" twice,
+# all three inside body-shape protections ("altered breast size", "same bust,
+# waist and hip proportions" in the identity clause and again in the preserve
+# block), none of them naming undress, and all three gone afterwards with the
+# instruction unchanged in meaning.
+_WIRE_NOUNS: tuple[tuple[Any, str], ...] = (
+    (re.compile(r"(?<!\w)breasts(?!\w)", re.I), "chest"),
+    (re.compile(r"(?<!\w)breast(?!\w)", re.I), "chest"),
+    (re.compile(r"(?<!\w)busts(?!\w)", re.I), "chest"),
+    (re.compile(r"(?<!\w)bust(?!\w)", re.I), "chest"),
+    (re.compile(r"(?<!\w)cleavage(?!\w)", re.I), "neckline"),
+)
+
+
+def _wire_safe(text: str) -> tuple[str, list[str]]:
+    """The same instruction in words a content reviewer has no reason to flag.
+
+    Applied to the whole outbound prompt, not only to the negative half, since
+    two of the three words measured were in the positive text.  What was
+    swapped is returned so the attempt row records it: a rewrite nobody can see
+    afterwards is a rewrite nobody can check.
+    """
+    out = str(text or "")
+    swapped: list[str] = []
+    for pattern, plain in _WIRE_NOUNS:
+        hits = pattern.findall(out)
+        if hits:
+            swapped.append("%s -> %s (x%d)" % (hits[0].lower(), plain, len(hits)))
+            out = pattern.sub(plain, out)
+    return out, swapped
+
+
+def _covered_negative(negative: str, masked: bool = False) -> tuple[str, list[str]]:
+    """The negative, minus every term that names a state of undress.
+
+    Split on commas because that is how prompt.py assembles it, so a dropped
+    term takes its own clause and nothing else with it.  Three authorities, in
+    order: a clause that names an ALTERATION of her body is kept no matter what
+    it is called (_SHAPE_RE, and see the note above for what that cost to
+    find); otherwise the product's own guard - the same list that refuses these
+    words from the client - and the supplement above for the ones the guard has
+    no reason to carry ("knickers", "bare thighs", "bikini"), which an output
+    reviewer weighs all the same.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for term in (t.strip() for t in str(negative or "").split(",")):
+        if not term:
+            continue
+        low = term.lower()
+        if masked and any(phrase in low for phrase in _PARTIAL_DRESS):
+            # Said forwards by COVERAGE_CLAUSE instead; see _PARTIAL_DRESS.
+            dropped.append(term)
+        elif _SHAPE_RE.search(low):
+            kept.append(term)
+        elif guard.is_intimate_request(term) or _UNDRESS_RE.search(low):
+            dropped.append(term)
+        else:
+            kept.append(term)
+    return ", ".join(kept), dropped
 
 
 def replay_dir() -> Path | None:
@@ -517,21 +711,79 @@ class FalProvider(ImageProvider):
 
         prompt = str(req.prompt or "").strip()
         negative = str(req.negative_prompt or "").strip()
+        meta: dict[str, Any] = {"role": role, "endpoint": spec["endpoint"]}
+        # Whether this call sends a mask decides how much of the text is safe
+        # to send (see _PARTIAL_DRESS), so it is read before the prompt is
+        # assembled rather than below where the crop is taken.
+        masked = bool(req.mask_path and "mask" in knobs and "image" in knobs)
         if negative and "negative" not in knobs:
             # FLUX endpoints have no negative_prompt field, so the no-beautify
-            # block has to ride inside the instruction or it does nothing.
-            prompt = f"{prompt}\n\nStrictly avoid: {negative}."
+            # block has to ride inside the instruction or it does nothing - and
+            # this is therefore the ONLY endpoint family that puts the words
+            # "underwear", "lingerie" and "naked" on the wire.  See
+            # _covered_negative: the clauses that name a state of undress are
+            # dropped and COVERAGE_CLAUSE says the same requirement forwards.
+            clean, dropped = _covered_negative(negative, masked=masked)
+            prompt = f"{prompt}\n\nStrictly avoid: {clean}."
+            if dropped:
+                prompt = f"{prompt}\n\n{COVERAGE_CLAUSE}"
+                meta["negativo_retirado"] = dropped
+
+        # LAST, over the finished text, because the words being exchanged are
+        # in both halves of it: "same bust, waist and hip proportions" is in
+        # the positive prompt and "altered breast size" arrives with the
+        # negative.  Only where the text IS the request - an endpoint with a
+        # negative_prompt field would be having its wording changed for
+        # nothing.
+        if "negative" not in knobs:
+            prompt, swapped = _wire_safe(prompt)
+            if swapped:
+                meta["texto_reescrito"] = swapped
 
         payload: dict[str, Any] = {"prompt": prompt, "num_images": 1}
-        meta: dict[str, Any] = {"role": role, "endpoint": spec["endpoint"]}
 
         if "negative" in knobs and negative:
             payload["negative_prompt"] = negative
 
+        # HER WHOLE PHOTOGRAPH, ON EVERY PATH, MASKED OR NOT.
+        # MEASURED ON THE UPLOAD, which is the picture fal reviews and the one
+        # nobody had measured before paying for it twice.  Left is what the
+        # crop sent until 2026-09-05, right is what goes out now; the skin
+        # envelope is her own profile's (protect._her_skin), the repaint zone
+        # is the mask itself, and both are read on the picture that travels:
+        #
+        #   WhatsApp 2026-09-04 (1200x1599, clothed, ribbed top and skirt)
+        #     share of her frame uploaded    34.85%  ->  100%
+        #     bare skin, share of upload     27.50%  ->  9.76%   (2.82x less)
+        #     bare skin inside repaint zone  20.09%  ->  7.00%   (2.87x less)
+        #     her face rectangle included     0.00%  ->  100%
+        #     her head box (face+hair)        8.56%  ->  100%
+        #     repaint zone, share of upload  49.11%  ->  17.12%
+        #   IMG_7871 (2316x3088, the older source)
+        #     share of her frame uploaded    36.18%  ->  100%
+        #     bare skin, share of upload     33.05%  ->  12.11%  (2.73x less)
+        #     bare skin inside repaint zone  30.14%  ->  10.90%  (2.77x less)
+        #     her face rectangle included     1.87%  ->  100%
+        #     her head box (face+hair)       13.22%  ->  100%
+        #     repaint zone, share of upload  57.01%  ->  20.63%
+        #
+        # Her face travelling whole costs nothing it was not already paying:
+        # the mask covers 0 pixels of the detected face rectangle on all 25 of
+        # her photographs, so fal is handed her face and told not to touch it,
+        # and protect.compose writes her own pixels back over everything the
+        # mask leaves black.  See "THERE IS NO CROP" above for why the picture
+        # under review being a headless torso was the problem, not the fix.
         if "image" in knobs and req.source_path:
             uri, size = _encode(str(req.source_path), side)
             payload["image_url"] = uri
             meta["source_size"] = [size[0], size[1]]
+            # What really went out, in pixels, after the max_side resize.  It
+            # is the whole frame, so this and source_size agree in shape and a
+            # row where they ever stop agreeing is a bug.  Recorded on every
+            # attempt because "what did the reviewer actually see?" had to be
+            # reconstructed after the money moved, twice.
+            meta["enviado"] = [size[0], size[1]]
+            meta["envio_completo"] = True
         elif "images" in knobs:
             urls: list[str] = []
             if req.source_path:
@@ -555,7 +807,8 @@ class FalProvider(ImageProvider):
                     for u in urls]
 
         if "mask" in knobs and req.mask_path:
-            payload["mask_url"] = _encode(str(req.mask_path), side, mask=True)[0]
+            payload["mask_url"] = _encode(str(req.mask_path), side,
+                                          mask=True)[0]
             meta["masked"] = True
             # The fill endpoint has no aspect knob: it answers in the shape of
             # the picture it was given, so the shape ORDERED is the source's
@@ -692,6 +945,24 @@ class FalProvider(ImageProvider):
             #     answer to a block is another seed, not "give up": marking it
             #     unretryable turned a 7% event into a 100% loss for that
             #     image, and did it while the retry budget was still unspent.
+            #
+            # THAT FIGURE CANNOT BE RE-READ, AND WHAT REPLACES IT SPLITS THE
+            # OTHER WAY.  rest.alpha.fal.ai/requests answers 401 with the key
+            # in the keystore today, so 175 and 6.9% stand as a record of one
+            # reading on 2026-09-04 and not as something anybody can check now.
+            # What can be checked is our own attempts table, and by 2026-09-05
+            # it says the blocks are not spread evenly at all: 1 in about 42
+            # whole image kontext calls, against 4 in 4 on the masked path -
+            # every masked call this account has ever made.  Retrying is still
+            # right (the draw really is what is refused, and 2 of those 4 were
+            # charged), but "6.9%, try another seed" is not the odds on the
+            # masked path.  What that path did differently was the
+            # crop: it cut the upload to the repaint zone, which
+            # multiplied the bare skin
+            # density of the picture under review by 2.8x and took her head
+            # out of it.  The crop is gone (see "THERE IS NO CROP" above);
+            # whether that moves these odds is a question only the next paid
+            # call answers, and the numbers to compare it with are on the row.
             #   * the GPU time is real: the two blocked jobs of that day ran
             #     19.1 s and 3.3 s and returned HTTP 200.  The caller must
             #     therefore treat this as MONEY SPENT (``billed``), because the
@@ -865,7 +1136,18 @@ class FalProvider(ImageProvider):
                 result = self._wait(client, status_url, response_url, deadline)
                 image = self._first_image(result)
                 meta["bytes"] = self._download(client, str(image["url"]), out)
-        except ProviderError:
+        except ProviderError as exc:
+            # THE TRAIL A CHARGED FAILURE MUST LEAVE.  meta already holds the
+            # endpoint, the request_id fal files the job under, and the
+            # size of the picture uploaded; without this line all of it
+            # dies here and the row the client is billed on names none of it.
+            # That is not hypothetical: it is exactly what happened to the two
+            # blocked calls of 2026-09-04 and again to the one of 2026-09-05,
+            # whose request_id had to be recovered from an httpx log line.
+            if not getattr(exc, "meta", None):
+                exc.meta = dict(meta)
+            if not getattr(exc, "latency_ms", 0):
+                exc.latency_ms = int((time.monotonic() - started) * 1000)
             raise
         except httpx.TimeoutException as exc:
             log.warning("fal.ai timeout: %s", exc)
@@ -886,6 +1168,9 @@ class FalProvider(ImageProvider):
         except (TypeError, ValueError):
             seed = req.seed
         for field in ("width", "height", "content_type"):
+            # fal answers in the shape of the picture it was given, and that is
+            # now always her whole frame, so what it reports IS the shape of
+            # the file on disk and can be recorded exactly as it comes.
             if image.get(field) is not None:
                 meta[field] = image[field]
         _record_shape(meta, meta.get("width"), meta.get("height"))

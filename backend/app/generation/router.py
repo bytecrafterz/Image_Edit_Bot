@@ -969,9 +969,16 @@ def plan_shields(plan: dict) -> list[dict]:
     rows = variants if isinstance(variants, list) and variants else [{}]
     source_path = plan_d.get("source_path")
     work_dir = plan_d.get("work_dir")
+    # Her skin, her tolerances and the marks two or more of her photographs
+    # agreed on, carried on the plan by ``prepare_run`` - the estimate has to
+    # draw the SAME mask the run will send, and since 2026-09-05 that mask
+    # keeps her visible marks black wherever the requested garment leaves them
+    # showing.  Without this block the estimate would draw a mask with no
+    # marks in it and the run would draw a different one.
+    profile = plan_d.get("mark_profile")
     return [protect_mod.shield_for(source_path,
                                    (v.get("choices") if isinstance(v, dict)
-                                    else {}) or {}, work_dir)
+                                    else {}) or {}, work_dir, profile=profile)
             for v in rows]
 
 
