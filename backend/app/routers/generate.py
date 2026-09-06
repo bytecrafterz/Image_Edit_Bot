@@ -32,6 +32,11 @@ class AnalyzeBody(BaseModel):
 
 class RunBody(BaseModel):
     run_id: str
+    # SAYING YES TO A COMBINATION THE RECORD HAS NEVER SEEN WORK.  It defaults
+    # to False so that an old client, or a script, cannot spend on one by
+    # forgetting to send the field: the safe answer to a missing flag is the
+    # one that does not charge.
+    confirmar_riesgo: bool = False
 
 
 class FinalBody(BaseModel):
@@ -84,6 +89,16 @@ def run(body: RunBody, user: dict = Depends(security.active_user)) -> dict:
     row = _own_run(body.run_id, user)
     if row.get("status") != "queued":
         raise HTTPException(409, "Ese trabajo ya se ha ejecutado.")
+    # THE ROBOT DOES NOT QUIETLY TAKE THE MONEY.  When the estimate found a
+    # combination that has failed every single time it was tried, it wrote the
+    # sentence with the numbers onto the plan; this is where that sentence
+    # becomes a refusal instead of a paragraph nobody read.  Read off the
+    # STORED plan and not recomputed here on purpose: the record can grow
+    # between the estimate and the button, and the client must be answering the
+    # question she was actually shown.
+    warning = str((row.get("plan") or {}).get("riesgo_confirmar") or "")
+    if warning and not body.confirmar_riesgo:
+        raise HTTPException(409, warning)
     result = jobs.submit(body.run_id,
                          lambda: orchestrator.run_previews(user, body.run_id))
     if not result.get("ok"):

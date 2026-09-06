@@ -466,7 +466,16 @@ function renderStep3(view) {
         text: summary.varied.join(', ') }),
     ]));
   }
+  // WHAT IS LIKELY TO GO WRONG WITH THIS PETICION, AND THE FIX, BEFORE THE
+  // BUTTON.  It goes above the generic warnings because it is the only block
+  // on this screen she can act on with one tap, and below the price because
+  // the price is what she came here to read.
+  const riskCard = renderRiskCard(view, est.riesgo || {});
+  if (riskCard) view.appendChild(riskCard);
+
   for (const warning of (plan.warnings || [])) {
+    // Already said, in full, inside the risk card just above.
+    if (riskCard && riskSaid.has(warning)) continue;
     view.appendChild(note('warn', null, warning));
   }
   for (const line of (summary.notes || [])) {
@@ -489,11 +498,112 @@ function renderStep3(view) {
   ]));
 }
 
+/* The lines the risk card has already said in full, so the generic warning
+   list underneath does not repeat them word for word. */
+const riskSaid = new Set();
+
+/* What the record says will go wrong with THIS request, and the request that
+   avoids it - offered as a button, not as advice.
+
+   The measurement this exists for: replaying every paid call this installation
+   has ever made through the assessment (scripts/replay_risk.py), starting from
+   an empty memory and judging each request only on the calls paid for before
+   it, it warns about 36 of the 43 charges that produced no usable image - 1.52
+   of the 1.81 USD wasted - and puts a warning in front of 4 of the 31 that did
+   work.  A warning that fired on everything would be worth nothing, so that
+   second number is the one this card is tuned against. */
+function renderRiskCard(view, risk) {
+  riskSaid.clear();
+  const motivos = risk.motivos || [];
+  const gratis = risk.gratis || {};
+  const ajuste = risk.ajuste || {};
+  if (!motivos.length && !gratis.posible) return null;
+
+  const children = [];
+
+  // FIRST AND LOUDEST: the path that cannot be rejected and cannot be charged.
+  if (gratis.posible) {
+    riskSaid.add(gratis.texto);
+    children.push(note(gratis.ya ? 'ok' : 'info',
+      gratis.ya ? 'Esto sale gratis' : 'Esto se puede hacer gratis',
+      gratis.texto));
+  }
+
+  if (motivos.length) {
+    children.push(el('div', { class: 'section__title',
+      text: risk.titulo || 'Lo que suele salir mal con esta peticion' }));
+    const list = el('ul', { style: { margin: '0 0 4px', paddingLeft: '18px' } });
+    for (const motivo of motivos.slice(0, 4)) {
+      riskSaid.add(motivo.texto);
+      list.appendChild(el('li', { class: 'tiny',
+        style: { marginBottom: '6px',
+          fontWeight: motivo.nivel === 'confirmar' ? '600' : '400' },
+        text: motivo.texto }));
+    }
+    children.push(list);
+  }
+
+  // AND THE ALTERNATIVE, APPLIED WITH ONE TAP.  It edits the very choices the
+  // estimate was built from and asks for a new estimate, so what she confirms
+  // is a real price for a real request and never a promise made by this file.
+  if (ajuste && ajuste.titulo) {
+    children.push(el('p', { class: 'tiny', style: { margin: '10px 0 6px' },
+      text: ajuste.texto || '' }));
+    const applies = (ajuste.quitar || []).length || Object.keys(ajuste.cambiar || {}).length;
+    if (applies) {
+      children.push(el('button', {
+        class: 'btn', type: 'button',
+        onClick: () => applyAdjustment(view, ajuste),
+      }, ajuste.titulo));
+    } else {
+      // Nothing to press: the fix is a switch in Ajustes, not one of her
+      // choices, and pretending otherwise would be a button that lies.
+      children.push(note('info', ajuste.titulo, ajuste.texto || ''));
+    }
+  }
+
+  return el('div', { class: 'card' }, children);
+}
+
+/* Apply the suggested request and re-price it.  Nothing is spent: this is the
+   same free /analyze the screen already ran. */
+async function applyAdjustment(view, ajuste) {
+  const before = JSON.parse(JSON.stringify(state.choices || {}));
+  for (const group of (ajuste.quitar || [])) delete state.choices[group];
+  for (const [group, value] of Object.entries(ajuste.cambiar || {})) {
+    state.choices[group] = [value];
+  }
+  await goStep3(view);
+  // goStep3 swallows its own failure and renders the reason instead of
+  // throwing, so success is read off the screen it actually produced: a
+  // cheerful toast over an error message would be the one false sentence here.
+  if (state.step === 3 && state.plan) {
+    toast('Peticion ajustada y vuelta a calcular. No se ha gastado nada.', 'ok');
+  } else {
+    state.choices = before;
+  }
+}
+
 /* ------------------------------------------------------------------ step 4 */
 
 async function startRun(view) {
+  // A COMBINATION THAT HAS NEVER ONCE WORKED IS NOT CHARGED SILENTLY.  The
+  // server refuses this run with the same sentence if the flag does not
+  // arrive, so this sheet is the courtesy and the 409 is the guarantee - and
+  // the sentence carries the count, "ha fallado N de N veces", because a
+  // warning without its number is just a mood.
+  const risk = (state.plan.estimate || {}).riesgo || {};
+  let confirmed = false;
+  if (risk.nivel === 'confirmar' && risk.confirmacion) {
+    confirmed = await confirmSheet(risk.confirmacion, {
+      title: 'Esto ya ha fallado antes',
+      confirmLabel: 'Pagar igualmente', danger: true,
+    });
+    if (!confirmed) return;
+  }
   try {
-    await api.post('/api/generate/run', { run_id: state.plan.run_id });
+    await api.post('/api/generate/run',
+      { run_id: state.plan.run_id, confirmar_riesgo: confirmed });
     state.step = 4;
     state.selected = new Set();
     renderStep4(view, null);
@@ -717,6 +827,27 @@ async function showReport() {
     kv('Coste real', report.coste_usd > 0 ? moneyExact(report.coste_usd) : 'gratis'),
     kv('Modelo usado', (report.modelos || []).join(', ') || '-'),
   ]);
+
+  /* WHAT THE ROBOT CHANGED WHEN SOMETHING FAILED, AND WHETHER IT WORKED.
+     The client asked that a rejection be fixed by adjusting the options rather
+     than by paying for the same request again; a fix she is never shown is
+     indistinguishable from a robot that simply spent more of her money.  It
+     goes above the defect list because it is the sentence that explains why
+     there is a second charge for one photograph. */
+  for (const made of (report.ajustes || [])) {
+    body.appendChild(el('div', { class: 'section__title',
+      text: made.funciono ? 'Se cambio una cosa y salio bien'
+        : 'Se cambio una cosa y aun asi no salio',
+      style: { marginTop: '18px' } }));
+    body.appendChild(el('div', {
+      class: 'check-line ' + (made.funciono ? 'check-line--ok' : 'check-line--bad') }, [
+      el('span', { class: 'check-line__mark', text: made.funciono ? '✓' : '✕' }),
+      el('span', {}, [
+        el('div', { text: made.texto }),
+        made.medida ? el('div', { class: 'tiny', text: `Se decidio asi porque ${made.medida}.` }) : null,
+      ]),
+    ]));
+  }
 
   const defects = Object.entries(report.defectos_detectados || {});
   if (defects.length) {

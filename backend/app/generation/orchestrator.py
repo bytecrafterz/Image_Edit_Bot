@@ -46,10 +46,12 @@ from ..identity import verify as verify_mod
 from ..safety import consent as consent_mod
 from ..safety import guard as guard_mod
 from ..services import billing, jobs, storage
+from . import adjust as adjust_mod
 from . import correct as correct_mod
 from . import learning, planner, prompt as prompt_mod, repair as repair_mod
 from . import protect as protect_mod
 from . import retouch as retouch_mod
+from . import risk as risk_mod
 from . import router as router_mod
 
 log = logging.getLogger("photorobot.robot")
@@ -836,6 +838,16 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     plan["source_path"] = original["path"]
     plan["source_size"] = [int(original.get("width") or 0),
                            int(original.get("height") or 0)]
+    # WHO AND WHAT THIS REQUEST IS ABOUT, on the plan itself.  The estimate
+    # only ever receives the plan, and generation/risk.py has to answer two
+    # questions from it: whose record to read (the profile, not the account -
+    # a shared login must not be told that a garment fails on her face because
+    # it failed on somebody else's) and whether this exact request has been
+    # bought before, which is the source photograph plus the options plus the
+    # tier plus the style plus the endpoint.
+    plan["original_id"] = original["id"]
+    plan["profile_id"] = (profile or {}).get("id") or ""
+    plan["style"] = style["key"]
     # WHERE THE MASK LIVES, decided here so that the estimate and the run use
     # the same file.  It is the folder ``run_previews`` will write this run's
     # images into, and the mask that protects her face is drawn into it NOW,
@@ -1023,6 +1035,27 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     aviso_opciones = str(estimate.get("aviso_opciones") or "")
     if aviso_opciones and aviso_opciones not in warnings:
         warnings.append(aviso_opciones)
+
+    # WHAT IS LIKELY TO GO WRONG WITH THIS REQUEST, and what to change instead.
+    # The card the frontend renders carries the whole structure; these lines
+    # are the same finding written for someone who only reads the warnings.
+    # The free-engine sentence goes first when it applies, because it is the
+    # only answer in the product that costs nothing.
+    riesgo = estimate.get("riesgo") or {}
+    gratis = str((riesgo.get("gratis") or {}).get("texto") or "")
+    if gratis and gratis not in warnings:
+        warnings.append(gratis)
+    for motivo in (riesgo.get("motivos") or [])[:3]:
+        line = str((motivo or {}).get("texto") or "")
+        if line and line not in warnings:
+            warnings.append(line)
+    # AND THE PROMISE THAT THE BUTTON WILL KEEP.  A combination the record has
+    # never once seen work is not quietly charged for: the run endpoint refuses
+    # it unless the client says yes with the numbers in front of her, so the
+    # decision is stored on the run and not recomputed from a plan that could
+    # be re-estimated in between.
+    if str(riesgo.get("nivel") or "") == "confirmar":
+        plan["riesgo_confirmar"] = str(riesgo.get("confirmacion") or "")
 
     db.execute(
         "INSERT INTO runs(id,user_id,original_id,profile_id,mode,status,"
@@ -1378,7 +1411,14 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     from ..providers.base import InsufficientBalance, ProviderError
 
     index = int(variant.get("index", 0))
-    choices = variant.get("choices") or {}
+    # A COPY, BECAUSE THIS REQUEST CAN NOW CHANGE.  Until today a variant's
+    # choices were one object for the whole life of the run and the only thing
+    # a retry moved was the strength; now a rejection can cost this variant its
+    # pose or swap its garment, and the plan the other variants are reading
+    # from must not move underneath them.  What is stored with the image is
+    # this copy, so the album records the request that really made the picture
+    # rather than the one that was asked for.
+    choices = dict(variant.get("choices") or {})
     cost = 0.0
     repaired = 0
     attempts = 0
@@ -1417,6 +1457,24 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     # What each check has read on the attempts that failed, so the loop can
     # stop buying answers the engine has already given.
     seen_failures: dict[str, list[float]] = {}
+    # THE COVERAGE CLAUSE AS A VARIABLE AND NOT AS A CONSTANT.  It is the one
+    # property of the request the record can convict on its own - 13 of the 13
+    # prompts that carried it came back as a charged black file and 0 of the 61
+    # without it ever did - so when the provider blocks an image this loop has
+    # to be able to take it out of the NEXT attempt.  It starts as the plan was
+    # priced with it (``plan_features``), which is what keeps the estimate and
+    # the run honest about the same request.
+    coverage_text = bool(features["outfit_coverage_text"])
+    # ONE ADJUSTMENT PER VARIANT, AND THE OUTCOME OF IT.  ``adjusted`` holds the
+    # keys already pulled here so the same lever is never pulled twice and a
+    # second one is never pulled at all: 25 of the 74 paid calls in this
+    # installation were retries and 5 of them were ever accepted, so a variant
+    # that has already had its one considered change is a variant that stops.
+    # ``pending_adj`` is the adjustment whose result the NEXT attempt measures -
+    # written to the learning table whichever way that attempt ends, which is
+    # what allows a bad adjustment to be learned away as well as a good one.
+    adjusted: list[str] = []
+    pending_adj: dict = {}
     # THE FACE, DECIDED ONCE.  ``protect.shield_for`` is the same call the
     # estimate made when this run was priced, on the same photograph and into
     # the same folder, so the mask is normally already on disk and this reads
@@ -1478,13 +1536,21 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                     "repaired": repaired, "aborted": True}
         attempts += 1
         built = prompt_mod.build_prompt({**brief, "choices": choices,
-                                         "outfit_coverage_text":
-                                             features["outfit_coverage_text"]},
+                                         "outfit_coverage_text": coverage_text},
                                         profile, style, choices)
         negative = built["negative_prompt"]
         if extra_negatives:
             negative = negative + ", " + ", ".join(sorted(set(extra_negatives)))
         merged = {**built.get("params", {}), **params}
+        if pending_adj:
+            # WHAT WAS CHANGED AND WHY, ON THE ROW OF THE ATTEMPT IT PAID FOR.
+            # params_json already travels to the ficha, so the client can read
+            # the reason beside the image instead of only in the run's notes.
+            merged["ajuste"] = {
+                "por": str(pending_adj.get("mostrado") or ""),
+                "cambio": str(pending_adj.get("texto") or ""),
+                "medida": str(pending_adj.get("motivo") or ""),
+                "clave": str(pending_adj.get("clave") or "")}
 
         # Build the image BEFORE choosing who makes it and what it costs.  A
         # provider reads the request to pick its model - source, references,
@@ -1721,6 +1787,26 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                                 built["prompt"], negative, merged,
                                 {}, [], "error", reason_row, charged,
                                 int(getattr(exc, "latency_ms", 0) or 0))
+                # A BLOCK IS THE CHEAPEST FAILURE TO PREDICT AND THE ONLY ONE
+                # THE OLD TABLE COULD NOT SEE.  It has no verdict at all, so
+                # router.option_history skipped it and 19% of every paid call
+                # in this installation - 0.65 USD - was invisible to the
+                # warning the client reads.  Here it is a first class outcome,
+                # and ``risk.kinds_of`` is careful to remember only the kind
+                # that is a property of the request: the content filter, which
+                # blocked 13 of 13 and every retry of them, and never the
+                # transient non delivery, whose one retry succeeded.
+                _learn_risk(user, original, profile, choices,
+                            {**features, "outfit_coverage_text": coverage_text},
+                            quality, str((style or {}).get("key") or ""),
+                            str(em.get("endpoint") or model), "error",
+                            reason_row, {}, charged)
+                # AND HOW THE LAST ADJUSTMENT TURNED OUT.  A change this code
+                # chose is only worth making again if it works, and a block is
+                # the loudest evidence there is that it did not.
+                pending_adj = _learn_adjustment(user, profile, pending_adj,
+                                                "error", reason_row, {},
+                                                charged)
                 # AND A BOUND ON THE RE-ROLL.  One block is a draw the engine
                 # lost; two in a row on the same photograph and the same words
                 # is the request itself, and paying a third time to be told so
@@ -1751,6 +1837,32 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                                    "antes de pagar otra." % (index + 1))
                         return {"accepted": False, "cost": cost,
                                 "attempts": attempts, "repaired": repaired}
+                    # ONE CONSIDERED CHANGE, NOT ANOTHER SEED.  The record
+                    # separates the two blocks this product has ever seen and
+                    # the difference is the request, not the luck: 13 of the 13
+                    # prompts carrying the coverage clause were returned as a
+                    # charged black file, every one of the 5 retries that
+                    # re-sent that text was blocked again (0.23 USD), and the
+                    # single block of a prompt WITHOUT it was retried byte
+                    # identical and succeeded.  So when the clause is on, the
+                    # next attempt goes out without it; when it is already off
+                    # there is nothing here the record supports changing, and
+                    # the loop keeps the behaviour that worked - one more try,
+                    # and stop at two.
+                    if attempt_no <= max_retries and not adjusted:
+                        ajuste = _adjust_next(
+                            user, profile, original, choices, coverage_text,
+                            features, quality,
+                            str((style or {}).get("key") or ""),
+                            str(em.get("endpoint") or model),
+                            "bloqueo", "bloqueo", adjusted)
+                        if ajuste.get("ok"):
+                            choices, coverage_text = adjust_mod.apply_to(
+                                choices, coverage_text, ajuste)
+                            adjusted.append(str(ajuste["clave"]))
+                            pending_adj = ajuste
+                            _plan_note(run_id,
+                                       adjust_mod.sentence(index + 1, ajuste))
                 if not exc.retryable:
                     return {"accepted": False, "cost": cost,
                             "attempts": attempts, "repaired": repaired}
@@ -2063,6 +2175,21 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                             negative, merged, verdict,
                             verdict.get("defects") or [], "accepted", "",
                             real_cost, result.latency_ms, image_id)
+            # An image that WORKED is evidence too, and it is the denominator:
+            # without it every rate in the risk table would read 100% and the
+            # warning would fire on everything, which is the same as not
+            # warning at all.
+            _learn_risk(user, original, profile, choices,
+                        {**features, "outfit_coverage_text": coverage_text},
+                        quality, str((style or {}).get("key") or ""),
+                        result.model or model, "accepted", "", verdict,
+                        real_cost)
+            # AND THE ADJUSTMENT THAT GOT HERE, IF THERE WAS ONE.  This is the
+            # row that makes the loop better with use: the next run reads it
+            # before recommending the same change again, and an image that was
+            # rescued is the only proof that the change was worth 0.04 USD.
+            pending_adj = _learn_adjustment(user, profile, pending_adj,
+                                            "accepted", "", verdict, real_cost)
             return {"accepted": True, "cost": cost, "attempts": attempts,
                     "repaired": repaired, "corrected": bool(correction_notes)}
 
@@ -2079,6 +2206,17 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                         result.model or model, "generate", built["prompt"],
                         negative, merged, verdict, verdict.get("defects") or [],
                         "rejected", reason, real_cost, result.latency_ms)
+        # WHICH OPTION DID THIS, remembered before the next attempt is even
+        # considered.  The verdict names the check that failed and the plan
+        # names the values that were asked for; together they are what lets the
+        # next estimate say "esto ya fallo" instead of charging for it again.
+        _learn_risk(user, original, profile, choices,
+                    {**features, "outfit_coverage_text": coverage_text},
+                    quality, str((style or {}).get("key") or ""),
+                    result.model or model, "rejected", reason, verdict,
+                    real_cost)
+        pending_adj = _learn_adjustment(user, profile, pending_adj, "rejected",
+                                        reason, verdict, real_cost)
         # Read as she reads it: the file name meant nothing to her, and the
         # sentence has to say what happened to her money and where the picture
         # went - not into her album, because it did not pass.
@@ -2099,9 +2237,51 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                     "repaired": repaired, "stopped_repeating": True,
                     "reason": stop}
 
-        # Adapt before trying again: hold closer to the real photograph and
-        # name the observed failure in the negative prompt.
-        params["strength"] = max(0.25, float(merged.get("strength", 0.5)) - 0.08)
+        # DIAGNOSE, THEN ADJUST.  What used to be here was
+        # ``params["strength"] -= 0.08`` and a new seed: the same request,
+        # bought again with the dials moved.  Over 25 paid retries and 1.03 USD
+        # that rescued 5 images, and 0 of the 5 identity retries - run_16e276b5
+        # walked 0.52 -> 0.44 -> 0.36 and read 0.3507, 0.3753, 0.3643 against a
+        # line at 0.45, a spread smaller than the check's own noise.  So the
+        # verdict is read for WHICH option is implicated, one option is changed,
+        # and if nothing in the record is expected to help then nothing is
+        # bought at all - a refusal here is 0.04 USD saved, not an opportunity
+        # missed.
+        if attempt_no <= max_retries:
+            fallo, shown = adjust_mod.diagnose("rejected", reason, verdict,
+                                               verdict.get("defects"))
+            if adjusted:
+                # THE SECOND RETRY IS WHERE THE MONEY GOES.  This variant has
+                # already had its one considered change and the engine has
+                # answered it; buying a third request is how three attempts of
+                # one variant came to cost 0.12 USD for nothing.
+                _plan_note(run_id, adjust_mod.stop_sentence(
+                    index + 1, shown,
+                    "Ya se ajusto la peticion una vez en esta imagen y sigue "
+                    "sin salir, asi que no se paga un tercer intento."))
+                return {"accepted": False, "cost": cost, "attempts": attempts,
+                        "repaired": repaired, "stopped_repeating": True,
+                        "reason": "ajuste agotado"}
+            ajuste = _adjust_next(user, profile, original, choices,
+                                  coverage_text, features, quality,
+                                  str((style or {}).get("key") or ""),
+                                  result.model or model, fallo, shown, adjusted)
+            if not ajuste.get("ok"):
+                _plan_note(run_id, adjust_mod.stop_sentence(
+                    index + 1, shown, str(ajuste.get("parar") or "")))
+                return {"accepted": False, "cost": cost, "attempts": attempts,
+                        "repaired": repaired, "stopped_repeating": True,
+                        "reason": str(ajuste.get("parar") or "")}
+            choices, coverage_text = adjust_mod.apply_to(choices,
+                                                         coverage_text, ajuste)
+            adjusted.append(str(ajuste["clave"]))
+            pending_adj = ajuste
+            _plan_note(run_id, adjust_mod.sentence(index + 1, ajuste))
+
+        # The defects still travel in the negative prompt, because that costs
+        # nothing and the engine reads it; the seed moves because the request
+        # has changed and there is no reason to ask for the same draw.  The
+        # strength does NOT move: see above.
         for defect in (verdict.get("defects") or []):
             extra_negatives.append(str(defect.get("type", "")).replace("_", " "))
         seed += 977
@@ -2244,6 +2424,123 @@ def _store_image(user: dict, run_id: str, original: dict, profile: dict,
          db.dumps(meta), db.now()),
     )
     return image_id
+
+
+def _learn_risk(user: dict, original: dict, profile: dict, choices: dict,
+                features: dict, quality: str, style: str, endpoint: str,
+                status: str, reason: str, verdict: dict, cost: float) -> None:
+    """Remember what this paid attempt taught, where the next estimate reads it.
+
+    THIS IS THE THIRD HALF OF THE CLIENT'S INSTRUCTION - "que el error no
+    vuelva a ocurrir" - and it is the half that was missing.  The only memory
+    of a failure used to be ``_repeat_failure``'s local dictionary, alive for
+    the length of one variant of one run, so the same request could be bought
+    again by the next run and by the next person: 26 paid calls and 1.07 USD in
+    this installation re-sent a fingerprint that had already failed, and 21 of
+    them failed again.  Two calls, one per pool - hers and the robot's - and
+    they are the reason the warning on the estimate screen gets better every
+    time something goes wrong instead of staying frozen in a comment.
+
+    Only PAID attempts: a free composite and a call that never reached the
+    provider cost nothing and prove nothing about what the money buys.  Never
+    allowed to break a run - the money is already spent by the time this is
+    reached, and a bookkeeping error must not lose the image it bought.
+    """
+    if float(cost or 0.0) <= 0.0:
+        return
+    try:
+        risk_mod.observe(
+            user_id=str(user.get("id") or ""),
+            profile_id=(profile or {}).get("id") or "",
+            choices={str(g): str(v) for g, v in (choices or {}).items()
+                     if isinstance(v, str) and v},
+            feats=risk_mod.features_of({"envio": features or {}}),
+            fp=risk_mod.fingerprint((original or {}).get("path"), choices,
+                                    quality, style, endpoint),
+            status=status, reason=reason, verdict=verdict or {})
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("No se pudo aprender del intento: %s", exc)
+
+
+def _learn_adjustment(user: dict, profile: dict, pending: dict, status: str,
+                      reason: str, verdict: dict, cost: float) -> dict:
+    """Write down how the adjustment this robot chose actually turned out.
+
+    THE HALF THAT LETS A BAD IDEA BE LEARNED AWAY.  Without this row the
+    counters would only ever record what happened to the OPTION the robot moved
+    to, which is a different question: 'vaqueros_camiseta' being accepted 16
+    times out of 23 says nothing about whether swapping a dress for it rescues
+    a run that has already lost her face once.  With it, ``adjust.decide``
+    refuses to make the same recommendation a third time after two failures,
+    and prefers the ones that have worked.
+
+    Only when the attempt was PAID for: an adjusted attempt that cost nothing
+    proves nothing about what the money buys, and until it is paid the
+    adjustment is still pending, so it is handed back unchanged rather than
+    quietly forgotten.
+    """
+    if not pending or float(cost or 0.0) <= 0.0:
+        return pending or {}
+    try:
+        risk_mod.note_adjustment(
+            user_id=str((user or {}).get("id") or ""),
+            profile_id=(profile or {}).get("id") or "",
+            key=str(pending.get("clave") or ""),
+            status=status, reason=reason, verdict=verdict or {})
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("No se pudo aprender del ajuste: %s", exc)
+    return {}
+
+
+def _adjust_next(user: dict, profile: dict, original: dict, choices: dict,
+                 coverage_text: bool, features: dict, quality: str,
+                 style_key: str, endpoint: str, kind: str, shown: str,
+                 adjusted: list) -> dict:
+    """The one change to make before buying another image, or the reason not to.
+
+    Three questions, in the order that spends the least money:
+
+      1. does the record convict an option of THIS failure - the same
+         ``risk._findings`` contrast the estimate screen shows her, so the
+         warning she read and the change the robot makes cannot disagree;
+      2. is the adjusted request one that has already been bought and rejected?
+         26 paid calls and 1.07 USD in this installation re-sent a fingerprint
+         that had already failed, and 21 of them failed again.  A change that
+         lands on a known failure is not a change;
+      3. has this exact adjustment been made before and never once worked?
+         That question lives in ``adjust._adjustment_ok``.
+
+    The pool is read HERE and not cached for the run on purpose: variants run
+    side by side, so an image that has just failed on a garment teaches the
+    variant that is about to retry with it, inside the same run.
+    """
+    pool = risk_mod.pool_for(str((user or {}).get("id") or ""),
+                             (profile or {}).get("id") or "")
+    feats = risk_mod.features_of(
+        {"envio": {**(features or {}), "outfit_coverage_text": coverage_text}})
+    plan = adjust_mod.decide(kind, shown, choices, feats, pool, adjusted)
+    if not plan.get("ok"):
+        return plan
+    new_choices, _cover = adjust_mod.apply_to(choices, coverage_text, plan)
+    # Only when her CHOICES really moved.  A fingerprint is source photograph +
+    # options + tier + style + endpoint, so switching off a phrase in the text
+    # leaves it identical to the request that just failed - asking it would
+    # refuse the one adjustment with the cleanest support in the whole record
+    # (13 of 13 against 0 of 61) on the grounds that the request it is fixing
+    # failed.  For that case the feature counters are the evidence.
+    if new_choices != choices:
+        seen = risk_mod.failed_before(
+            pool, risk_mod.fingerprint((original or {}).get("path"),
+                                       new_choices, quality, style_key,
+                                       endpoint))
+        if seen:
+            return dict(plan, ok=False,
+                        parar=("El cambio que tocaria hacer (%s) ya se pago "
+                               "%s con esta misma foto y tampoco salio, asi "
+                               "que no se repite."
+                               % (plan.get("texto") or "",
+                                  "una vez" if seen == 1 else "%d veces" % seen)))
+    return plan
 
 
 def _record_attempt(run_id: str, user_id: str, index: int, attempt_no: int,
@@ -2415,6 +2712,28 @@ def build_report(run_id: str) -> dict:
     conservadas = [(a.get("params") or {}).get("archivo_conservado")
                    for a in attempts]
     conservadas = [c for c in conservadas if c]
+    # WHAT THE ROBOT CHANGED BY ITSELF, AND WHETHER IT WORKED.  The client's
+    # instruction was that a rejection should be fixed by adjusting the options
+    # rather than by paying for the same request again, and a fix she is never
+    # told about is indistinguishable from a robot that simply spent more.  It
+    # rides on params_json, written onto the attempt the change actually paid
+    # for, so the sentence and the charge are the same row.
+    ajustes = []
+    for attempt in attempts:
+        made = (attempt.get("params") or {}).get("ajuste") or {}
+        if not isinstance(made, dict) or not made.get("cambio"):
+            continue
+        ajustes.append({
+            "variante": attempt["variant_index"],
+            "intento": attempt["attempt_no"],
+            "texto": ("La imagen %d %s, asi que %s."
+                      % (int(attempt["variant_index"]) + 1,
+                         adjust_mod.OPENING.get(str(made.get("por") or ""),
+                                                "no se pudo aceptar"),
+                         made.get("cambio"))),
+            "medida": str(made.get("medida") or ""),
+            "funciono": str(attempt.get("status") or "") == "accepted",
+        })
 
     return {
         "ok": True,
@@ -2436,6 +2755,7 @@ def build_report(run_id: str) -> dict:
         "textura_restaurada": len(restored),
         "textura_ganancia": ganancia,
         "correcciones": corregidas,
+        "ajustes": ajustes,
         "archivos_conservados": conservadas,
         "defectos_detectados": detected,
         "ya_en_tu_foto": own_seen,

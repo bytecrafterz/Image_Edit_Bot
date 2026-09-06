@@ -18,6 +18,7 @@ from ..catalog import options as options_mod
 from ..config import SETTINGS
 from ..providers import registry as registry_mod
 from ..providers.base import GenRequest, ImageProvider, ProviderError
+from . import risk as risk_mod
 
 # Planning factor: about one image in three needs a repair pass or a retry.
 # Documented here so the number on the estimate screen can be explained.
@@ -1079,6 +1080,20 @@ def option_history(user_id: str = "") -> dict[tuple[str, str], tuple[int, int]]:
     return {k: (v[0], v[1]) for k, v in counts.items()}
 
 
+def _really_accepted(pool: dict, key: tuple[str, str]) -> bool:
+    """Did most of the paid images made with this option actually survive?
+
+    Not "did they keep her face": the whole verdict, which is what decides
+    whether an image reaches her album.  Unknown counts as not safe - silence
+    is cheaper than a recommendation nobody measured.
+    """
+    cell = pool.get("opt:%s:%s" % key)
+    if not isinstance(cell, dict):
+        return False
+    total = _f(cell.get("n"))
+    return total >= SAFE_MIN_N and _f(cell.get("ok")) >= SAFE_MIN_RATE * total
+
+
 def _history_note(plan: dict, user_id: str = "") -> str:
     """What the images already paid for say about these very options.
 
@@ -1113,9 +1128,21 @@ def _history_note(plan: dict, user_id: str = "") -> str:
 
     parts = ["%s (%d de %d aprobadas)" % (label(*key), ok, total)
              for key, (ok, total) in risky]
+    # AND NOTHING IS CALLED SAFE ON ONE CHECK ALONE.  This list used to be
+    # computed from the identity tally only, which is the same number the
+    # warning above is computed from - and identity is not what most rejections
+    # are about.  Measured on this installation: ('clothing','deportiva_elegante')
+    # passes identity 7 times out of 7 and would print here as "si ha funcionado
+    # casi siempre", while 6 of those same 7 paid images were REJECTED for
+    # anatomy and never reached her album.  A sentence that recommends the
+    # images the client threw away is worse than no sentence, so an option is
+    # only named here when the risk pool - which counts every failure kind and
+    # every provider block - also says most of its images were ACCEPTED.
+    pool = risk_mod.shared_pool()
     safe = [label(*key) for key in sorted(chosen)
             if key in history and history[key][1] >= SAFE_MIN_N
-            and history[key][0] >= SAFE_MIN_RATE * history[key][1]]
+            and history[key][0] >= SAFE_MIN_RATE * history[key][1]
+            and _really_accepted(pool, key)]
     note = ("Aviso: de las imagenes que ya has pagado, estas opciones son las "
             "que mas veces han salido con otra cara: %s. Cambiarlas es la "
             "forma mas barata de no pagar por imagenes que no eres tu."
@@ -1252,6 +1279,15 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
                 "rostro": {"protegidas": 0, "de": n_images, "referencias": 0,
                            "detalle": []},
                 "aviso_opciones": _history_note(plan_d, user_id),
+                # No engine could be chosen, so there is no endpoint to name -
+                # but the options are the same options and the record about
+                # them is the same record, and this is still the screen where
+                # changing one is free.
+                "riesgo": risk_mod.assess(
+                    plan_d, user_id=user_id,
+                    profile_id=plan_d.get("profile_id"), endpoint="",
+                    quality=qual, style=plan_d.get("style"),
+                    free_engine=True),
                 "intentos_maximos": 0, "total_max_usd": 0.0}
 
     # THE SAME FALLBACK THE RUN MAKES, made here so the quote is never of a
@@ -1401,6 +1437,20 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
         # And what her own paid history says about the options she just picked,
         # while picking a different one is still free.
         "aviso_opciones": _history_note(plan_d, user_id),
+        # THE SAME QUESTION ASKED PROPERLY, and the one thing the sentence
+        # above cannot do: name the failure kind, count the provider blocks,
+        # recognise a request that has already been bought and failed, and hand
+        # back a concrete adjusted request the client can accept with one tap.
+        # It is computed from the endpoint that will really run, because the
+        # fingerprint of a request includes the endpoint - the same options on
+        # two different endpoints are two different requests, and pretending
+        # otherwise is how the first kontext call inherited the record of
+        # twenty kontext/multi ones.
+        "riesgo": risk_mod.assess(plan_d, user_id=user_id,
+                                  profile_id=plan_d.get("profile_id"),
+                                  endpoint=endpoint, quality=qual,
+                                  style=plan_d.get("style"),
+                                  free_engine=_is_local(provider)),
         "intentos_maximos": attempts,
         "total_max_usd": total_max,
         "total_usd": total,
