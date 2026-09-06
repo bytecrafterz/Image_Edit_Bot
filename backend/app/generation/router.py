@@ -976,9 +976,16 @@ def plan_shields(plan: dict) -> list[dict]:
     # showing.  Without this block the estimate would draw a mask with no
     # marks in it and the run would draw a different one.
     profile = plan_d.get("mark_profile")
+    # AND WHETHER THE MASKED PATH IS ON AT ALL.  Read from the plan, which
+    # ``prepare_run`` stamped from her Ajustes, so the estimate and the run
+    # answer from one value: a plan priced with the mask and run without it is
+    # the drift this function was written to end, and the switch would
+    # reintroduce it if each side read the setting on its own clock.
+    allow = plan_features(plan_d)["masked_inpaint"]
     return [protect_mod.shield_for(source_path,
                                    (v.get("choices") if isinstance(v, dict)
-                                    else {}) or {}, work_dir, profile=profile)
+                                    else {}) or {}, work_dir, profile=profile,
+                                   allow_masked=allow)
             for v in rows]
 
 
@@ -1211,6 +1218,14 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
     shields = plan_shields(plan_d)
     requests = plan_requests(plan_d, qual, shields)
     references = plan_references(plan_d)
+    # HOW MANY DIFFERENT PHOTOGRAPHS OF HER, not how many uploads.  With
+    # ``reference_photos`` at 0 the reference list is the source photograph
+    # itself - two identical image_urls, which is what the 24 oldest accepted
+    # calls sent and what keeps the price at 0.040 USD - and telling her
+    # "viajan 2 fotos tuyas" for one file sent twice would be counting bytes
+    # and calling them evidence.
+    companions = [r for r in references
+                  if r != _text(plan_d.get("source_path"))]
     n_images = len(requests)
     budget = plan_d.get("budget_usd")
     budget_usd = _f(budget, float("inf")) if budget is not None else float("inf")
@@ -1367,14 +1382,12 @@ def estimate_run_cost(plan: dict, quality: str, limits: dict | None = None,
         # this look like her?  It is the same decision the run acts on, said in
         # her language, with the endpoint and the price it implies.
         "aviso_rostro": _face_note(shields, endpoint, per_image,
-                                   photos_sent(provider, requests[0],
-                                               references)),
+                                   1 + len(companions)),
         "rostro": {"protegidas": masked_n, "de": n_images,
                    "fotos_enviadas": photos_sent(provider, requests[0],
                                                  references),
                    "referencias": (0 if masked_n == n_images
-                                   else min(REFERENCE_COUNT,
-                                            1 + len(references))),
+                                   else min(REFERENCE_COUNT, len(companions))),
                    "detalle": [{"protegido": bool(sh.get("masked")),
                                 "zona": round(float(sh.get("cover") or 0.0), 4),
                                 "estado": sh.get("estado") or "",
@@ -1462,6 +1475,76 @@ def user_limits(user_id: str) -> dict:
     return {"max_retries": _pick("max_retries",
                                  SETTINGS.limits.max_retries_per_variant),
             "max_repair_rounds": rounds}
+
+
+def user_features(user_id: str) -> dict:
+    """WHAT LEAVES THE MACHINE WITH EACH CALL, as this user set it in Ajustes.
+
+    Three switches, read in one place for the same reason ``user_limits`` above
+    is read in one place: the estimate, the run and the balance page have to
+    agree about the call before it is made, and three readers of one setting is
+    how they came to disagree about the price of the same photograph.
+
+    The defaults are ``config.Limits`` and they are the configuration with 26
+    accepted fal calls behind it - no mask, no companion photographs, and none
+    of the coverage wording that every one of the 15 blocked calls carried.
+    The stored value always wins over the default: this is a setting, not a
+    lock, and the counts that chose the default are written beside it in
+    config.py so that whoever turns one on knows what they are buying.
+    """
+    rows = db.q("SELECT key, value_json FROM user_settings WHERE user_id=? "
+                "AND key IN ('masked_inpaint','reference_photos',"
+                "'outfit_coverage_text')", (user_id,))
+    stored = {r["key"]: db.loads(r["value_json"], None) for r in (rows or [])}
+
+    def _flag(key: str, default: bool) -> bool:
+        raw = stored.get(key)
+        return bool(default if raw is None else raw)
+
+    raw = stored.get("reference_photos")
+    try:
+        count = int(SETTINGS.limits.reference_photos if raw is None else raw)
+    except (TypeError, ValueError):
+        count = int(SETTINGS.limits.reference_photos)
+    # Clamped to what the endpoint really carries beside the source, because a
+    # number the payload slices off would be priced and never sent.
+    count = max(0, min(count, int(SETTINGS.limits.max_reference_photos)))
+    return {"masked_inpaint": _flag("masked_inpaint",
+                                    SETTINGS.limits.masked_inpaint),
+            "reference_photos": count,
+            "outfit_coverage_text": _flag(
+                "outfit_coverage_text", SETTINGS.limits.outfit_coverage_text)}
+
+
+def plan_features(plan: Any) -> dict:
+    """The same three, as they were STAMPED ON THIS PLAN when it was priced.
+
+    A run is quoted and then started by a second HTTP call, and Ajustes can be
+    edited in between; the money was promised against the plan, so the plan is
+    what the run obeys.  A plan written before these switches existed carries
+    none of them and falls back to the shipped defaults, which is the
+    configuration the accepted calls used - the safe side of that fallback.
+    """
+    plan_d = plan if isinstance(plan, dict) else {}
+    stamped = plan_d.get("envio")
+    stamped = stamped if isinstance(stamped, dict) else {}
+    count = stamped.get("reference_photos")
+    try:
+        count = int(SETTINGS.limits.reference_photos if count is None
+                    else count)
+    except (TypeError, ValueError):
+        count = int(SETTINGS.limits.reference_photos)
+    return {
+        "masked_inpaint": bool(
+            SETTINGS.limits.masked_inpaint if stamped.get("masked_inpaint")
+            is None else stamped.get("masked_inpaint")),
+        "reference_photos": max(0, min(count,
+                                       int(SETTINGS.limits.max_reference_photos))),
+        "outfit_coverage_text": bool(
+            SETTINGS.limits.outfit_coverage_text
+            if stamped.get("outfit_coverage_text") is None
+            else stamped.get("outfit_coverage_text")),
+    }
 
 
 def price_per_image(quality: str, prefer: str | None = None, *,

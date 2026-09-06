@@ -968,12 +968,23 @@ class FalProvider(ImageProvider):
             #     therefore treat this as MONEY SPENT (``billed``), because the
             #     alternative - handing the reservation back - is a ledger that
             #     shows 0.0000 USD for an image fal charges 0.050 USD for.
+            #
+            # WHAT THE MESSAGE MAY NOT CLAIM.  It used to say fal "ha revisado
+            # la imagen que acababa de dibujar", which is a story about a
+            # picture being judged, and the clock does not support it: the 41
+            # calls that produced a file all took at least 12,891 ms, while 11
+            # of the 12 blocked ones came back in 4,358-12,608 ms (median
+            # 7,827).  Nothing this account has ever been charged for was drawn
+            # in 4.4 s.  So the sentence says only what is certain - no image
+            # arrived, it is charged anyway, and nobody saw it - and it does
+            # not put a verdict on her photograph that nobody pronounced.
             raise ProviderError(
-                "fal.ai ha revisado la imagen que acababa de dibujar y no la "
-                "ha dado por buena, asi que ha devuelto un archivo en negro. "
-                "El dibujo si se hizo, de modo que esta imagen se cobra "
-                "aunque no puedas verla. Se vuelve a intentar con otra "
-                "semilla, que es lo unico que cambia el resultado.",
+                "fal.ai no ha entregado esta imagen: en lugar de la foto ha "
+                "devuelto un archivo en negro, y la cobra igual. Nadie la ha "
+                "visto: ni tu ni el robot, que solo recibe el archivo negro. "
+                "No es un fallo de tu foto ni una nota que te hayan puesto. "
+                "Se prueba una vez mas con otra semilla; si vuelve a pasar, no "
+                "se paga un tercer intento.",
                 retryable=True, code="content_filter", billed=True)
         images = result.get("images")
         candidate: Any = None
@@ -1036,11 +1047,12 @@ class FalProvider(ImageProvider):
                         "la bloqueo fal el 2026-09-04 (%s).",
                         REPLAY_BLOCK_ENV, endpoint)
             raise ProviderError(
-                "fal.ai ha revisado la imagen que acababa de dibujar y no la "
-                "ha dado por buena, asi que ha devuelto un archivo en negro. "
-                "El dibujo si se hizo, de modo que esta imagen se cobra "
-                "aunque no puedas verla. Se vuelve a intentar con otra "
-                "semilla, que es lo unico que cambia el resultado.",
+                "fal.ai no ha entregado esta imagen: en lugar de la foto ha "
+                "devuelto un archivo en negro, y la cobra igual. Nadie la ha "
+                "visto: ni tu ni el robot, que solo recibe el archivo negro. "
+                "No es un fallo de tu foto ni una nota que te hayan puesto. "
+                "Se prueba una vez mas con otra semilla; si vuelve a pasar, no "
+                "se paga un tercer intento.",
                 retryable=True, code="content_filter", billed=True)
         chosen = _replay_pick(_replay_files(folder), req, out)
         try:

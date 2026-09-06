@@ -108,6 +108,18 @@ def status(run_id: str, user: dict = Depends(security.active_user)) -> dict:
         "WHERE run_id=? AND status='rejected' AND reject_reason<>'' "
         "GROUP BY reason ORDER BY count DESC", (run_id,)))
 
+    # THE CALLS THAT NEVER CAME BACK AS A PICTURE, counted apart from the
+    # robot's own verdicts.  ``discard_reasons`` above only reads 'rejected'
+    # rows - images the gate looked at and refused - and the screen described
+    # both cases with the same sentence, so a provider that charged for a black
+    # file was reported to the client as "no ha salido ninguna buena", which
+    # blames her photographs for something no robot ever saw.  The prefix is
+    # written by the orchestrator when fal answers content_filter.
+    blocked = db.q1(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS usd FROM attempts "
+        "WHERE run_id=? AND status='error' "
+        "AND reject_reason LIKE 'bloqueada por el proveedor%'", (run_id,))
+
     payload = {
         "run_id": run_id,
         "status": live.get("status") or row.get("status"),
@@ -121,6 +133,9 @@ def status(run_id: str, user: dict = Depends(security.active_user)) -> dict:
         "spent_usd": round(float(counters["cost"] or 0.0), 5) if counters else 0.0,
         "est_cost_usd": round(float(row.get("est_cost_usd") or 0.0), 5),
         "discard_reasons": reasons,
+        "bloqueadas": {"n": int(blocked["n"] or 0) if blocked else 0,
+                       "usd": round(float(blocked["usd"] or 0.0), 5)
+                       if blocked else 0.0},
     }
     if payload["status"] in ("done", "failed", "cancelled", "stopped_no_balance"):
         payload["report"] = orchestrator.build_report(run_id)

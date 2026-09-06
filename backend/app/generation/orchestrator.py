@@ -865,16 +865,40 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     # price on the screen is the price of the call that will really be sent:
     # with references fal bills identity_multi at 0.040 USD instead of
     # identity_max at 0.080 USD on the top tiers.
-    plan["reference_paths"] = []
-    if profile:
+    # HOW MANY OF THEM, DECIDED BY HER AJUSTES AND STAMPED ON THE PLAN.  The
+    # default is 0 companions, which is not "no references": the photograph
+    # being edited travels twice, as the image to edit and as its own identity
+    # reference, which is exactly what 24 of the 26 accepted fal calls sent
+    # (two image_urls with the same digest) and what keeps the request on
+    # kontext/multi at 0.040 USD instead of kontext/max at 0.080 USD on the
+    # high and max tiers.  The stamp is read back by ``router.plan_features``,
+    # so the estimate, the run and the report answer from ONE value even if
+    # Ajustes is edited between the quote and the button.
+    features = router_mod.user_features(user["id"])
+    plan["envio"] = {"masked_inpaint": bool(features["masked_inpaint"]),
+                     "reference_photos": int(features["reference_photos"]),
+                     "outfit_coverage_text":
+                         bool(features["outfit_coverage_text"])}
+    wanted = int(features["reference_photos"])
+    plan["reference_paths"] = [original["path"]]
+    plan["reference_detail"] = {}
+    # Empty rather than undefined: with the companions switched off there is no
+    # chooser and therefore no sentence explaining a choice nobody made, and
+    # the note below has to read something.
+    picked: dict = {}
+    if profile and wanted > 0:
         try:
             picked = gallery_mod.choose_references(
-                profile, REFERENCE_COUNT, must_include=original["path"])
+                profile, wanted + 1, must_include=original["path"])
         except Exception as exc:                          # noqa: BLE001
             log.warning("Eleccion de referencias fallida: %s", exc)
             picked = {"paths": [], "reason": ""}
-        plan["reference_paths"] = [p for p in (picked.get("paths") or [])
-                                   if p and p != original["path"]]
+        others = [p for p in (picked.get("paths") or [])
+                  if p and p != original["path"]][:wanted]
+        # Her own photograph stays first in the list only when nothing else
+        # was found: a companion that could not be chosen must not silently
+        # become "one reference less" at a price the estimate did not quote.
+        plan["reference_paths"] = others or [original["path"]]
         plan["reference_detail"] = picked.get("detail") or {}
 
     # WILL HER FACE BE GENERATED?  Asked once, of ``protect.shield_for``,
@@ -1284,6 +1308,11 @@ def run_previews(user: dict, run_id: str) -> dict:
     # it lives on the brief and not in a second variable.
     brief["reference_paths"] = [p for p in (plan.get("reference_paths") or [])
                                 if p and Path(p).exists()]
+    # And the three switches this run was PRICED with, carried on the brief so
+    # that the prompt builder and the mask decision read the same values the
+    # estimate read.  ``plan_features`` fills in the shipped defaults for a
+    # plan written before the switches existed.
+    brief["envio"] = router_mod.plan_features(plan)
 
     out_dir = PREVIEW_DIR / str(user["id"]) / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1368,11 +1397,23 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     params = dict(variant.get("params") or {})
     seed = int(variant.get("seed") or 0)
     extra_negatives: list[str] = []
-    # Her other photographs, already chosen and priced when the run was
-    # planned.  The photograph being edited is never repeated here: it travels
-    # as the source and sending it twice is what the old code did.
+    # THE LIST THE PLAN WAS PRICED WITH, SENT VERBATIM.  It used to be filtered
+    # here against the source photograph, on the reasoning that sending the
+    # same picture twice teaches the engine nothing - which is true, and which
+    # is also exactly what the 24 oldest accepted calls did: two image_urls,
+    # one file.  With ``reference_photos`` at 0 that duplicate is the whole
+    # point, because it is what keeps fal on identity_multi at 0.040 USD
+    # instead of identity_max at 0.080; dropping it here would have quoted one
+    # endpoint and called another.  ``prepare_run`` decides what travels, this
+    # only checks the files are still on disk.
+    # Named for what it is and NOT ``envio``: that name is already taken
+    # inside the attempt loop below, where it holds the provider's report of
+    # what was uploaded, and reusing it made the second attempt of every
+    # variant die with KeyError('outfit_coverage_text') after the image had
+    # been paid for - caught by the rehearsal, not by a customer.
+    features = router_mod.plan_features(brief)
     references = [p for p in (brief.get("reference_paths") or [])
-                  if p and p != original.get("path") and Path(p).exists()]
+                  if p and Path(p).exists()]
     # What each check has read on the attempts that failed, so the loop can
     # stop buying answers the engine has already given.
     seen_failures: dict[str, list[float]] = {}
@@ -1384,7 +1425,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
     # asked for changes between attempts.  Empty means "this image is made
     # whole"; ``mask_note`` says why, in her language, whichever way it went.
     shield = protect_mod.shield_for(original.get("path"), choices, out_dir,
-                                    profile=profile)
+                                    profile=profile,
+                                    allow_masked=features["masked_inpaint"])
     mask_path = str(shield.get("mask_path") or "")
     mask_note = str(shield.get("reason") or "")
     mask_cover = float(shield.get("cover") or 0.0)
@@ -1435,8 +1477,10 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             return {"accepted": False, "cost": cost, "attempts": attempts,
                     "repaired": repaired, "aborted": True}
         attempts += 1
-        built = prompt_mod.build_prompt({**brief, "choices": choices}, profile,
-                                        style, choices)
+        built = prompt_mod.build_prompt({**brief, "choices": choices,
+                                         "outfit_coverage_text":
+                                             features["outfit_coverage_text"]},
+                                        profile, style, choices)
         negative = built["negative_prompt"]
         if extra_negatives:
             negative = negative + ", " + ", ".join(sorted(set(extra_negatives)))
@@ -1633,12 +1677,19 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                                    ref=f"{run_id}:v{index}:a{attempt_no}",
                                    note="imagen bloqueada por fal")
                     settled = True
+                    # WHAT HAPPENED, WITHOUT INVENTING WHO JUDGED WHAT.  The
+                    # robot never saw this image and neither did she: fal
+                    # answered with a black file instead of the picture and
+                    # charges for it anyway.  Saying "no la dio por buena"
+                    # described a verdict on a photograph, which is not what
+                    # the timings support either - 11 of the 12 blocked calls
+                    # came back faster than the fastest image this account has
+                    # ever been delivered (4.4 s against a 12.9 s floor).
                     _plan_note(run_id,
-                               "La imagen %d se hizo pero fal.ai no la dio por "
-                               "buena y devolvio un archivo en negro. El "
-                               "trabajo se cobra igual (%.2f USD): eso es lo "
-                               "que cuesta, no un error del robot."
-                               % (index + 1, charged))
+                               "fal.ai no ha entregado la imagen %d: ha "
+                               "devuelto un archivo en negro y la cobra igual "
+                               "(%.2f USD). Nadie la ha visto, ni tu ni el "
+                               "robot." % (index + 1, charged))
                 # The same facts a successful attempt records, on the row of
                 # a failure the client has just been charged for: which
                 # endpoint really ran, which request_id it ran under, what was
@@ -1654,11 +1705,21 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                                         "envio_completo", "enviado",
                                         "source_size", "negativo_retirado")
                                        if em.get(k) is not None}
+                # A BLOCK IS NOT A DEFECT IN THE IMAGE, so its row says so in
+                # a form the status endpoint can count: 'rejected' rows are the
+                # robot's own verdicts and are shown to her as such, while
+                # these are calls the provider never delivered.  Until this
+                # prefix existed the screen described a charged non-delivery
+                # with the sentence written for a failed identity check.
+                reason_row = str(exc)[:200]
+                if str(getattr(exc, "code", "")) == "content_filter":
+                    reason_row = ("bloqueada por el proveedor: %s"
+                                  % str(exc))[:200]
                 _record_attempt(run_id, user["id"], index, attempt_no,
                                 provider.name, str(em.get("endpoint") or model),
                                 "generate",
                                 built["prompt"], negative, merged,
-                                {}, [], "error", str(exc)[:200], charged,
+                                {}, [], "error", reason_row, charged,
                                 int(getattr(exc, "latency_ms", 0) or 0))
                 # AND A BOUND ON THE RE-ROLL.  One block is a draw the engine
                 # lost; two in a row on the same photograph and the same words
@@ -1671,12 +1732,23 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                 if str(getattr(exc, "code", "")) == "content_filter":
                     seen_failures.setdefault("content_filter", []).append(1.0)
                     if len(seen_failures["content_filter"]) >= 2:
+                        # AND NO ADVICE THAT HAS ALREADY BEEN PAID FOR AND
+                        # FAILED.  "Prueba con otra foto tuya o con otra
+                        # prenda" is precisely what was tried on 2026-09-05:
+                        # the clothed WhatsApp photograph, a clothing change
+                        # only, no pose - blocked twice, and a different
+                        # garment on a different photograph - blocked twice
+                        # more.  Ten calls, 0.46 USD, the same answer.
                         _plan_note(run_id,
-                                   "La imagen %d se ha quedado en negro dos "
-                                   "veces seguidas: no es mala suerte, es esta "
-                                   "peticion. No se paga un tercer intento. "
-                                   "Prueba con otra foto tuya o con otra "
-                                   "prenda." % (index + 1))
+                                   "La imagen %d ha vuelto en negro dos veces "
+                                   "seguidas: no es mala suerte, es esta "
+                                   "peticion tal y como se envia. No se paga "
+                                   "un tercer intento. Cambiar de prenda o de "
+                                   "foto ya se probo el 2026-09-05 y volvio a "
+                                   "pasar; mira en Ajustes que el repintado "
+                                   "por zonas, las fotos de referencia y el "
+                                   "texto de cobertura esten desactivados "
+                                   "antes de pagar otra." % (index + 1))
                         return {"accepted": False, "cost": cost,
                                 "attempts": attempts, "repaired": repaired}
                 if not exc.retryable:
@@ -2112,10 +2184,32 @@ def _defect_label(defects: list[dict]) -> str:
 
 
 def _reject_reason(verdict: dict) -> str:
+    """Why this image was discarded, in the words of the check that discarded it.
+
+    THE ROW HAS TO SAY WHAT REALLY HAPPENED.  ``FAIL_ES`` is one sentence per
+    check, and for ``anatomy`` that sentence is "hay algo mal dibujado, por
+    ejemplo una mano" - a hand.  But the anatomy check covers hands, limbs,
+    joints AND skin texture, and it writes the specific finding into the check
+    itself as ``fail_es``; verify.py:1894 already prefers that field when it
+    speaks to her.  This function did not, so a charged attempt of 2026-09-05
+    (att_f38b53526f23, 0.0400 USD, run_1ad2dc01f743) was filed under a badly
+    drawn hand when nothing was drawn badly: the finding was "te han suavizado
+    la piel", the face keeping 82% of the source's grain, and the picture's
+    hands are correct.
+
+    That matters more than a wording nit.  ``attempts.reject_reason`` is the
+    evidence anybody reads to decide what to change next - the whole diagnosis
+    of the ten blocked calls was reconstructed from this table - and a row that
+    names a defect that did not occur sends the next reader after the wrong
+    thing at 0.040 USD a guess.  Same field, same precedence, as the sentence
+    she is shown.
+    """
     failed = [c for c in (verdict.get("checks") or []) if not c.get("passed", True)]
     if not failed:
         return "no supero la revision"
-    return "; ".join(verify_mod.FAIL_ES.get(c["name"], c["name"]) for c in failed)
+    return "; ".join(str(c.get("fail_es")
+                         or verify_mod.FAIL_ES.get(c["name"], c["name"]))
+                     for c in failed)
 
 
 def _store_image(user: dict, run_id: str, original: dict, profile: dict,
@@ -2202,6 +2296,7 @@ def run_final(user: dict, run_id: str) -> dict:
     brief["reference_paths"] = [
         p for p in ((run.get("plan") or {}).get("reference_paths") or [])
         if p and Path(p).exists()]
+    brief["envio"] = router_mod.plan_features(run.get("plan") or {})
     if original:
         brief["source_path"] = original["path"]
         brief["source_body"] = analysis.get("body") or {}

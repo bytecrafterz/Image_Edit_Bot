@@ -26,6 +26,7 @@ from typing import Any
 
 from .. import db
 from ..catalog import options as catalog_mod
+from ..config import SETTINGS
 from . import learning as learning_mod
 
 # --------------------------------------------------------------- mandatory
@@ -826,7 +827,7 @@ LOWER_BODY_SHOTS = ("half", "full", "unknown")
 _SKIRT_LOWERS = ("skirt", "dress")
 
 
-def outfit_plan(chosen: dict, shot: str) -> dict:
+def outfit_plan(chosen: dict, shot: str, coverage_text: bool = True) -> dict:
     """Work out what the lower half of a requested outfit is wearing.
 
     The rule the client asked for, in one place: an explicit bottom wins, a
@@ -863,14 +864,34 @@ def outfit_plan(chosen: dict, shot: str) -> dict:
 
     # Requirement 3.  This goes in whatever was chosen: a gown painted over
     # lingerie is the same picture as a shirt painted over lingerie.
-    plan["instruction"] = OUTFIT_REPLACE
-    plan["negatives"].append(NO_UNDERWEAR)
-    plan["tokens"].append(
-        "ropa: se pide vestir el conjunto completo y sustituir la ropa de la "
-        "foto original, no superponerlo encima")
-    plan["tokens"].append(
-        "negativo: nada de ropa interior a la vista ni prenda superpuesta "
-        "sobre la ropa de la foto original")
+    #
+    # AND IT IS A SWITCH NOW, DEFAULTING OFF, BECAUSE OF WHAT IT COSTS.  Every
+    # one of the 15 paid calls whose prompt carried OUTFIT_REPLACE was returned
+    # as a black file and charged - 15 of 15 - while 41 of the 42 calls without
+    # it produced an image; the same split holds on NO_UNDERWEAR's vocabulary
+    # (lingerie, underwear, naked), which appears on 15 of 15 blocked prompts
+    # and 0 of the other 42.  On the FLUX endpoints there is no negative field,
+    # so both of these travel inside the instruction that fal reviews.
+    # What is lost while it is off is real and is not hidden: this block is
+    # what stops the new garment being painted ON TOP of the lingerie already
+    # in the photograph, which is the image delivered on 2026-09-04.  The
+    # automatic bottom below stays either way - it is a positive description of
+    # a garment, it is in none of the blocked-only text, and it is what keeps a
+    # top from arriving without trousers.
+    if coverage_text:
+        plan["instruction"] = OUTFIT_REPLACE
+        plan["negatives"].append(NO_UNDERWEAR)
+        plan["tokens"].append(
+            "ropa: se pide vestir el conjunto completo y sustituir la ropa de "
+            "la foto original, no superponerlo encima")
+        plan["tokens"].append(
+            "negativo: nada de ropa interior a la vista ni prenda superpuesta "
+            "sobre la ropa de la foto original")
+    else:
+        plan["tokens"].append(
+            "ropa: el texto que exige tapar el cuerpo entero esta desactivado "
+            "en Ajustes (las 15 llamadas que lo llevaban se cobraron y "
+            "volvieron en negro), asi que se pide la prenda sin esa insistencia")
 
     visible = (shot or "unknown") in LOWER_BODY_SHOTS
 
@@ -894,7 +915,8 @@ def outfit_plan(chosen: dict, shot: str) -> dict:
         if not tops and not completes:
             plan["upper_phrase"] = catalog_mod.DEFAULT_TOP
             plan["auto"] = True
-            plan["negatives"].append(NO_BARE_TORSO)
+            if coverage_text:
+                plan["negatives"].append(NO_BARE_TORSO)
             plan["tokens"].append(
                 "ropa: %s solo viste de cintura para abajo, asi que se anade "
                 "automaticamente una prenda de arriba (%s). Si eliges una tu, "
@@ -940,13 +962,14 @@ def outfit_plan(chosen: dict, shot: str) -> dict:
     #    overruling her, so it does not, and the report says so out loud.
     else:
         opt, info = unclassified[0]
-        plan["negatives"].append(NO_BARE_TORSO)
+        if coverage_text:
+            plan["negatives"].append(NO_BARE_TORSO)
         plan["tokens"].append(
             "ropa: no se ha podido clasificar %s, asi que no se anade prenda "
             "de abajo; se exige igualmente que no se vea ropa interior ni "
             "quede el torso desnudo" % _name(opt))
 
-    if visible and plan["lower"]:
+    if visible and plan["lower"] and coverage_text:
         if plan["lower"] in _SKIRT_LOWERS:
             plan["negatives"].append(NO_BARE_HIPS)
             plan["tokens"].append(
@@ -1022,7 +1045,14 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
     # runs after the loop because it needs every garment that was chosen, and
     # its phrase joins "change only" so the trousers are asked for rather than
     # merely not forbidden.
-    outfit = outfit_plan(kept, shot)
+    # The switch travels on the brief, stamped there by the orchestrator from
+    # the plan this run was priced with, so the prompt the estimate described
+    # and the prompt that is sent cannot differ.  Absent from the brief - a
+    # caller written before the switch, a script - the shipped default decides,
+    # which is the wording the 26 accepted calls used: off.
+    outfit = outfit_plan(kept, shot, coverage_text=bool(
+        brf.get("outfit_coverage_text",
+                SETTINGS.limits.outfit_coverage_text)))
     if outfit["lower_phrase"]:
         change_bits.append("with " + outfit["lower_phrase"])
     if outfit["upper_phrase"]:

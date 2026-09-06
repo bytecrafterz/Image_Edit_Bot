@@ -554,9 +554,31 @@ function renderStep4(view, run) {
     view.appendChild(note('info', 'Alguna imagen no ha salido bien', text));
   }
 
-  /* THE RUN FINISHED AND NO IMAGE PASSED.  Without this she was left looking
-     at "Listo: 0 imagenes" and a list of checks, with nothing to do next. */
-  if (run && run.status === 'done' && !run.images.length) {
+  /* THE PROVIDER DID NOT HAND OVER THE IMAGE.  This is not the same event as
+     "the robot did not like the result" and it must not borrow its words: on
+     2026-09-05 ten calls across five runs came back as a black file and were
+     charged 0.46 USD, and the screen told the client "solo te ensena las
+     imagenes en las que sales tu, y esta vez ninguna lo ha conseguido" - which
+     blames her photographs for a picture no robot ever received.  The robot
+     never saw these.  So this branch says what happened, that it was charged,
+     and what is actually left to try - and it does NOT suggest changing the
+     garment or the photograph, because that is exactly what was tried twice at
+     0.46 USD and blocked both times. */
+  const blocked = (run && run.bloqueadas) || { n: 0, usd: 0 };
+  if (run && run.status === 'done' && !run.images.length && blocked.n > 0) {
+    view.appendChild(note('warn', 'El proveedor no ha entregado las imagenes',
+      `fal.ai ha devuelto un archivo en negro en ${blocked.n} `
+      + `${blocked.n === 1 ? 'intento' : 'intentos'} y los cobra igual `
+      + `(${moneyExact(blocked.usd)}). No es que las fotos salieran mal: no `
+      + 'llegaron. Ni tu ni el robot han visto ninguna imagen, y tus fotos no '
+      + 'se han tocado. Repetir la misma peticion cuesta lo mismo y acaba '
+      + 'igual, asi que antes entra en Ajustes y comprueba que el repintado '
+      + 'por zonas, las fotos de referencia y el texto de cobertura estan como '
+      + 'vienen de fabrica (desactivados): esa es la configuracion con la que '
+      + 'este robot si ha recibido imagenes.'));
+  } else if (run && run.status === 'done' && !run.images.length) {
+    /* THE RUN FINISHED AND THE ROBOT REALLY DID LOOK.  Here the images did
+       arrive and the identity check refused them, so this sentence is true. */
     view.appendChild(note('info', 'Esta vez no ha salido ninguna buena',
       'El robot solo te ensena las imagenes en las que sales tu, y esta vez '
       + 'ninguna lo ha conseguido. Tus fotos no se han tocado. '

@@ -565,13 +565,32 @@ def main() -> int:
     print("\n8b. Su rostro: que se envio, que volvio y quien es")
     gen_only = [c for c in CALLS if not c["salida"].startswith("cand_")]
     masked_calls = [c for c in gen_only if c["mascara"]]
-    check("cada imagen se pidio con mascara o con fotos de referencia, nunca "
-          "sin nada",
-          bool(gen_only) and all(c["mascara"] or c["refs"] >= 2
-                                 for c in gen_only),
-          "%d con mascara, %d con referencias, de %d"
-          % (len(masked_calls), len([c for c in gen_only if c["refs"] >= 2]),
-             len(gen_only)))
+    # WHAT TRAVELS IS A SETTING NOW, AND THIS READS THE SETTING.  Until
+    # 2026-09-05 the assertion here was "mask, or at least two reference
+    # photographs, never nothing" - which is precisely the configuration that
+    # produced ten blocked and charged calls in five runs (0.46 USD) while the
+    # 26 calls that did deliver an image had neither.  The defaults are now the
+    # ones with those 26 behind them: no mask, and her photograph as its own
+    # identity reference, which is two image_urls of one file.  So the
+    # rehearsal no longer asserts a policy - it asserts that what left the
+    # machine is what Ajustes says, whichever way Ajustes is set.
+    from app.config import SETTINGS as _S
+    n_ref = int(_S.limits.reference_photos)
+    quiere_mascara = bool(_S.limits.masked_inpaint)
+    # 0 companions still means two uploads: the source travels twice, which is
+    # what keeps kontext/multi at 0.040 instead of kontext/max at 0.080.
+    subidas = 1 + max(1, n_ref)
+    distintas = 1 + n_ref
+    check("cada llamada envio exactamente lo que dicen los Ajustes "
+          "(mascara %s, %d foto(s) de referencia)"
+          % ("si" if quiere_mascara else "no", n_ref),
+          bool(gen_only) and all(
+              bool(c["mascara"]) == quiere_mascara
+              and (c["mascara"] or len(c["huellas"] or []) == subidas)
+              for c in gen_only),
+          "%d con mascara, subidas por llamada %s, esperadas %d"
+          % (len(masked_calls),
+             sorted({len(c["huellas"] or []) for c in gen_only}), subidas))
     # The other path: when the change cannot be masked - a pose, an expression,
     # a light - the face IS generated, and then the only defence is showing the
     # engine several photographs of her.  Three of them, and three DIFFERENT
@@ -583,13 +602,14 @@ def main() -> int:
             print("     %s -> %d imagenes, huellas %s"
                   % (call["endpoint"], len(call["huellas"]),
                      ", ".join(call["huellas"])))
-        check("cuando hay que dibujar su rostro se envian 3 fotos suyas "
-              "DISTINTAS",
-              all(len(c["huellas"]) == 3 and len(set(c["huellas"])) == 3
+        check("las fotos que viajan son tantas y tan distintas como se han "
+              "configurado (%d distinta(s))" % distintas,
+              all(len(c["huellas"]) == subidas
+                  and len(set(c["huellas"])) == distintas
                   for c in with_refs),
-              "%d llamada(s); minimo de fotos distintas: %d"
+              "%d llamada(s); fotos distintas: %s"
               % (len(with_refs),
-                 min(len(set(c["huellas"])) for c in with_refs)))
+                 sorted({len(set(c["huellas"])) for c in with_refs})))
         check("y se cobran por el modelo de varias imagenes (identity_multi)",
               all("kontext/multi" in c["endpoint"] for c in with_refs),
               "%s a %s USD" % (sorted({c["endpoint"] for c in with_refs}),
@@ -996,9 +1016,33 @@ def main() -> int:
         check("no se compra un tercer intento despues de dos negros",
               bstate.get("attempts", 0) == 2,
               "%d intentos" % bstate.get("attempts", 0))
+        # AND THE SCREEN CAN TELL THE TWO THINGS APART.  A call the provider
+        # never delivered is not an image the robot looked at and refused, and
+        # until the run carried this count the client was shown the sentence
+        # written for the second when the first had happened.
+        bloq = bstate.get("bloqueadas") or {}
+        check("el estado separa 'no entregada por el proveedor' de 'descartada "
+              "por el robot'",
+              int(bloq.get("n") or 0) == 2
+              and abs(float(bloq.get("usd") or 0.0) - charged) < 1e-6
+              and not (bstate.get("discard_reasons") or []),
+              "bloqueadas %s por %s USD, descartes del robot %d"
+              % (bloq.get("n"), money(bloq.get("usd")),
+                 len(bstate.get("discard_reasons") or [])))
+        # THE SENTENCE ITSELF IS PART OF THE PRODUCT.  It has to say the two
+        # facts that are certain - no image arrived, and it is charged anyway -
+        # and it must NOT put a verdict on her photograph: the robot never saw
+        # this picture, and the timings say fal very probably never drew it
+        # either (11 of the 12 blocked calls came back faster than the fastest
+        # image this account has ever been delivered).
         check("se le dice que se le ha cobrado una imagen que no puede ver",
-              any("no la dio por buena" in a for a in avisos),
-              next((a[:80] for a in avisos if "no la dio por buena" in a), "-"))
+              any("no ha entregado" in a and "cobra igual" in a
+                  for a in avisos),
+              next((a[:90] for a in avisos if "no ha entregado" in a), "-"))
+        check("y no se le cuenta que alguien juzgo su foto",
+              not any(("no la dio por buena" in a)
+                      or ("ha revisado la imagen" in a) for a in avisos),
+              "ninguna frase atribuye un veredicto a fal ni al robot")
         check("y por que no se sigue intentando",
               any("dos veces" in a for a in avisos),
               next((a[:80] for a in avisos if "dos veces" in a), "-"))

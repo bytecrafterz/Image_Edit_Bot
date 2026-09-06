@@ -249,6 +249,47 @@ function behaviourSection() {
   ]);
 }
 
+/* ------------------------------------------------------- what is sent to fal */
+
+/* THE THREE THINGS THAT CHANGE WHAT LEAVES LA MAQUINA, on the screen, because
+   they are the difference between the 26 llamadas que entregaron imagen y las
+   10 que se cobraron en negro.  The help text comes from the API (envio_help)
+   so the counts on the screen and the counts in the code are one string. */
+function envioSection() {
+  const help = data.envio_help || {};
+  const top = Number(data.max_reference_photos || 3);
+  return el('div', { class: 'section' }, [
+    sectionTitle('Lo que se envia al motor de pago'),
+    el('div', { class: 'card' }, [
+      el('p', { class: 'tiny',
+        text: 'Vienen desactivadas a proposito: asi estaban las 26 imagenes '
+          + 'que si se entregaron. Cambialas solo si vas a pagar una prueba.' }),
+      el('div', { class: 'switch' }, [
+        el('span', {}, [
+          el('div', { text: 'Repintar solo la zona que cambias' }),
+          el('div', { class: 'tiny', text: help.masked_inpaint || '' }),
+        ]),
+        el('input', { type: 'checkbox', checked: data.settings.masked_inpaint,
+          onChange: (e) => save({ masked_inpaint: e.target.checked }) }),
+      ]),
+      field('Fotos tuyas de referencia (ademas de la que editas)',
+        el('input', { type: 'number', min: '0', max: String(top),
+          value: data.settings.reference_photos,
+          onChange: (e) => save({ reference_photos: Number(e.target.value) }) })),
+      el('p', { class: 'tiny', text: help.reference_photos || '' }),
+      el('div', { class: 'switch' }, [
+        el('span', {}, [
+          el('div', { text: 'Exigir por escrito que la ropa tape el cuerpo' }),
+          el('div', { class: 'tiny', text: help.outfit_coverage_text || '' }),
+        ]),
+        el('input', { type: 'checkbox',
+          checked: data.settings.outfit_coverage_text,
+          onChange: (e) => save({ outfit_coverage_text: e.target.checked }) }),
+      ]),
+    ]),
+  ]);
+}
+
 /* ------------------------------------------------------------------- keys */
 
 function keysSection(view) {
@@ -357,6 +398,7 @@ function render(view) {
   view.appendChild(usageSection());
   view.appendChild(limitsSection());
   view.appendChild(behaviourSection());
+  view.appendChild(envioSection());
   view.appendChild(keysSection(view));
   view.appendChild(accountSection(view));
 }

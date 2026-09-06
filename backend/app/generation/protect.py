@@ -96,10 +96,22 @@ FEATHER_FRACTION = PROTECT_MARGIN / 2.0
 # frame is well under the 12.9% her tightest real clothing mask covers.
 MIN_COVER = 0.02
 
-# And above this the "mask" is the whole picture, so masking buys nothing and
-# the ordinary path - cheaper, and able to use her three reference photographs
-# - is the honest answer.
-MAX_COVER = 0.92
+# And above this it is not an inpaint any more.  0.92 was an economics
+# threshold - "above this masking buys nothing" - and it let through the run of
+# 2026-09-05 16:05 that told the client "se repinta solo la ropa y el fondo
+# (90% de la foto)": a sentence that is its own refutation, paid at 0.050 USD.
+#
+# THE NUMBER IS MEASURED, not chosen.  build_mask was run offline over her 25
+# photographs on 2026-09-05, free, at both shapes of request:
+#     clothing alone              13.78% .. 53.75%  (median about 20%)
+#     clothing UNION a new scene  22.43% .. 92.96%  (median 57.03%)
+#     over 50% on 14 of 25, over 80% on 8 of 25, over 92% on 3 of 25
+# Her tightest real clothing mask is 12.9% and her widest is 53.75%, so 0.55
+# keeps every genuine garment repaint she can ask for and refuses the unions,
+# which are not a garment being repainted but the whole photograph being made
+# again with her face inside the repaint zone.  A refusal is not a failure: the
+# caller falls back to the whole-image path and says so in Spanish.
+MAX_COVER = 0.55
 
 # Which regions from analysis/segment.region_masks each option group repaints.
 # A group that is not in this table cannot be carried by a mask.
@@ -1241,6 +1253,19 @@ def _check_binding(mask_path: Any, source_path: Any,
     return {"ok": True, "estado": "verificado", "reason": ""}
 
 
+def _too_wide_es(cover: float) -> str:
+    """Why a mask this wide is refused, in words that carry the measurement.
+
+    One clause, because ``shield_for`` puts it inside a sentence that already
+    promises the fallback: the image is made whole and the identity is checked
+    before anything is shown.  Nothing fails here - a refused mask costs
+    nothing and changes only which endpoint the same run calls.
+    """
+    return ("habria que repintar el %.1f%% de la foto, y eso ya no es "
+            "cambiarte la ropa sino volver a hacer la foto entera (el limite "
+            "es %.0f%%)" % (100.0 * float(cover), 100.0 * MAX_COVER))
+
+
 def _odd(value: float, low: int = 3, high: int = 401) -> int:
     k = int(max(low, min(high, round(value))))
     return k if k % 2 else k + 1
@@ -1475,7 +1500,7 @@ def mask_name(source_path: Any, regions: Any, bare: Any = ()) -> str:
 
 
 def shield_for(source_path: Any, choices: Any, work_dir: Any = None,
-               profile: Any = None) -> dict:
+               profile: Any = None, allow_masked: bool = True) -> dict:
     """WILL HER FACE BE GENERATED?  The one place that answers, for everybody.
 
     This is the fix to a defect that had already been fixed once from the other
@@ -1497,6 +1522,20 @@ def shield_for(source_path: Any, choices: Any, work_dir: Any = None,
     one, marked ``sin dibujar`` so nobody mistakes it for a measured one.
     """
     plan = plan_mask(choices)
+    if not allow_masked:
+        # THE SWITCH, HONOURED IN THE ONE PLACE THAT ANSWERS THE QUESTION.
+        # ``masked_inpaint`` is off by default because 6 of the 6 masked calls
+        # this account has ever made came back as a black file and were charged
+        # (0.30 USD), while the 26 calls that did deliver an image sent no mask
+        # at all.  Refusing here rather than at the provider means the
+        # estimate, the sentence on the screen and the call itself all change
+        # together - and it costs nothing, because the mask is never drawn.
+        plan = dict(plan)
+        plan["safe"] = False
+        plan["reason"] = (
+            "Tu rostro se va a volver a generar: el repintado por zonas esta "
+            "desactivado en Ajustes, asi que la imagen se hace entera. Se "
+            "comprobara la identidad antes de ensenarte nada.")
     cover_state = garment_cover(choices)
     bare = sorted(z for z, s in cover_state.items() if s == "descubierta")
     out: dict[str, Any] = {
@@ -1562,10 +1601,15 @@ def shield_for(source_path: Any, choices: Any, work_dir: Any = None,
                      "reason": "no se pudo preparar la mascara (%s)" % exc}
 
     if not built.get("ok"):
-        # Not an error: on a closeup there may be no torso to repaint at all.
+        # Not an error: on a closeup there may be no torso to repaint at all,
+        # and since 2026-09-05 a repaint zone wider than MAX_COVER lands here
+        # too.  Either way the run CONTINUES - whole image, identity checked -
+        # and nothing is refused to the client; only the endpoint changes.
         # It IS money, though - this is the branch that pays kontext/multi
         # instead of fill - so it is said in her language, once, here.
-        out["estado"] = "sin zona"
+        out["estado"] = ("zona demasiado grande"
+                         if built.get("demasiado_grande") else "sin zona")
+        out["cover"] = float(built.get("cover") or 0.0)
         out["reason"] = ("Tu rostro se va a volver a generar: %s. Se comprobara "
                          "la identidad antes de ensenarte nada."
                          % (built.get("reason") or "no se pudo aislar la zona"))
@@ -1766,9 +1810,13 @@ def build_mask(source_path: str, choices: Any, out_path: str,
         result["cover"] = round(cover, 4)
         return result
     if cover > MAX_COVER:
-        result["reason"] = ("habria que repintar casi toda la foto (%.1f%%), "
-                            "asi que no compensa" % (100.0 * cover))
+        # The cheap half of the same refusal: the hard mask is a subset of the
+        # feathered one measured below, so anything already over the limit here
+        # is over it there too, and this saves reading her photograph at full
+        # resolution to be told so.
+        result["reason"] = _too_wide_es(cover)
         result["cover"] = round(cover, 4)
+        result["demasiado_grande"] = True
         return result
 
     feather = _odd(FEATHER_FRACTION * min(height, width))
@@ -1790,6 +1838,24 @@ def build_mask(source_path: str, choices: Any, out_path: str,
         cv2.MORPH_ELLIPSE, (5, 5)))
     big[core_big > 0] = 0
 
+    # THE GATE AND THE DISPLAY NOW READ THE SAME MASK.  Until 2026-09-05 the
+    # limit was applied to ``cover`` - the hard binary mask at the 1200x1600
+    # analysis size, before the feather - while the number stored on the plan,
+    # shown on the estimate and written on the attempt row was ``cover_full``:
+    # the feathered mask at her real resolution, which counts every pixel of
+    # the blur ramp and is systematically larger.  IMG_8825 passed a gate
+    # reading 92.0% and reported 92.96%.  A limit that tests a different
+    # picture than the one it reports is not a limit anybody can reason about,
+    # so the number the client is shown is now the number that is judged - and
+    # it is judged BEFORE the file is written, so a refused mask leaves nothing
+    # behind on disk for shield_for to find and reuse.
+    cover_full = round(float(np.count_nonzero(big)) / float(fh * fw), 4)
+    if cover_full > MAX_COVER:
+        result["reason"] = _too_wide_es(cover_full)
+        result["cover"] = cover_full
+        result["demasiado_grande"] = True
+        return result
+
     saved = _safe(loader.save_image, big, str(out_path), 100)
     if not saved:
         result["reason"] = "no se pudo guardar la mascara"
@@ -1799,7 +1865,6 @@ def build_mask(source_path: str, choices: Any, out_path: str,
     # repainting her face and reporting that nothing changed - and what it
     # covers, so that shield_for() can hand the same numbers to the estimate
     # and to the run without drawing the mask a second time.
-    cover_full = round(float(np.count_nonzero(big)) / float(fh * fw), 4)
     # The head, measured on the analysis image and carried up to her real
     # pixels the same way the mask itself is.  Rounded OUTWARDS on every side,
     # because a rectangle that is meant to keep her face at home is only

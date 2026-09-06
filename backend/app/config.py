@@ -82,6 +82,51 @@ class Limits:
     low_balance_usd: float = 2.0
     critical_balance_usd: float = 0.5
 
+    # ------------------------------------------------- lo que se envia a fal
+    # THE THREE SWITCHES THE PAID RECORD DECIDES, AND WHY ALL THREE SHIP OFF.
+    # These are defaults, not laws: each one is a user setting on the Ajustes
+    # screen (routers/settings.py) and an administrator changes it there.  What
+    # follows is the evidence for the value written here, measured on this
+    # installation's own attempts table on 2026-09-05.
+    #
+    #   57 paid fal calls exist.  26 were accepted, and every one of them was
+    #   made before 2026-09-04 17:34 (commit 11446d0), when the masked path,
+    #   the companion reference photographs and the coverage wording were all
+    #   added on the same afternoon.  Since then the last ten paid calls, five
+    #   runs, were ALL returned as a black file and ALL charged: 0.46 USD.
+    #
+    #   masked_inpaint  - 6 of those 10 blocked calls were the fill endpoint,
+    #     and 6 of 6 masked calls this account has ever made were blocked.  No
+    #     masked call has ever produced an image.  The 26 that did produce one
+    #     sent no mask at all.
+    #   reference_photos - 0 means "no companion photographs": the source
+    #     travels as its own identity reference, which is exactly what 24 of
+    #     the 26 accepted calls sent (two image_urls, both the same file) and
+    #     what keeps fal on identity_multi at 0.040 USD instead of identity_max
+    #     at 0.080 USD on the high and max tiers.  HONESTY ABOUT THIS ONE: the
+    #     other 2 accepted calls (2026-09-04 11:33 and 11:36) DID send two
+    #     companions and were accepted, so the record does not indict
+    #     references - 0 is here because it is the configuration with 24
+    #     accepted calls behind it, not because references were shown to fail.
+    #   outfit_coverage_text - the string the record splits on.  Every one of
+    #     the 15 calls whose prompt carried "dress the subject in this outfit
+    #     and in nothing else" was blocked (15 of 15, 100%); of the 42 calls
+    #     without it, 41 produced a file (1 block, 2.3%).  The same split holds
+    #     on the negative: 15 of 15 blocked prompts carried lingerie/underwear/
+    #     naked vocabulary, 0 of the other 42 did.  COST OF LEAVING IT OFF,
+    #     said plainly: this is the block that stops a new shirt being painted
+    #     on top of the lingerie already in the photograph, which is the image
+    #     delivered on 2026-09-04.  Off it is again possible; blocked and
+    #     charged it is certain.
+    masked_inpaint: bool = False
+    reference_photos: int = 0
+    outfit_coverage_text: bool = False
+    # The most companion photographs the wardrobe of settings will accept.
+    # fal's kontext/multi takes the source plus three (providers/fal _payload
+    # slices reference_paths at 3), so asking for more would quote images that
+    # never leave the machine.
+    max_reference_photos: int = 3
+
 
 @dataclass
 class Settings:

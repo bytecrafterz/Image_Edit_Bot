@@ -33,6 +33,35 @@ DEFAULTS: dict = {
     "low_balance_threshold_usd": SETTINGS.limits.low_balance_usd,
     "daily_budget_usd": SETTINGS.limits.default_daily_usd,
     "monthly_budget_usd": SETTINGS.limits.default_monthly_usd,
+    # WHAT REALLY LEAVES THE MACHINE, on the same screen as the money, because
+    # this is a money decision: the ten calls that were blocked and charged on
+    # 2026-09-05 differed from the 26 that were accepted in exactly these three
+    # things.  The defaults are in config.Limits with the counts that chose
+    # them; they are settings and not constants so that the new work can be
+    # switched back on by whoever is willing to pay for the next measurement,
+    # without editing code and without a deploy.
+    "masked_inpaint": SETTINGS.limits.masked_inpaint,
+    "reference_photos": SETTINGS.limits.reference_photos,
+    "outfit_coverage_text": SETTINGS.limits.outfit_coverage_text,
+}
+
+# What each of the three says, in the words the screen shows.  They carry the
+# measured counts on purpose: a switch that changes what is paid for has to be
+# explained with the record that set its default, not with an adjective.
+ENVIO_ES = {
+    "masked_inpaint": ("Repintar solo la zona que cambias (mascara). "
+                       "Desactivado: 6 de 6 llamadas con mascara acabaron en "
+                       "un archivo en negro cobrado; las 26 imagenes que si "
+                       "se entregaron se hicieron enteras."),
+    "reference_photos": ("Cuantas fotos tuyas mas viajan con cada llamada. "
+                         "0 envia solo la foto que estas editando, que es lo "
+                         "que hicieron 24 de las 26 llamadas aceptadas, y "
+                         "mantiene el precio en 0.040 USD por imagen."),
+    "outfit_coverage_text": ("Insistir por escrito en que la prenda tape el "
+                             "cuerpo entero. Desactivado: las 15 llamadas que "
+                             "llevaban ese texto fueron bloqueadas y cobradas "
+                             "(15 de 15). Activado evita que la prenda nueva "
+                             "se pinte encima de la ropa de la foto."),
 }
 
 STRICTNESS_ES = {
@@ -85,8 +114,18 @@ def _validate(key: str, value):
     elif key == "strictness":
         if value not in STRICTNESS_ES:
             raise ValueError("La estrictez debe ser suave, normal o estricto.")
-    elif key in ("autorepair", "notify_low_balance"):
+    elif key in ("autorepair", "notify_low_balance", "masked_inpaint",
+                 "outfit_coverage_text"):
         value = bool(value)
+    elif key == "reference_photos":
+        # A COUNT OF PHOTOGRAPHS, not a flag: 0 sends only the photograph being
+        # edited (as its own identity reference, which is what the accepted
+        # calls did), and the ceiling is what fal's kontext/multi accepts
+        # beside the source.  Anything above it would be quoted and never sent.
+        value = int(value)
+        top = int(SETTINGS.limits.max_reference_photos)
+        if not 0 <= value <= top:
+            raise ValueError("Las fotos de referencia van de 0 a %d." % top)
     elif key in ("low_balance_threshold_usd", "daily_budget_usd",
                  "monthly_budget_usd"):
         value = float(value)
@@ -133,6 +172,8 @@ def get_settings(user: dict = Depends(security.active_user)) -> dict:
         "prices": prices,
         "plan": user.get("plan"),
         "strictness_help": STRICTNESS_ES,
+        "envio_help": ENVIO_ES,
+        "max_reference_photos": int(SETTINGS.limits.max_reference_photos),
     }
 
 
