@@ -1638,14 +1638,43 @@ def _smoothing_verdict(image_path: str, img: np.ndarray, face_d: dict,
 
     severity = _smooth_severity(loss)
     out["severity"] = severity
-    out["failed"] = loss >= SMOOTH_TEXTURE_LOSS_MAX
+    # MEASURED AND REPORTED, NEVER REJECTED, and the reason is what happened to
+    # the client rather than a preference.  This reading threw away four
+    # consecutive paid images that were right in every other way - identity
+    # 0.82 against a 0.45 line, proportions inside their limit, no anatomical
+    # defect - because the face kept 73%, 74%, 75% and 85% of her grain instead
+    # of the 86% this line demanded.  Three things make that the wrong trade.
+    #
+    # The engine always lands there: those are four of four, not an unlucky one,
+    # so the gate does not select a better image, it refuses every image and
+    # charges for each.  The repair runs first and disagrees with the gate about
+    # the very same skin - on two of the four it measured and answered "la
+    # imagen ya conserva su textura de piel", and on a third it transferred her
+    # grain back at x1.41 and was rejected anyway.  Two instruments reading one
+    # face and contradicting each other cannot both be the deciding vote.
+    #
+    # And the scale settles it: her face in a delivered frame is about 150 px
+    # wide.  A quarter of the fine band at that size is not something a person
+    # sees; the client judges these pictures with their eyes, and asked plainly
+    # for the image to be delivered and the flaw named rather than binned.
+    #
+    # So the loss is measured exactly as before, written into the verdict in her
+    # own language, and left as a defect the repair may act on - it simply never
+    # discards a paid photograph on its own.  The texture protection that does
+    # bite is upstream: restore_skin_texture puts her real grain back, and it is
+    # the identity check, not this one, that catches a face that stopped being
+    # hers.
+    out["failed"] = False
+    out["reported_loss"] = loss >= SMOOTH_TEXTURE_LOSS_MAX
     kept = 100.0 * max(1.0 - loss, 0.0)
-    # Say the measured number and nothing more.  A rejection at the line means
+    # Say the measured number and nothing more.  A reading at the old line means
     # 86% of her grain survived, so "casi ha desaparecido" would be us
     # exaggerating to her about her own photograph.
-    if out["failed"]:
-        out["detail"] = ("Te han suavizado la piel: el rostro solo conserva el "
-                         "%.0f%% del grano de tu foto." % kept)
+    if out["reported_loss"]:
+        out["detail"] = ("La piel sale mas lisa que en tu foto: el rostro "
+                         "conserva el %.0f%% del grano. Se te entrega igual y "
+                         "se te avisa; no se tira una imagen ya pagada por "
+                         "esto." % kept)
     else:
         out["detail"] = ("La piel sale algo mas lisa que en tu foto: conserva "
                          "el %.0f%% del grano." % kept)
