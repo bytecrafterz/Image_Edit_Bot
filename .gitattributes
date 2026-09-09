@@ -1,0 +1,10 @@
+# The repo moved from Windows to Linux. Without this, every file checked out
+# with CRLF shows as modified on Linux and every commit from Linux would flip
+# them back. Normalise in the repo, check out LF everywhere.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.onnx binary
+*.sqlite3 binary
