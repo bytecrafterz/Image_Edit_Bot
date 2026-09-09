@@ -171,6 +171,65 @@ STOP_NOISE: dict[str, float] = {
 }
 
 
+# WHEN THE ONLY THING WRONG IS THE DRAWING.  Measured over the 62 rejections in
+# this installation's record: 18 failed ``anatomy`` and nothing else - her face,
+# her proportions, her skin tone and the technical quality all passed - and all
+# 18 were paid calls.  0.72 USD binned for images that were genuinely her.
+# Eleven of them were the smoothing gate, fixed in ef41d85 and not seen since;
+# the remainder are hands, and generation/correct.fix_hands refuses to touch a
+# hand whenever taking it out of frame costs more of the picture than it is
+# worth - 36% of the frame on the most recent one.  It is right to refuse: a
+# repainted hand reads 0.000 severity because the hand has been deleted, not
+# fixed.  So the image was correct in every way that matters to her and the
+# robot threw it away because it could not repair one hand and would not fake
+# it.
+#
+# What happens instead, in two steps.  The seed is re-rolled ONCE - a malformed
+# hand is draw noise, unlike a face that comes back as a different woman, and
+# of the four re-rolls in the record one came back clean (0.16 USD per rescue,
+# n=4, which is thin and is why it is one re-roll and not three).  Then the
+# better of the two is DELIVERED with the finding written on it, instead of
+# both being binned.
+#
+# THIS IS NOT A RELAXED IDENTITY GATE.  The path is reachable only when
+# ``anatomy`` is the single failing check, so an image whose face, body or skin
+# tone failed cannot enter it and is still discarded exactly as before.
+ANATOMY_ONLY_DELIVERS = True
+
+
+def _anatomy_only(verdict: dict) -> bool:
+    """True when ``anatomy`` is the one and only check that failed."""
+    failed = {str(c.get("name")) for c in (verdict.get("checks") or [])
+              if not c.get("passed")}
+    return failed == {"anatomy"}
+
+
+def _anatomy_severity(verdict: dict) -> float:
+    """How badly drawn, so two candidates can be compared."""
+    for check in (verdict.get("checks") or []):
+        if str(check.get("name")) == "anatomy":
+            try:
+                return float(check.get("value") or 0.0)
+            except (TypeError, ValueError):
+                return 1.0
+    return 1.0
+
+
+def _anatomy_note(index: int, verdict: dict) -> str:
+    """What she reads on an image delivered with a drawing defect on it.
+
+    Said in her own terms and without excuses: the picture is her, one drawn
+    detail is not right, the robot could not fix it without cutting the photo
+    to pieces, and she is the one who decides whether it is usable.
+    """
+    label = _defect_label(verdict.get("defects") or []) or "un detalle"
+    return ("Imagen %d: es tuya - tu cara, tu cuerpo y tu piel han pasado "
+            "todas las comprobaciones - pero %s no ha salido bien dibujada y "
+            "no se ha podido arreglar sin recortar media foto. Se te entrega "
+            "marcada, ya estaba pagada: miralo tu y decide si te sirve."
+            % (index + 1, label))
+
+
 def _smoothed_skin(image_path: str) -> str:
     """Which detector, if any, says the engine sanded her skin.  '' if none.
 
@@ -1528,6 +1587,38 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         if warn:
             _plan_note(run_id, warn)
 
+    def _deliver_flagged(candidate: dict) -> dict:
+        """Hand over an image that is her, with the drawing defect written on it.
+
+        The attempt row is UPDATED rather than a second one inserted: one paid
+        call is one row, which is what keeps the ledger and the attempt table
+        telling the same story about the same 0.04 USD.  What it does not touch
+        is the risk table - ``_learn_risk`` already filed this combination of
+        options as one that produced a bad hand, and it did, so the next
+        estimate should still warn about it.
+        """
+        flagged = dict(candidate["verdict"])
+        note = _anatomy_note(index, flagged)
+        flagged["entregada_con_aviso"] = True
+        flagged["aviso_es"] = note
+        flagged["summary"] = (str(flagged.get("summary") or "").strip()
+                              + " " + note).strip()
+        image_id = _store_image(user, run_id, original, profile,
+                                candidate["result"], flagged, kind, choices)
+        db.execute("UPDATE attempts SET status='accepted', reject_reason='', "
+                   "verdict_json=?, image_id=? WHERE id=?",
+                   (db.dumps(flagged), image_id, candidate["attempt_id"]))
+        db.execute("UPDATE images SET attempt_id=? WHERE id=?",
+                   (candidate["attempt_id"], image_id))
+        _plan_note(run_id, note)
+        return {"accepted": True, "cost": cost, "attempts": attempts,
+                "repaired": repaired, "con_aviso": True}
+
+    # See ANATOMY_ONLY_DELIVERS: the best image whose ONLY failing check was
+    # the drawing, and whether its one re-roll has already been bought.
+    anat_best: dict | None = None
+    anat_rerolled = False
+
     for attempt_no in range(1, max_retries + 2):
         # Between attempts, and always before anything reaches a provider: a
         # cancel or another variant's money refusal ends this one here.
@@ -2198,14 +2289,18 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         # 0.84 USD of the 2.34 USD spent on this installation bought two runs
         # whose images no longer exist, so what they proved cannot be looked at
         # again and the same mistake was paid for twice.  Nothing further is
-        # spent on it - it is not put in the album either, because an image that
-        # failed the identity check is not her and must never be handed over as
-        # if it were - but it is kept, and the run says where.
+        # spent on it, and an image that failed the IDENTITY check is never put
+        # in the album, because it is not her and must never be handed over as
+        # if it were - but the file is kept, and the run says where.  The one
+        # exception is decided a few lines below: an image that failed nothing
+        # except the drawing is her, and she gets it, flagged.
         merged["archivo_conservado"] = str(result.image_path)
-        _record_attempt(run_id, user["id"], index, attempt_no, provider.name,
-                        result.model or model, "generate", built["prompt"],
-                        negative, merged, verdict, verdict.get("defects") or [],
-                        "rejected", reason, real_cost, result.latency_ms)
+        attempt_id = _record_attempt(
+            run_id, user["id"], index, attempt_no, provider.name,
+            result.model or model, "generate", built["prompt"],
+            negative, merged, verdict, verdict.get("defects") or [],
+            "rejected", reason, real_cost, result.latency_ms)
+        anat_only = ANATOMY_ONLY_DELIVERS and _anatomy_only(verdict)
         # WHICH OPTION DID THIS, remembered before the next attempt is even
         # considered.  The verdict names the check that failed and the plan
         # names the values that were asked for; together they are what lets the
@@ -2220,11 +2315,35 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         # Read as she reads it: the file name meant nothing to her, and the
         # sentence has to say what happened to her money and where the picture
         # went - not into her album, because it did not pass.
-        _plan_note(run_id,
-                   "La imagen %d no se puede dar por buena (%s), asi que no "
-                   "aparece en tu album. Ya estaba pagada y se guarda en el "
-                   "ordenador por si hace falta mirarla; no se gasta nada mas "
-                   "en ella." % (index + 1, reason))
+        if not anat_only:
+            _plan_note(run_id,
+                       "La imagen %d no se puede dar por buena (%s), asi que no "
+                       "aparece en tu album. Ya estaba pagada y se guarda en el "
+                       "ordenador por si hace falta mirarla; no se gasta nada mas "
+                       "en ella." % (index + 1, reason))
+
+        # ONE RE-ROLL, THEN HAND IT OVER.  See ANATOMY_ONLY_DELIVERS.
+        if anat_only:
+            candidate = {"attempt_id": attempt_id, "verdict": verdict,
+                         "result": result,
+                         "severity": _anatomy_severity(verdict)}
+            if (anat_best is None
+                    or candidate["severity"] < anat_best["severity"]):
+                anat_best = candidate
+            if not anat_rerolled and attempt_no <= max_retries:
+                anat_rerolled = True
+                _plan_note(run_id,
+                           "Imagen %d: lo unico que ha fallado es el dibujo "
+                           "(%s). Eres tu en todo lo demas, asi que se tira el "
+                           "dado una vez mas por si sale bien; si vuelve a "
+                           "salir mal se te entrega igualmente, marcada."
+                           % (index + 1, reason))
+                for defect in (verdict.get("defects") or []):
+                    extra_negatives.append(
+                        str(defect.get("type", "")).replace("_", " "))
+                seed += 977
+                continue
+            return _deliver_flagged(anat_best)
 
         # Stop buying answers the engine has already given.  This is the rule
         # that would have saved 0.27 USD on run_16e276b5, where three paid
@@ -2233,6 +2352,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         stop = _repeat_failure(seen_failures, verdict)
         if stop:
             _plan_note(run_id, "Imagen %d: %s" % (index + 1, stop))
+            if anat_best is not None:
+                return _deliver_flagged(anat_best)
             return {"accepted": False, "cost": cost, "attempts": attempts,
                     "repaired": repaired, "stopped_repeating": True,
                     "reason": stop}
@@ -2259,6 +2380,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                     index + 1, shown,
                     "Ya se ajusto la peticion una vez en esta imagen y sigue "
                     "sin salir, asi que no se paga un tercer intento."))
+                if anat_best is not None:
+                    return _deliver_flagged(anat_best)
                 return {"accepted": False, "cost": cost, "attempts": attempts,
                         "repaired": repaired, "stopped_repeating": True,
                         "reason": "ajuste agotado"}
@@ -2269,6 +2392,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             if not ajuste.get("ok"):
                 _plan_note(run_id, adjust_mod.stop_sentence(
                     index + 1, shown, str(ajuste.get("parar") or "")))
+                if anat_best is not None:
+                    return _deliver_flagged(anat_best)
                 return {"accepted": False, "cost": cost, "attempts": attempts,
                         "repaired": repaired, "stopped_repeating": True,
                         "reason": str(ajuste.get("parar") or "")}
@@ -2286,6 +2411,10 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             extra_negatives.append(str(defect.get("type", "")).replace("_", " "))
         seed += 977
 
+    # Every attempt is spent.  If one of them was her with a badly drawn hand,
+    # she gets it - flagged - instead of an empty album and a paid invoice.
+    if anat_best is not None:
+        return _deliver_flagged(anat_best)
     return {"accepted": False, "cost": cost, "attempts": attempts,
             "repaired": repaired}
 
