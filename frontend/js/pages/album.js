@@ -8,7 +8,7 @@ import {
 
 const PAGE = 30;
 
-let filter = 'all';
+let filter = 'final';
 let offset = 0;
 let total = 0;
 let loading = false;
@@ -20,11 +20,16 @@ let bar = null;
 let grid = null;
 let modeBtn = null;
 
+/* The album opens on the finals: a mixed "todas" view put every preview
+   next to the images she had chosen, and the previews are the working
+   material, not the result.  Favourites have their own tab and are not
+   repeated here.  "Fiables" are the finals that passed every check outright;
+   an image delivered with a warning about a hand is left out of that view
+   and marked with "!" on its tile, because it is hers to look at. */
 const FILTERS = [
-  { key: 'all', label: 'Todas', params: {} },
   { key: 'final', label: 'Finales', params: { kind: 'final' } },
   { key: 'preview', label: 'Previas', params: { kind: 'preview' } },
-  { key: 'fav', label: 'Favoritas', params: { favorites: true } },
+  { key: 'fiables', label: 'Fiables', params: { kind: 'final', fiables: true } },
 ];
 
 function currentParams() {
@@ -108,6 +113,8 @@ function tile(img) {
   }, [
     lazyImg(img.thumb_url, ''),
     img.is_favorite ? el('div', { class: 'tile__flag', text: '♥' }) : null,
+    img.con_aviso ? el('div', { class: 'tile__flag', text: '!', title: 'Entregada con aviso: revisala',
+      style: { left: '8px', right: 'auto' } }) : null,
     el('div', { class: 'tile__meta' }, [
       el('span', { text: pct(img.score) }),
       el('span', { text: img.cost_usd > 0 ? moneyExact(img.cost_usd) : 'gratis' }),
@@ -240,15 +247,6 @@ async function markFinalSelected() {
   reload();
 }
 
-async function favoriteSelected(on) {
-  const ids = Array.from(selected);
-  try {
-    await api.post('/api/favorites/bulk', { image_ids: ids, favorite: on });
-    toast(on ? 'Anadidas a favoritos' : 'Quitadas de favoritos', 'ok');
-    setMode(false);
-    reload();
-  } catch (err) { toast(err.message, 'danger'); }
-}
 
 /* -------------------------------------------------------------------- page */
 
@@ -300,8 +298,6 @@ async function render() {
     onCancel: () => setMode(false),
     actions: [
       { label: 'Marcar final', onClick: markFinalSelected },
-      { label: 'Favoritos', onClick: () => favoriteSelected(true) },
-      { label: 'Quitar favorito', onClick: () => favoriteSelected(false) },
       { label: 'Eliminar', kind: 'danger', onClick: deleteSelected },
     ],
   });

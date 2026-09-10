@@ -31,6 +31,9 @@ def _payload(row: dict) -> dict:
         "cost_usd": round(float(row.get("cost_usd") or 0.0), 5),
         "provider": row.get("provider"), "model": row.get("model"),
         "is_favorite": bool(row.get("is_favorite")),
+        # Delivered although one drawn detail failed (a hand, usually) - the
+        # album has to show which ones she still has to look at herself.
+        "con_aviso": bool(verdict.get("entregada_con_aviso")),
         "summary": verdict.get("summary", ""),
         "choices": meta.get("choices") or {},
         "created_at": row.get("created_at"),
@@ -39,8 +42,8 @@ def _payload(row: dict) -> dict:
 
 @router.get("")
 def list_images(kind: str | None = None, run_id: str | None = None,
-                favorites: bool = False, limit: int = 40, offset: int = 0,
-                order: str = "desc",
+                favorites: bool = False, fiables: bool = False,
+                limit: int = 40, offset: int = 0, order: str = "desc",
                 user: dict = Depends(security.active_user)) -> dict:
     sql = "SELECT * FROM images WHERE user_id=? AND deleted_at IS NULL"
     params: list = [user["id"]]
@@ -52,6 +55,12 @@ def list_images(kind: str | None = None, run_id: str | None = None,
         params.append(run_id)
     if favorites:
         sql += " AND is_favorite=1"
+    if fiables:
+        # Only the images that passed every check outright.  The ones handed
+        # over with a warning (orchestrator.ANATOMY_ONLY_DELIVERS) are her to
+        # judge and are left out of this view on purpose.
+        sql += (" AND COALESCE(json_extract(verdict_json,"
+                "'$.entregada_con_aviso'),0)<>1")
 
     total_row = db.q1(sql.replace("SELECT *", "SELECT COUNT(*) AS n", 1), params)
     total = int(total_row["n"] or 0) if total_row else 0
