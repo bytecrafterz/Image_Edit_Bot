@@ -1,14 +1,26 @@
-"""Download the two face models the identity check needs.
+"""Download the models the identity and body checks need.
 
-They live under ``backend/app/models`` and are NOT in the repository: the
-recogniser alone is 37 MB, which is bigger than everything else here put
-together, so .gitignore excludes ``backend/app/models/*.onnx`` and this script
-puts them back on a fresh clone.
+The two face models live under ``backend/app/models`` and are NOT in the
+repository: the recogniser alone is 37 MB, which is bigger than everything else
+here put together, so .gitignore excludes ``backend/app/models/*.onnx`` and
+this script puts them back on a fresh clone.
 
-Both come from the OpenCV Zoo (github.com/opencv/opencv_zoo), Apache-2.0, and
-run entirely on this machine through OpenCV's own ``cv2.FaceRecognizerSF`` and
-``cv2.FaceDetectorYN``.  Downloading them is not a paid API call and sends no
-image anywhere; nothing here talks to fal.ai or to Anthropic.
+The third is the body model.  MediaPipe ships only its "full" pose model inside
+the wheel and fetches the "heavy" one - the ruler every body threshold was
+calibrated with - from Google storage on first use, writing it INTO
+site-packages.  On the Linux service that directory is read-only
+(ProtectSystem=strict), so the first pose ever asked for on the deployed box
+tried that download during a paid image on 2026-09-10, failed on the write, and
+every body measurement after it was silently omitted.  Fetching it here, into
+the venv this script runs from, is what makes the deployed measurement the
+same as the one the thresholds were fitted to.  Run it with the DEPLOYED venv's
+python, as the service user, or copy the file there by hand.
+
+The face models come from the OpenCV Zoo (github.com/opencv/opencv_zoo),
+Apache-2.0, and run entirely on this machine through OpenCV's own
+``cv2.FaceRecognizerSF`` and ``cv2.FaceDetectorYN``; the pose model comes from
+the same storage MediaPipe itself uses.  Downloading them is not a paid API
+call and sends no image anywhere; nothing here talks to fal.ai or to Anthropic.
 
 Every file is checked against the sha256 of the exact revision that was
 measured and calibrated in identity/embedding.py.  A file that does not match
@@ -45,6 +57,16 @@ MODELS = (
         "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
         "what": "YuNet, que situa los cinco puntos con los que se alinea la cara",
     },
+    {
+        "name": "pose_landmark_heavy.tflite",
+        "url": "https://storage.googleapis.com/mediapipe-assets/pose_landmark_heavy.tflite",
+        "bytes": 27709200,
+        "sha256": "59e42d71bcd44cbdbabc419f0ff76686595fd265419566bd4009ef703ea8e1fe",
+        "what": "MediaPipe Pose 'heavy', los 33 puntos del cuerpo con los que se miden tus proporciones",
+        # Not under MODEL_DIR: MediaPipe looks for it in ONE place, inside its
+        # own package, and there is no setting to point it elsewhere.
+        "dir": "mediapipe",
+    },
 )
 
 CHUNK = 1 << 20
@@ -58,8 +80,27 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+def _model_dir(model: dict) -> str:
+    """Where this model has to live - our folder, or MediaPipe's own."""
+    if model.get("dir") != "mediapipe":
+        return MODEL_DIR
+    try:
+        import mediapipe
+    except ImportError:
+        print("  mediapipe no esta instalado en este venv: %s no se descarga"
+              % model["name"])
+        return ""
+    # Same rule MediaPipe uses in python/solutions/download_utils.py: the
+    # package root, then modules/pose_landmark.
+    root = os.path.dirname(os.path.abspath(mediapipe.__file__))
+    return os.path.join(root, "modules", "pose_landmark")
+
+
 def _fetch(model: dict, force: bool) -> bool:
-    target = os.path.join(MODEL_DIR, model["name"])
+    model_dir = _model_dir(model)
+    if not model_dir:
+        return False
+    target = os.path.join(model_dir, model["name"])
     if os.path.exists(target) and not force:
         if _sha256(target) == model["sha256"]:
             print("ya esta: %s" % model["name"])
@@ -69,8 +110,8 @@ def _fetch(model: dict, force: bool) -> bool:
 
     print("descargando %s (%.1f MB) - %s"
           % (model["name"], model["bytes"] / 1e6, model["what"]))
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    handle, tmp = tempfile.mkstemp(dir=MODEL_DIR, suffix=".part")
+    os.makedirs(model_dir, exist_ok=True)
+    handle, tmp = tempfile.mkstemp(dir=model_dir, suffix=".part")
     os.close(handle)
     try:
         with urllib.request.urlopen(model["url"], timeout=180) as response, \
@@ -104,10 +145,12 @@ def main() -> int:
     args = parser.parse_args()
     ok = all(_fetch(model, args.force) for model in MODELS)
     if ok:
-        print("\nListo. La comprobacion de identidad ya puede reconocer caras.")
+        print("\nListo. La comprobacion de identidad ya puede reconocer caras y "
+              "medir el cuerpo con el modelo completo.")
     else:
         print("\nFaltan modelos: la comprobacion de identidad dira que no puede "
-              "juzgar el rostro en lugar de aprobarlo en silencio.")
+              "juzgar el rostro en lugar de aprobarlo en silencio, y el cuerpo "
+              "se medira con el modelo reducido (analysis/pose.py lo avisa).")
     return 0 if ok else 1
 
 

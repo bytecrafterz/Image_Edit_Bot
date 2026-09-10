@@ -14,6 +14,7 @@ from the job thread pool without knowing any of it.
 """
 from __future__ import annotations
 
+import logging
 import threading
 
 import cv2
@@ -58,6 +59,26 @@ _REASON_NO_MP = "mediapipe no disponible"
 _LOCK = threading.Lock()
 _POSE = None
 _INIT_FAILED = False
+_LOG = logging.getLogger("photorobot.pose")
+
+# Which landmark model to build, in the order they are tried.  MediaPipe ships
+# only the "full" model (complexity 1) inside its wheel; "heavy" (complexity 2)
+# is fetched from Google storage on first use and written INTO site-packages.
+# On the Linux service that directory is read-only (ProtectSystem=strict), so
+# the first pose ever asked for on the deployed box did this, on 2026-09-10 at
+# 09:22 during a paid image: printed "Downloading model to .../.venv/...",
+# failed on the write, and the bare except below turned that into
+# _INIT_FAILED for the life of the process.  Every body measurement after it
+# came back "no se pudieron medir proporciones comparables, comprobacion
+# omitida" - the gate that exists because a previous tool slimmed her was
+# blind, and nothing in the journal said so.
+#
+# So: heavy first, because it is the ruler every threshold in identity/verify
+# was calibrated with; full second, because a slightly coarser ruler is a
+# measurement and a missing one is not; and the failure is LOGGED, so the
+# journal names the model that was actually loaded after every deploy.
+_COMPLEXITIES: tuple[int, ...] = (2, 1)
+_LOADED_COMPLEXITY: int | None = None
 
 
 # ------------------------------------------------------------------- helpers
@@ -103,20 +124,60 @@ def _downscale(img: np.ndarray, max_side: int) -> np.ndarray:
 
 def _detector():
     """Lazy singleton.  Caller must already hold ``_LOCK``."""
-    global _POSE, _INIT_FAILED
+    global _POSE, _INIT_FAILED, _LOADED_COMPLEXITY
     if _POSE is not None or _INIT_FAILED:
         return _POSE
-    try:
-        _POSE = mp.solutions.pose.Pose(
-            static_image_mode=True,
-            model_complexity=2,
-            enable_segmentation=False,
-            min_detection_confidence=0.5,
-        )
-    except Exception:  # broken install, missing model asset, out of memory
-        _INIT_FAILED = True
-        _POSE = None
+    errors: list[str] = []
+    for complexity in _COMPLEXITIES:
+        try:
+            _POSE = mp.solutions.pose.Pose(
+                static_image_mode=True,
+                model_complexity=complexity,
+                enable_segmentation=False,
+                min_detection_confidence=0.5,
+            )
+            _LOADED_COMPLEXITY = complexity
+            if complexity != _COMPLEXITIES[0]:
+                # Said at WARNING on purpose: the numbers this process produces
+                # from here on were made with a coarser ruler than the
+                # thresholds were calibrated with, and whoever reads the
+                # journal after a deploy has to be able to see that.
+                _LOG.warning(
+                    "Pose: modelo de complejidad %d no disponible (%s); se usa "
+                    "complejidad %d. Copia pose_landmark_heavy.tflite al venv "
+                    "desplegado para recuperar la medida completa.",
+                    _COMPLEXITIES[0], "; ".join(errors)[:200], complexity)
+            return _POSE
+        except Exception as exc:  # broken install, missing asset, read-only venv, OOM
+            errors.append("%s: %s" % (type(exc).__name__, str(exc)[:120]))
+            _POSE = None
+    _INIT_FAILED = True
+    _LOG.error("Pose: MediaPipe no se pudo inicializar con ninguna "
+               "complejidad (%s); toda medida corporal queda omitida.",
+               "; ".join(errors)[:300])
     return _POSE
+
+
+def ensure_loaded() -> dict:
+    """Build the detector now, if it is not built, and say what was loaded.
+
+    Called once at startup and by /api/health, so the model state is in the
+    journal after every deploy and on the health page - instead of being
+    discovered, as it was on 2026-09-10, from a body check that said
+    "comprobacion omitida" on a paid image.
+    """
+    if MEDIAPIPE_AVAILABLE:
+        with _LOCK:
+            _detector()
+    return loaded_model()
+
+
+def loaded_model() -> dict:
+    """What this process is measuring with - for the health endpoint and logs."""
+    return {"available": MEDIAPIPE_AVAILABLE, "failed": _INIT_FAILED,
+            "complexity": _LOADED_COMPLEXITY,
+            "model": {2: "pose_landmark_heavy", 1: "pose_landmark_full",
+                      0: "pose_landmark_lite"}.get(_LOADED_COMPLEXITY)}
 
 
 def _clamp01(value: float) -> float:

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
+from .analysis import pose as pose_mod
 from .config import FRONTEND_DIR, LOG_DIR, SETTINGS, ensure_dirs
 
 log = logging.getLogger("photorobot")
@@ -81,6 +82,15 @@ def create_app() -> FastAPI:
         avail = registry.availability()
         log.info("Providers: %s", ", ".join(
             f"{k}={'on' if v['available'] else 'off'}" for k, v in avail.items()))
+        # The body model this process will measure with, said at boot so a
+        # deploy that lost pose_landmark_heavy.tflite is visible in the
+        # journal immediately, not after the first paid image.
+        pose_state = pose_mod.ensure_loaded()
+        log.info("Pose: %s (complejidad %s)%s",
+                 pose_state.get("model") or "sin modelo",
+                 pose_state.get("complexity"),
+                 "" if pose_state.get("complexity") == 2
+                 else " - falta pose_landmark_heavy.tflite: scripts/fetch_face_model.py")
         log.info("%s v%s ready - data at %s", SETTINGS.app_name, SETTINGS.version,
                  db.DB_PATH.parent)
 
@@ -150,6 +160,12 @@ def create_app() -> FastAPI:
             "python": sys.version.split()[0],
             "codigo": _code_fingerprint(),
             "providers": registry.availability(),
+            # Which body model this process measures with.  "heavy" is the one
+            # the thresholds were calibrated with; "full" means the deployed
+            # venv is missing pose_landmark_heavy.tflite (scripts/
+            # fetch_face_model.py puts it back); None means no body
+            # measurement at all - see analysis/pose.py.
+            "pose": pose_mod.ensure_loaded(),
         }
 
     # ------------------------------------------------------- static assets
