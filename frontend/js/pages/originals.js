@@ -195,15 +195,15 @@ async function upload(view, files) {
 function recordLine(original) {
   const h = original.historial;
   const bits = [];
-  if (h && h.pagadas >= 3) {
-    const bad = h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
-    bits.push(bad ? `Ha fallado ${h.cara_fallos} de ${h.cara_medidas} pagadas`
-                  : `Sale bien ${h.buenas} de ${h.pagadas} pagadas`);
-  }
-  if (!bits.length) return null;
-  const bad = h && h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
+  if (!(h && h.pagadas >= 3)) return null;
+  const bad = h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
+  const good = !bad && h.buenas / h.pagadas >= 0.6;
+  bits.push(bad ? `Ha fallado ${h.cara_fallos} de ${h.cara_medidas} pagadas`
+          : good ? `Sale bien ${h.buenas} de ${h.pagadas} pagadas`
+                 : `${h.buenas} buenas de ${h.pagadas} pagadas`);
   return el('div', { class: 'tiny', text: bits.join(' · '),
-    style: { color: bad ? 'var(--danger, #e5484d)' : 'inherit', fontWeight: bad ? '600' : '400' } });
+    style: { color: bad ? 'var(--danger, #e5484d)' : good ? 'var(--ok, #46a758)' : 'inherit',
+             fontWeight: bad || good ? '600' : '400' } });
 }
 
 function card(view, original, index) {

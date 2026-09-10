@@ -128,12 +128,17 @@ export function recordBadge(original) {
   const h = original.historial;
   const parts = [];
   if (h && h.pagadas >= 3) {
+    // Red when the face is the problem, green only when most paid images
+    // really came out, plain otherwise: "sale bien 2 de 8" in green was a
+    // sentence the numbers did not support.
     const bad = h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
+    const good = !bad && h.buenas / h.pagadas >= 0.6;
     parts.push(el('span', {
       text: bad ? `ha fallado ${h.cara_fallos} de ${h.cara_medidas}`
-                : `sale bien ${h.buenas} de ${h.pagadas}`,
-      style: { display: 'block', fontSize: '.7rem', fontWeight: '600',
-               color: bad ? 'var(--danger, #e5484d)' : 'var(--ok, #46a758)' } }));
+          : good ? `sale bien ${h.buenas} de ${h.pagadas}`
+                 : `${h.buenas} buenas de ${h.pagadas}`,
+      style: { display: 'block', fontSize: '.7rem', fontWeight: bad || good ? '600' : '400',
+               color: bad ? 'var(--danger, #e5484d)' : good ? 'var(--ok, #46a758)' : 'inherit' } }));
   }
   return parts.length ? el('span', {}, parts) : null;
 }
