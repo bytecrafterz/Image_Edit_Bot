@@ -241,8 +241,9 @@ def user_images(user_id: str, kind: str = "", limit: int = 60, offset: int = 0,
     sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params += [max(1, min(int(limit), 200)), max(0, int(offset))]
     rows = db.rows_to_dicts(db.q(sql, params))
+    # ``kind`` is db.audit's own first parameter; the payload key is ``vista``.
     db.audit("admin.view_images", user_id, actor=admin["email"],
-             kind=kind or "all", n=len(rows))
+             vista=kind or "all", n=len(rows))
     return {"images": [_payload(r) for r in rows],
             "total": int(total["n"] or 0) if total else 0}
 
