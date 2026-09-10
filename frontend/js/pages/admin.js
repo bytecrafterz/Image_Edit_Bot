@@ -5,7 +5,7 @@ import { api } from '../api.js';
 import { store } from '../store.js';
 import {
   el, clear, note, toast, spinner, sheet, kv, field, moneyExact, dateLabel,
-  confirmSheet, empty,
+  confirmSheet, empty, lazyImg, pct,
 } from '../ui.js';
 
 let tab = 'users';
@@ -116,6 +116,8 @@ async function renderUsers(view, body) {
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => rechargeUser(view, user) }, 'Anadir saldo'),
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
+          onClick: () => viewImages(user) }, 'Ver imagenes'),
+        el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => editUser(view, user) }, 'Editar'),
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => resetPassword(user) }, 'Contrasena'),
@@ -124,6 +126,69 @@ async function renderUsers(view, body) {
       ]),
     ]));
   }
+}
+
+/* The images one account has generated, in a sheet: finals first, previews
+   one tap away, each opening full size with a download.  Every look is
+   written to the audit on the server side. */
+async function viewImages(user) {
+  let kind = 'final';
+  const gridBox = el('div', { class: 'grid' });
+  const status = el('p', { class: 'tiny', text: '' });
+  const chips = el('div', { class: 'chips', style: { marginBottom: '10px' } });
+  const load = async () => {
+    clear(gridBox);
+    gridBox.appendChild(spinner());
+    try {
+      const data = await api.get(`/api/admin/users/${user.id}/images?kind=${kind}&limit=120`);
+      clear(gridBox);
+      status.textContent = data.total ? `${data.total} ${kind === 'final' ? 'finales' : 'previas'}` : '';
+      if (!data.images.length) {
+        gridBox.appendChild(empty({ icon: '◇', title: kind === 'final' ? 'Sin finales' : 'Sin vistas previas' }));
+        return;
+      }
+      for (const img of data.images) {
+        gridBox.appendChild(el('div', { class: 'tile', onClick: () => openAdminViewer(user, img) }, [
+          lazyImg(img.thumb_url, ''),
+          img.con_aviso ? el('div', { class: 'tile__flag', text: '!', style: { left: '8px', right: 'auto' } }) : null,
+          el('div', { class: 'tile__meta' }, [
+            el('span', { text: pct(img.score) }),
+            el('span', { text: img.cost_usd > 0 ? moneyExact(img.cost_usd) : 'gratis' }),
+          ]),
+        ]));
+      }
+    } catch (err) { clear(gridBox); gridBox.appendChild(note('info', 'No se pudo cargar', err.message)); }
+  };
+  for (const [key, label] of [['final', 'Finales'], ['preview', 'Previas']]) {
+    chips.appendChild(el('button', { class: 'chip' + (kind === key ? ' chip--on' : ''), type: 'button',
+      onClick: (event) => {
+        kind = key;
+        for (const c of chips.children) c.classList.toggle('chip--on', c === event.currentTarget);
+        load();
+      } }, label));
+  }
+  sheet({
+    title: `Imagenes de ${user.display_name || user.email}`,
+    body: el('div', {}, [chips, status, gridBox]),
+    actions: [{ label: 'Cerrar', kind: 'secondary' }],
+  });
+  load();
+}
+
+function openAdminViewer(user, img) {
+  const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (event) => { if (event.key === 'Escape') close(); };
+  const node = el('div', { class: 'viewer' }, [
+    el('button', { class: 'viewer__close', type: 'button', 'aria-label': 'Cerrar',
+      onClick: () => close() }, '×'),
+    el('img', { class: 'viewer__img', src: img.url, alt: '' }),
+    el('div', { class: 'viewer__bar' }, [
+      el('span', { class: 'tiny', text: `${pct(img.score)} · ${img.kind} · ${img.summary || ''}`.slice(0, 160) }),
+      el('a', { class: 'btn', href: `/api/admin/users/${user.id}/images/${img.id}/download` }, 'Descargar'),
+    ]),
+  ]);
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(node);
 }
 
 /* Write down money added for this account at the provider's website.  The

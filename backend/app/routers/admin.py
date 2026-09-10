@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import secrets
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .. import config, db, security
@@ -214,6 +217,47 @@ def delete_user(user_id: str,
     db.execute("DELETE FROM users WHERE id=?", (user_id,))
     db.audit("admin.delete_user", user_id, actor=admin["email"])
     return {"ok": True}
+
+
+@router.get("/users/{user_id}/images")
+def user_images(user_id: str, kind: str = "", limit: int = 60, offset: int = 0,
+                admin: dict = Depends(security.admin_user)) -> dict:
+    """The images one account has generated, for the administrator.
+
+    Same rows and same shape the account's own album gets (album._payload),
+    read across the ownership line an ordinary route never crosses - so it is
+    written to the audit, with who looked and at whom, every time.  Thumbnails
+    travel by the same signed link the album uses; that link names a file,
+    not an account, which is what lets a different browser open it.
+    """
+    from .album import _payload
+    _user_row(user_id)
+    sql = "SELECT * FROM images WHERE user_id=? AND deleted_at IS NULL"
+    params: list = [user_id]
+    if kind in ("preview", "final", "repair"):
+        sql += " AND kind=?"
+        params.append(kind)
+    total = db.q1(sql.replace("SELECT *", "SELECT COUNT(*) AS n", 1), params)
+    sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params += [max(1, min(int(limit), 200)), max(0, int(offset))]
+    rows = db.rows_to_dicts(db.q(sql, params))
+    db.audit("admin.view_images", user_id, actor=admin["email"],
+             kind=kind or "all", n=len(rows))
+    return {"images": [_payload(r) for r in rows],
+            "total": int(total["n"] or 0) if total else 0}
+
+
+@router.get("/users/{user_id}/images/{image_id}/download")
+def user_image_download(user_id: str, image_id: str,
+                        admin: dict = Depends(security.admin_user)):
+    row = db.row_to_dict(db.q1(
+        "SELECT * FROM images WHERE id=? AND user_id=?", (image_id, user_id)))
+    if not row or not Path(str(row.get("path") or "")).is_file():
+        raise HTTPException(404, "Esa imagen no existe.")
+    db.audit("admin.download_image", user_id, actor=admin["email"],
+             image_id=image_id)
+    return FileResponse(row["path"], media_type="image/jpeg",
+                        filename=f"{image_id}.jpg")
 
 
 @router.get("/stats")
