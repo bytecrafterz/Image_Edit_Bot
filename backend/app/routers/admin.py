@@ -248,6 +248,51 @@ def user_images(user_id: str, kind: str = "", limit: int = 60, offset: int = 0,
             "total": int(total["n"] or 0) if total else 0}
 
 
+@router.get("/users/{user_id}/originals")
+def user_originals(user_id: str, limit: int = 120, offset: int = 0,
+                   admin: dict = Depends(security.admin_user)) -> dict:
+    """The reference photographs one account uploaded, for the administrator.
+
+    These are the most private files the installation holds, and the audit
+    row says who looked at whose, every time.  Same signed thumbnail link the
+    account's own "Mis fotos" uses.
+    """
+    _user_row(user_id)
+    total = db.q1("SELECT COUNT(*) AS n FROM originals WHERE user_id=? "
+                  "AND deleted_at IS NULL", (user_id,))
+    rows = db.rows_to_dicts(db.q(
+        "SELECT * FROM originals WHERE user_id=? AND deleted_at IS NULL "
+        "ORDER BY sort_order, created_at LIMIT ? OFFSET ?",
+        (user_id, max(1, min(int(limit), 300)), max(0, int(offset)))))
+    out = []
+    for row in rows:
+        quality = row.get("quality") if isinstance(row.get("quality"), dict) else {}
+        out.append({
+            "id": row["id"], "filename": row.get("filename"),
+            "shot_type": row.get("shot_type"),
+            "width": row.get("width"), "height": row.get("height"),
+            "quality": round(float(quality.get("score") or 0.0), 3),
+            "issues": list(quality.get("issues") or []),
+            "url": storage.public_url(row["id"], "full"),
+            "thumb_url": storage.public_url(row["id"], "thumb"),
+            "created_at": row.get("created_at"),
+        })
+    db.audit("admin.view_originals", user_id, actor=admin["email"], n=len(out))
+    return {"originals": out, "total": int(total["n"] or 0) if total else 0}
+
+
+@router.get("/users/{user_id}/originals/{original_id}/download")
+def user_original_download(user_id: str, original_id: str,
+                           admin: dict = Depends(security.admin_user)):
+    row = db.row_to_dict(db.q1(
+        "SELECT * FROM originals WHERE id=? AND user_id=?", (original_id, user_id)))
+    if not row or not Path(str(row.get("path") or "")).is_file():
+        raise HTTPException(404, "Esa foto no existe.")
+    db.audit("admin.download_original", user_id, actor=admin["email"],
+             original_id=original_id)
+    return FileResponse(row["path"], filename=row.get("filename") or f"{original_id}.jpg")
+
+
 @router.get("/users/{user_id}/images/{image_id}/download")
 def user_image_download(user_id: str, image_id: str,
                         admin: dict = Depends(security.admin_user)):

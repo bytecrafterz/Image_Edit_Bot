@@ -136,10 +136,31 @@ async function viewImages(user) {
   const gridBox = el('div', { class: 'grid' });
   const status = el('p', { class: 'tiny', text: '' });
   const chips = el('div', { class: 'chips', style: { marginBottom: '10px' } });
+  const SHOT = { closeup: 'Primer plano', half: 'Medio cuerpo', full: 'Cuerpo entero' };
   const load = async () => {
     clear(gridBox);
     gridBox.appendChild(spinner());
     try {
+      if (kind === 'original') {
+        // The photographs she uploaded, not what the robot made from them.
+        const data = await api.get(`/api/admin/users/${user.id}/originals?limit=300`);
+        clear(gridBox);
+        status.textContent = data.total ? `${data.total} subidas` : '';
+        if (!data.originals.length) { gridBox.appendChild(empty({ icon: '◇', title: 'Sin fotos subidas' })); return; }
+        for (const o of data.originals) {
+          gridBox.appendChild(el('div', { class: 'tile', onClick: () => openAdminViewer(user, {
+            id: o.id, url: o.url, kind: 'subida', score: o.quality,
+            summary: [o.filename, SHOT[o.shot_type] || '', ...(o.issues || [])].filter(Boolean).join(' · '),
+            download: `/api/admin/users/${user.id}/originals/${o.id}/download` }) }, [
+            lazyImg(o.thumb_url, o.filename),
+            el('div', { class: 'tile__meta' }, [
+              el('span', { text: SHOT[o.shot_type] || 'Sin identificar' }),
+              el('span', { text: 'Calidad ' + pct(o.quality) }),
+            ]),
+          ]));
+        }
+        return;
+      }
       const data = await api.get(`/api/admin/users/${user.id}/images?kind=${kind}&limit=120`);
       clear(gridBox);
       status.textContent = data.total ? `${data.total} ${kind === 'final' ? 'finales' : 'previas'}` : '';
@@ -159,7 +180,7 @@ async function viewImages(user) {
       }
     } catch (err) { clear(gridBox); gridBox.appendChild(note('info', 'No se pudo cargar', err.message)); }
   };
-  for (const [key, label] of [['final', 'Finales'], ['preview', 'Previas']]) {
+  for (const [key, label] of [['final', 'Finales'], ['preview', 'Previas'], ['original', 'Subidas']]) {
     chips.appendChild(el('button', { class: 'chip' + (kind === key ? ' chip--on' : ''), type: 'button',
       onClick: (event) => {
         kind = key;
@@ -184,7 +205,7 @@ function openAdminViewer(user, img) {
     el('img', { class: 'viewer__img', src: img.url, alt: '' }),
     el('div', { class: 'viewer__bar' }, [
       el('span', { class: 'tiny', text: `${pct(img.score)} · ${img.kind} · ${img.summary || ''}`.slice(0, 160) }),
-      el('a', { class: 'btn', href: `/api/admin/users/${user.id}/images/${img.id}/download` }, 'Descargar'),
+      el('a', { class: 'btn', href: img.download || `/api/admin/users/${user.id}/images/${img.id}/download` }, 'Descargar'),
     ]),
   ]);
   document.addEventListener('keydown', onKey);
