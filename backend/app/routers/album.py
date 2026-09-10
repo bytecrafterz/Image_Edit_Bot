@@ -34,6 +34,7 @@ def _payload(row: dict) -> dict:
         # Delivered although one drawn detail failed (a hand, usually) - the
         # album has to show which ones she still has to look at herself.
         "con_aviso": bool(verdict.get("entregada_con_aviso")),
+        "deleted_at": row.get("deleted_at"),
         "summary": verdict.get("summary", ""),
         "choices": meta.get("choices") or {},
         "created_at": row.get("created_at"),
@@ -43,9 +44,13 @@ def _payload(row: dict) -> dict:
 @router.get("")
 def list_images(kind: str | None = None, run_id: str | None = None,
                 favorites: bool = False, fiables: bool = False,
+                deleted: bool = False,
                 limit: int = 40, offset: int = 0, order: str = "desc",
                 user: dict = Depends(security.active_user)) -> dict:
-    sql = "SELECT * FROM images WHERE user_id=? AND deleted_at IS NULL"
+    # ``deleted`` is the wastebasket: what she removed, still on disk until
+    # the administrator purges it, and restorable from there.
+    sql = ("SELECT * FROM images WHERE user_id=? AND deleted_at IS "
+           + ("NOT NULL" if deleted else "NULL"))
     params: list = [user["id"]]
     if kind in ("preview", "final", "repair"):
         sql += " AND kind=?"
@@ -187,22 +192,48 @@ def bulk_delete(body: BulkDeleteBody,
     if not rows:
         return {"ok": True, "deleted": 0}
 
+    # THE FILE STAYS.  Deleting used to unlink it at once, so "Papelera" could
+    # only ever list rows with nothing behind them and restore answered 410.
+    # A removed image now keeps its file until the administrator purges the
+    # wastebasket (admin maintenance/purge-deleted), and until then it can be
+    # put back with one tap.
     db.execute(
         f"UPDATE images SET deleted_at=? WHERE user_id=? AND id IN ({placeholders})",
         (db.now(), user["id"], *ids))
-    for row in rows:
-        storage.delete_file(row.get("path"))
-        storage.delete_file(row.get("thumb_path"))
     db.audit("album.bulk_delete", user["id"], n=len(rows))
     return {"ok": True, "deleted": len(rows)}
 
 
+class BulkRestoreBody(BaseModel):
+    image_ids: list[str]
+
+
+@router.post("/bulk-restore")
+def bulk_restore(body: BulkRestoreBody,
+                 user: dict = Depends(security.active_user)) -> dict:
+    """Put a selection back from the wastebasket in one request."""
+    ids = [str(i) for i in (body.image_ids or []) if str(i).strip()][:500]
+    if not ids:
+        raise HTTPException(400, "No has elegido ninguna imagen.")
+    placeholders = ",".join("?" * len(ids))
+    rows = db.rows_to_dicts(db.q(
+        f"SELECT id, path FROM images WHERE user_id=? AND deleted_at IS NOT NULL "
+        f"AND id IN ({placeholders})", (user["id"], *ids)))
+    alive = [r["id"] for r in rows if Path(str(r.get("path") or "")).is_file()]
+    gone = len(rows) - len(alive)
+    if alive:
+        marks = ",".join("?" * len(alive))
+        db.execute(f"UPDATE images SET deleted_at=NULL WHERE user_id=? AND id IN ({marks})",
+                   (user["id"], *alive))
+    db.audit("album.bulk_restore", user["id"], n=len(alive), gone=gone)
+    return {"ok": True, "restored": len(alive), "gone": gone}
+
+
 @router.delete("/{image_id}")
 def delete(image_id: str, user: dict = Depends(security.active_user)) -> dict:
-    row = _own(image_id, user)
+    _own(image_id, user)
+    # To the wastebasket, file kept: see bulk_delete.
     db.execute("UPDATE images SET deleted_at=? WHERE id=?", (db.now(), image_id))
-    storage.delete_file(row.get("path"))
-    storage.delete_file(row.get("thumb_path"))
     db.audit("album.delete", user["id"], image_id=image_id)
     return {"ok": True}
 

@@ -1,5 +1,6 @@
 /* Administration console.  Accounts, platform numbers, providers, audit. */
 
+import { refreshBalances } from '../app.js';
 import { api } from '../api.js';
 import { store } from '../store.js';
 import {
@@ -153,6 +154,7 @@ function rechargeUser(view, user) {
               provider: provider.value, amount_usd: Number(amount.value),
               note: noteInput.value });
             toast(`Anotado. Saldo de ${PROVIDER_ES[provider.value]}: ${moneyExact(result.balance)}`, 'ok');
+            refreshBalances();
             render(view);
           } catch (err) { toast(err.message, 'danger'); }
         } },

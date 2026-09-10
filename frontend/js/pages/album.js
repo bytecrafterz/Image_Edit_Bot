@@ -23,13 +23,14 @@ let modeBtn = null;
 /* The album opens on the finals: a mixed "todas" view put every preview
    next to the images she had chosen, and the previews are the working
    material, not the result.  Favourites have their own tab and are not
-   repeated here.  "Fiables" are the finals that passed every check outright;
-   an image delivered with a warning about a hand is left out of that view
-   and marked with "!" on its tile, because it is hers to look at. */
+   repeated here.  Papelera is what she removed: the file is kept until the
+   administrator purges it, so anything there can be put back.  An image
+   delivered with a warning about a hand carries "!" on its tile, because
+   it is hers to look at. */
 const FILTERS = [
   { key: 'final', label: 'Finales', params: { kind: 'final' } },
   { key: 'preview', label: 'Previas', params: { kind: 'preview' } },
-  { key: 'fiables', label: 'Fiables', params: { kind: 'final', fiables: true } },
+  { key: 'papelera', label: 'Papelera', params: { deleted: true } },
 ];
 
 function currentParams() {
@@ -214,12 +215,26 @@ function showInfo(img) {
 async function deleteSelected() {
   const ids = Array.from(selected);
   const ok = await confirmSheet(
-    `Se eliminaran ${ids.length} imagen(es). No se puede deshacer.`,
+    `${ids.length} imagen(es) iran a la papelera. Puedes recuperarlas desde alli.`,
     { title: 'Eliminar seleccionadas', confirmLabel: 'Eliminar', danger: true });
   if (!ok) return;
   try {
     const data = await api.post('/api/album/bulk-delete', { image_ids: ids });
-    toast(`${data.deleted} eliminada(s)`, 'ok');
+    toast(`${data.deleted} en la papelera`, 'ok');
+    setMode(false);
+    reload();
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
+/* Back from the wastebasket.  The server only restores what is still on
+   disk and says how many were already purged. */
+async function restoreSelected() {
+  const ids = Array.from(selected);
+  try {
+    const data = await api.post('/api/album/bulk-restore', { image_ids: ids });
+    toast(data.gone
+      ? `${data.restored} recuperada(s); ${data.gone} ya no existian`
+      : `${data.restored} recuperada(s)`, 'ok');
     setMode(false);
     reload();
   } catch (err) { toast(err.message, 'danger'); }
@@ -296,10 +311,12 @@ async function render() {
     },
     onClear: () => { selected.clear(); syncTiles(); refreshBar(); },
     onCancel: () => setMode(false),
-    actions: [
-      { label: 'Marcar final', onClick: markFinalSelected },
-      { label: 'Eliminar', kind: 'danger', onClick: deleteSelected },
-    ],
+    actions: filter === 'papelera'
+      ? [{ label: 'Restaurar', onClick: restoreSelected }]
+      : [
+        { label: 'Marcar final', onClick: markFinalSelected },
+        { label: 'Eliminar', kind: 'danger', onClick: deleteSelected },
+      ],
   });
   bar.hidden = !selectMode;
   view.appendChild(bar);

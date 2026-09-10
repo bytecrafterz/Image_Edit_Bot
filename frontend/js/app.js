@@ -74,6 +74,20 @@ async function refreshAlerts() {
     const data = await api.get('/api/settings/alerts?limit=20');
     store.set({ alertsUnread: data.unread || 0, alerts: data.alerts || [] });
   } catch { /* a failed poll must stay silent */ }
+  refreshBalances();
+}
+
+/* The chip in the app bar used to be read once, at login, and then stood
+   still through every run and every top-up: she watched 0,04 leave in the
+   progress card while the bar kept the old figure.  Re-read whenever money
+   could have moved - a run finishing, a recharge written down - and with
+   the alerts poll for everything else. */
+export async function refreshBalances() {
+  if (!store.get('user')) return;
+  try {
+    const data = await api.get('/api/auth/me');
+    store.set({ balances: data.balances || {} });
+  } catch { /* stale is better than a spinner in the app bar */ }
 }
 
 function showAlerts() {

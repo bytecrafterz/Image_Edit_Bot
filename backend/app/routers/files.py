@@ -47,9 +47,10 @@ def _serve(path_str: str | None, filename: str) -> FileResponse:
 
 
 def _image_row(image_id: str, user_id: str) -> dict:
+    # Not filtered on deleted_at on purpose: the wastebasket shows what she
+    # removed, and a thumbnail she cannot see is not something she can restore.
     row = db.row_to_dict(db.q1(
-        "SELECT * FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL",
-        (image_id, user_id)))
+        "SELECT * FROM images WHERE id=? AND user_id=?", (image_id, user_id)))
     if not row:
         raise HTTPException(404, "Esa imagen no existe.")
     return row
@@ -92,8 +93,7 @@ def image_by_token(token: str):
     if not resolved:
         raise HTTPException(404, "Enlace no valido.")
     image_id, variant = resolved
-    row = db.row_to_dict(db.q1(
-        "SELECT * FROM images WHERE id=? AND deleted_at IS NULL", (image_id,)))
+    row = db.row_to_dict(db.q1("SELECT * FROM images WHERE id=?", (image_id,)))
     if row:
         path = row.get("thumb_path") if variant == "thumb" else row["path"]
         return _serve(path or row["path"], f"{image_id}.jpg")

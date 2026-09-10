@@ -5,6 +5,7 @@
    "Generar", and the amount is on screen before she does. */
 
 import { api } from '../api.js';
+import { refreshBalances } from '../app.js';
 import { store } from '../store.js';
 import { router } from '../router.js';
 import { progressCard, explainCard, reportCard } from '../onboarding.js';
@@ -668,10 +669,14 @@ async function startRun(view) {
   }
 }
 
+let lastSpent = -1;
+
 async function pollRun(view) {
   try {
     const run = await api.get(`/api/generate/status/${state.plan.run_id}`);
     state.run = run;
+    // Money moved: the app bar has to say so now, not at the next login.
+    if (run.spent_usd !== lastSpent) { lastSpent = run.spent_usd; refreshBalances(); }
     if (['done', 'failed', 'cancelled', 'stopped_no_balance'].includes(run.status)) {
       stopPolling();
       if (run.status === 'done' && run.images.length) {
