@@ -675,10 +675,20 @@ async function pollRun(view) {
     if (['done', 'failed', 'cancelled', 'stopped_no_balance'].includes(run.status)) {
       stopPolling();
       if (run.status === 'done' && run.images.length) {
+        if (state.finalizing) {
+          // The finals are in the album; there is nothing left to do on this
+          // screen.  Say so once and go back to the start for the next one.
+          const n = run.images.length;
+          toast(`Listo: ${n} ${n === 1 ? 'imagen' : 'imagenes'} en alta calidad, ya en tu album.`, 'ok');
+          reset();
+          await loadAndRender(view);
+          return;
+        }
         state.step = 5;
         renderStep5(view);
         return;
       }
+      state.finalizing = false;
     }
     renderStep4(view, run);
   } catch (err) {
@@ -853,6 +863,7 @@ async function runFinal(view) {
       quality: 'high',
     });
     state.plan = { ...state.plan, run_id: data.run_id };
+    state.finalizing = true;
     state.step = 4;
     renderStep4(view, null);
     stopPolling();

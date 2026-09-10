@@ -52,6 +52,7 @@ from . import learning, planner, prompt as prompt_mod, repair as repair_mod
 from . import protect as protect_mod
 from . import retouch as retouch_mod
 from . import risk as risk_mod
+from ..providers.base import GenRequest
 from . import router as router_mod
 
 log = logging.getLogger("photorobot.robot")
@@ -2423,6 +2424,92 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             "repaired": repaired}
 
 
+def _promote_previews(user: dict, run_id: str, selected: list, brief: dict,
+                      quality: str, original: dict, profile: dict,
+                      out_dir: Path) -> int | None:
+    """Register the approved previews as finals when the tier buys nothing more.
+
+    Returns how many were promoted, or None when at least one of them would
+    really get a different model or more pixels - then the caller renders.
+    All-or-nothing on purpose: a final run that is half free and half paid
+    would be two prices on one screen.
+    """
+    import shutil
+    from types import SimpleNamespace
+
+    rows = []
+    for image_id in selected:
+        row = db.row_to_dict(db.q1("SELECT * FROM images WHERE id=? AND user_id=?",
+                                   (image_id, user["id"])))
+        if not row or not Path(str(row.get("path") or "")).is_file():
+            return None
+        rows.append(row)
+    if not rows:
+        return None
+
+    for row in rows:
+        probe = GenRequest(prompt="", operation="generate", quality=quality,
+                           source_path=str((original or {}).get("path") or ""),
+                           reference_paths=list(brief.get("reference_paths") or []))
+        try:
+            provider, _model, _why = router_mod.choose_provider(
+                "generate", quality, None, prefer=str(row.get("provider") or ""),
+                changes=(row.get("meta") or {}).get("choices") or {},
+                request=probe)
+        except Exception:                                 # noqa: BLE001
+            return None
+        if str(getattr(provider, "name", "") or "") != str(row.get("provider") or ""):
+            return None
+        # The image row stores the ENDPOINT the money went to; the provider
+        # answers with a role.  Compare like with like.
+        role = router_mod._model_name(provider, quality, probe)
+        endpoint_of = getattr(provider, "endpoint", None)
+        try:
+            would_run = str(endpoint_of(role)) if callable(endpoint_of) else str(role)
+        except Exception:                                 # noqa: BLE001
+            would_run = str(role)
+        same_model = would_run == str(row.get("model") or "")
+        more_pixels = (router_mod.delivered_side(provider, quality, probe)
+                       > max(int(row.get("width") or 0), int(row.get("height") or 0)))
+        if not same_model or more_pixels:
+            return None
+
+    promoted = 0
+    for index, row in enumerate(rows):
+        target = out_dir / f"v{index}_final.jpg"
+        try:
+            shutil.copyfile(str(row["path"]), str(target))
+        except OSError:
+            return None if promoted == 0 else promoted
+        verdict = dict(row.get("verdict") or {})
+        verdict["promovida_de"] = row["id"]
+        verdict["summary"] = (str(verdict.get("summary") or "").strip()
+                              + " Es la vista previa que aprobaste, guardada "
+                              "como final: este motor entrega la misma calidad "
+                              "en las dos, asi que no se ha vuelto a pagar.").strip()
+        result = SimpleNamespace(image_path=str(target),
+                                 seed=(row.get("meta") or {}).get("seed"),
+                                 provider=row.get("provider"), model=row.get("model"),
+                                 cost_usd=0.0, meta={"promoted_from": row["id"]},
+                                 latency_ms=0)
+        choices = (row.get("meta") or {}).get("choices") or {}
+        new_id = _store_image(user, run_id, original, profile, result, verdict,
+                              "final", choices)
+        _record_attempt(run_id, user["id"], index, 1, str(row.get("provider") or ""),
+                        str(row.get("model") or ""), "promote", "", "",
+                        {"promovida_de": row["id"]}, verdict,
+                        verdict.get("defects") or [], "accepted", "", 0.0, 0,
+                        new_id)
+        promoted += 1
+    _plan_note(run_id,
+               "Alta calidad: %s ya %s la calidad maxima que este motor "
+               "entrega, asi que se %s como final sin volver a pagar."
+               % ("la vista previa" if promoted == 1 else "las %d vistas previas" % promoted,
+                  "tiene" if promoted == 1 else "tienen",
+                  "guarda" if promoted == 1 else "guardan"))
+    return promoted
+
+
 def _shape_facts(result) -> dict:
     """The shape ordered, the shape delivered, and one sentence when they differ.
 
@@ -2754,6 +2841,28 @@ def run_final(user: dict, run_id: str) -> dict:
         meta = source.get("meta") or {}
         variants.append({"index": i, "choices": meta.get("choices") or {},
                          "seed": int(meta.get("seed") or 0), "params": {}})
+
+    # WHEN "ALTA CALIDAD" WOULD BUY THE SAME PICTURE AGAIN.  With reference
+    # photographs on, providers/fal.pick_model answers kontext/multi for the
+    # preview AND for the final: same endpoint, same 0.04 USD, same ~1 MP.  So
+    # this step was paying for a second random draw of the request the client
+    # had already approved - one that could fail the identity check the
+    # preview passed, and that on 2026-09-10 she noticed looked no different.
+    # The tier buys "un modelo mas fiel", and when there is no more faithful
+    # model to buy, the approved preview IS the final: it is copied into the
+    # final's folder, registered as such with its own verdict, and nothing is
+    # spent.  Decided per run on the provider's own answer for this request,
+    # never assumed - a provider whose high tier really returns more pixels
+    # (the free engine's upscale) or a different model still re-renders.
+    promoted = _promote_previews(user, run_id, selected, brief, quality,
+                                 original, profile, out_dir)
+    if promoted is not None:
+        _order_images_by_variant(run_id)
+        _set(run_id, status="done", progress=1.0, finished_at=db.now(),
+             n_accepted=promoted, cost_usd=0.0,
+             stage="Listo: %d en alta calidad, sin volver a pagar" % promoted)
+        return {"ok": True, "accepted": promoted, "cost_usd": 0.0,
+                "promoted": True}
 
     results, batch = _run_batch(user, run_id, variants, brief, profile, style,
                                 quality, out_dir, original, "Alta calidad",

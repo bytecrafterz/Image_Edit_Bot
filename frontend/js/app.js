@@ -156,6 +156,16 @@ async function boot() {
   document.getElementById('balance-chip').addEventListener('click', () => {
     location.hash = '#/settings';
   });
+  // Always in view, not only at the bottom of Ajustes: on a shared phone the
+  // way out has to be one tap from any screen.  The server forgets the
+  // session first, so a token left in the browser is worthless afterwards.
+  document.getElementById('logout-btn').addEventListener('click', async () => {
+    try { await api.post('/api/auth/logout'); } catch { /* already gone */ }
+    api.setToken('');
+    if (alertTimer) { clearInterval(alertTimer); alertTimer = null; }
+    store.set({ user: null, balances: {}, alertsUnread: 0 });
+    location.hash = '#/login';
+  });
 
   await loadSession();
   renderChrome();
