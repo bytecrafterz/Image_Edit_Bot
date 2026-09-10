@@ -153,6 +153,23 @@ ADJ_MIN_N = 2
 # How many request fingerprints a scope remembers.  One per variant of a run,
 # so a hundred runs of six variants fit comfortably; the oldest are dropped.
 MAX_FINGERPRINTS = 600
+# THE PHOTOGRAPH IS THE REQUEST'S FOUNDATION, and until 2026-09-10 the record
+# had no key for it.  Measured that day over the 46 paid kontext/multi attempts
+# judged by the SFace ruler: one source photograph produced a face that was
+# hers in 17 of 17 images, another in 3 of 10 - and the estimate for the
+# eleventh request on that second photograph read "aviso: ''", because every
+# counter here was about OPTIONS, and the fingerprint keyed the whole request
+# on the photograph's file PATH, which the move to Linux had just renamed.
+# The client paid 0.04 USD to be told, again, what the record already knew.
+#
+# So the photograph gets its own cell, ``src:<sha256[:16]>``, keyed on the
+# file's CONTENT so that a copy, a rename or a second machine keep the record,
+# and it carries the filename so the sentence can name a better one.  The store
+# is versioned: a pool written before this key existed is rebuilt from the
+# attempts table, which also retires the path-keyed fingerprints the rename
+# orphaned.
+STORE_VERSION = 2
+SRC_KEY_LEN = 16
 
 
 # ------------------------------------------------------------------- helpers
@@ -197,7 +214,8 @@ def _prefer(shared: dict, mine: dict) -> dict:
     """
     out = {k: {"n": int(_f(v.get("n"))), "ok": int(_f(v.get("ok"))),
                "f": dict(v.get("f") or {}), "m": dict(v.get("m") or {}),
-               "t": _f(v.get("t")), "mio": False}
+               "t": _f(v.get("t")), "mio": False,
+               "nombre": _text(v.get("nombre"))}
            for k, v in (shared or {}).items() if isinstance(v, dict)}
     for key, cell in (mine or {}).items():
         if not isinstance(cell, dict):
@@ -206,7 +224,8 @@ def _prefer(shared: dict, mine: dict) -> dict:
             continue
         out[key] = {"n": int(_f(cell.get("n"))), "ok": int(_f(cell.get("ok"))),
                     "f": dict(cell.get("f") or {}), "m": dict(cell.get("m") or {}),
-                    "t": _f(cell.get("t")), "mio": True}
+                    "t": _f(cell.get("t")), "mio": True,
+                    "nombre": _text(cell.get("nombre")) or _text((out.get(key) or {}).get("nombre"))}
     return out
 
 
@@ -355,6 +374,34 @@ def fingerprint(source: Any, choices: dict, quality: str, style: Any,
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def source_key(sha256: Any) -> str:
+    """The record's name for a photograph: the start of its content hash."""
+    text = _text(sha256).lower()
+    return text[:SRC_KEY_LEN] if len(text) >= SRC_KEY_LEN else ""
+
+
+def _plan_source(plan_d: dict) -> tuple[str, str]:
+    """(source key, filename) for the plan being priced.
+
+    The plan carries them from 2026-09-10 on; an older plan only has the
+    original's id, which is looked up.  Read-only, never raises: a missing
+    photograph simply has no record.
+    """
+    key = source_key(plan_d.get("source_sha"))
+    name = _text(plan_d.get("source_name"))
+    if key:
+        return key, name
+    oid = _text(plan_d.get("original_id"))
+    if not oid:
+        return "", ""
+    try:
+        row = db.q1("SELECT sha256, filename FROM originals WHERE id=?", (oid,))
+    except Exception:                                     # noqa: BLE001
+        return "", ""
+    rec = db.row_to_dict(row) or {}
+    return source_key(rec.get("sha256")), _text(rec.get("filename"))
+
+
 # ------------------------------------------------------------------- the seed
 
 # WHAT A BRAND NEW ACCOUNT INHERITS.  Every paid call this installation has
@@ -491,12 +538,14 @@ def _backfill_shared() -> dict:
     try:
         rows = db.q(
             "SELECT a.variant_index, a.status, a.reject_reason, a.verdict_json,"
-            " a.prompt, r.plan_json, r.options_json "
-            "FROM attempts a JOIN runs r ON r.id=a.run_id WHERE a.cost_usd>0")
+            " a.prompt, a.model, r.plan_json, r.options_json,"
+            " o.sha256 AS src_sha, o.filename AS src_name "
+            "FROM attempts a JOIN runs r ON r.id=a.run_id "
+            "LEFT JOIN originals o ON o.id=r.original_id WHERE a.cost_usd>0")
     except Exception:                                     # noqa: BLE001
         return {}
     groups_seen: set = set()
-    records: list[tuple[dict, set, set, bool, set]] = []
+    records: list[tuple] = []
     for row in (rows or []):
         plan = db.loads(row["plan_json"], None) or {}
         index = row["variant_index"]
@@ -522,16 +571,26 @@ def _backfill_shared() -> dict:
         if "only clothing visible anywhere in the frame" in _text(row["prompt"]).lower():
             feats.add("texto_cobertura")
         groups_seen |= set(choices)
+        # The same two things observe() writes for a live attempt, so a
+        # rebuilt pool is the pool the live one would have grown into: the
+        # request fingerprint keyed on the photograph's CONTENT, and the
+        # photograph's own cell.
+        options = db.loads(row["options_json"], None) or {}
+        src = source_key(row["src_sha"])
+        fp = fingerprint(src or "", choices, options.get("quality"),
+                         options.get("style"), row["model"]) if src else ""
         records.append((choices, failed, measured,
-                        _text(row["status"]).lower() == "accepted", feats))
-    for choices, failed, measured, accepted, feats in records:
+                        _text(row["status"]).lower() == "accepted", feats,
+                        fp, src, _text(row["src_name"])))
+    for choices, failed, measured, accepted, feats, fp, src, name in records:
         _observe_into(store, choices, feats, groups_seen, failed, measured,
-                      accepted, "")
+                      accepted, fp, src, name)
     return store
 
 
 def _observe_into(store: dict, choices: dict, feats: set, groups_seen: set,
-                  failed, measured, accepted: bool, fp: str) -> None:
+                  failed, measured, accepted: bool, fp: str,
+                  src: str = "", src_name: str = "") -> None:
     for group, value in (choices or {}).items():
         _bump(store, "opt:%s:%s" % (group, value), failed, measured, accepted)
         _bump(store, "grp:%s" % group, failed, measured, accepted)
@@ -542,29 +601,45 @@ def _observe_into(store: dict, choices: dict, feats: set, groups_seen: set,
         _bump(store, key, failed, measured, accepted)
     if fp:
         _bump(store, "fp:%s" % fp, failed, measured, accepted)
+    if src:
+        _bump(store, "src:%s" % src, failed, measured, accepted)
+        if src_name:
+            store["src:%s" % src]["nombre"] = src_name
     store["_grupos"] = sorted(set(store.get("_grupos") or []) | set(choices or {}))
 
 
 def shared_pool() -> dict:
     """The installation's record: read, backfilled once, seeded if brand new."""
     store = _load(SHARED_USER, SCOPE)
-    if store:
+    if store and int(_f(store.get("_v"))) >= STORE_VERSION:
         return store
+    # Either brand new, or written before the photograph had a cell: rebuilt
+    # from the attempts table, which is the only place the truth was all along.
     store = _backfill_shared()
     if not store:
         store = {k: dict(v, f=dict(v["f"]), m=dict(v["m"])) for k, v in PRIOR.items()}
         store["_grupos"] = sorted({k.split(":")[1] for k in PRIOR
                                    if k.startswith("grp:")})
+    store["_v"] = STORE_VERSION
     _save(SHARED_USER, SCOPE, store)
     return store
 
 
 def person_pool(user_id: str, profile_id: Any) -> dict:
-    return _load(user_id, _scope_for(profile_id))
+    store = _load(_text(user_id), _scope_for(profile_id))
+    if store and int(_f(store.get("_v"))) < STORE_VERSION:
+        # Her fingerprints were keyed on a file path that the move to Linux
+        # renamed; they can never match again and would only crowd the memory.
+        # Her option counters are still hers and are kept.
+        store = {k: v for k, v in store.items() if not k.startswith("fp:")}
+        store["_v"] = STORE_VERSION
+        _save(_text(user_id), _scope_for(profile_id), store)
+    return store
 
 
 def observe(user_id: str, profile_id: Any, choices: dict, feats: set,
-            fp: str, status: str, reason: str, verdict: Any) -> None:
+            fp: str, status: str, reason: str, verdict: Any,
+            src: str = "", src_name: str = "") -> None:
     """Fold one finished PAID attempt into the person's pool and the shared one.
 
     Called from the orchestrator the moment an attempt is recorded, whichever
@@ -586,8 +661,32 @@ def observe(user_id: str, profile_id: Any, choices: dict, feats: set,
         if not store and uid == SHARED_USER:
             store = shared_pool()
         seen = set(store.get("_grupos") or []) | set(clean)
-        _observe_into(store, clean, feats, seen, failed, measured, accepted, fp)
+        _observe_into(store, clean, feats, seen, failed, measured, accepted, fp,
+                      src, src_name)
         _save(uid, scope, _trim(store))
+
+
+def source_records(user_id: str = "", profile_id: Any = "") -> dict[str, dict]:
+    """What the paid record says about each photograph, keyed by source_key.
+
+    For the photo tiles: ``{"pagadas", "buenas", "cara_fallos", "cara_medidas"}``
+    per key.  Read-only and never raises - a tile without a record is a tile
+    without a badge, not an error.
+    """
+    try:
+        pool = pool_for(user_id, profile_id)
+    except Exception:                                     # noqa: BLE001
+        return {}
+    out: dict[str, dict] = {}
+    for key, cell in (pool or {}).items():
+        if not key.startswith("src:") or not isinstance(cell, dict):
+            continue
+        fails, meas = _rate(cell, "identidad")
+        out[key[4:]] = {"pagadas": int(_f(cell.get("n"))),
+                        "buenas": int(_f(cell.get("ok"))),
+                        "cara_fallos": fails, "cara_medidas": meas,
+                        "nombre": _text(cell.get("nombre"))}
+    return out
 
 
 def pool_for(user_id: str, profile_id: Any) -> dict:
@@ -659,7 +758,32 @@ def _group_label(group: str) -> str:
     return _text(row.get("label_es")) or group.replace("_", " ")
 
 
-def _findings(pool: dict, choices: dict[str, list], feats: set) -> list[dict]:
+def _best_source(pool: dict, avoid: str, kind: str) -> tuple[str, int, int]:
+    """The photograph that best survives ``kind``: (name, passed, measured).
+
+    Judged on the SAME check the finding is about and under the SAME ruler -
+    never on the accepted count.  ``ok`` counts every acceptance this
+    installation ever recorded, including the ones the old descriptor waved
+    through on 2026-09-03, four of which were a different woman; a
+    measurement that ``kinds_of`` refused to compare cannot pad a
+    recommendation either.  Ties go to the photograph measured more often.
+    """
+    best = ("", 0, 0)
+    best_rate = -1.0
+    for key, cell in (pool or {}).items():
+        if not key.startswith("src:") or key[4:] == avoid or not isinstance(cell, dict):
+            continue
+        fails, meas = _rate(cell, kind)
+        if meas < MIN_N:
+            continue
+        rate = (meas - fails) / float(meas)
+        if (rate, meas) > (best_rate, best[2]):
+            best, best_rate = (_text(cell.get("nombre")), meas - fails, meas), rate
+    return best
+
+
+def _findings(pool: dict, choices: dict[str, list], feats: set,
+              src: str = "", src_name: str = "") -> list[dict]:
     """Every measured reason to hesitate about this request.
 
     Three rules, and each one is a CONTRAST rather than a bare rate, because a
@@ -724,6 +848,38 @@ def _findings(pool: dict, choices: dict[str, list], feats: set) -> list[dict]:
             out.append({"tipo": "grupo", "grupo": group, "fallo": kind,
                         "veces": fails, "de": meas, "base": base,
                         "nivel": "aviso"})
+
+    # 4. The photograph itself, against her other photographs.  Same contrast
+    #    as rule 2 - a bare rate would convict whichever photo she uses most -
+    #    but the level is stricter: an option is one of several things in the
+    #    request, the photograph is all of it, and 7 lost faces in 10 on one
+    #    file (measured 2026-09-10, against 0 in 17 on another) is not a coin
+    #    toss whatever the other options were.
+    cell = pool.get("src:%s" % src) if src else None
+    if isinstance(cell, dict):
+        for kind in KINDS:
+            fails, meas = _rate(cell, kind)
+            if meas < MIN_N:
+                continue
+            rate = fails / float(meas)
+            if rate < HIGH_RATE:
+                continue
+            of, om = 0, 0
+            for key, other in pool.items():
+                if key.startswith("src:") and key[4:] != src and isinstance(other, dict):
+                    f2, m2 = _rate(other, kind)
+                    of, om = of + f2, om + m2
+            base = (of / float(om)) if om >= MIN_N else None
+            if base is not None and rate < base + MIN_GAP:
+                continue
+            mejor = _best_source(pool, src, kind)
+            out.append({"tipo": "foto", "fallo": kind, "veces": fails,
+                        "de": meas, "base": base,
+                        "nombre": src_name or _text(cell.get("nombre")),
+                        "mejor": mejor[0], "mejor_ok": mejor[1],
+                        "mejor_n": mejor[2],
+                        "nivel": ("confirmar" if rate >= 0.6 and meas >= CONFIRM_N
+                                  else "aviso")})
     return out
 
 
@@ -749,6 +905,24 @@ def _finding_text(item: dict) -> str:
     """One finding, in the words of what the client would see happen."""
     kind = KIND_CORTO.get(item["fallo"], item["fallo"])
     veces, de = item["veces"], item["de"]
+    if item["tipo"] == "foto":
+        base = item.get("base")
+        contra = ("" if base is None else
+                  (" frente a ninguna con tus otras fotos" if base <= 0.0
+                   else " frente al %d%% con tus otras fotos" % round(100 * base)))
+        mejor = ""
+        if item.get("mejor"):
+            mejor = (" Con %s no ha pasado en %d de %d: elige esa, u otra "
+                     "donde se te vea entera y con buena luz."
+                     % (item["mejor"], item["mejor_n"] - item["mejor_ok"],
+                        item["mejor_n"]))
+            if item["mejor_ok"] == item["mejor_n"]:
+                mejor = (" Con %s ha salido bien en las %d: elige esa, u otra "
+                         "donde se te vea entera y con buena luz."
+                         % (item["mejor"], item["mejor_n"]))
+        return ("Con esta foto (%s) %s en %d de las %d imagenes pagadas%s.%s"
+                % (item.get("nombre") or "la elegida", kind, veces, de, contra,
+                   mejor))
     if item["tipo"] == "ajuste":
         return ("El texto que exige tapar el cuerpo entero: el proveedor ha "
                 "devuelto un archivo en negro y lo ha cobrado en %s. Se "
@@ -826,6 +1000,20 @@ def _suggest(pool: dict, findings: list[dict], choices: dict[str, list],
     ranked = sorted(findings, key=lambda f: (order.get(f["nivel"], 2),
                                              -f["veces"], -f["de"]))
     top = ranked[0]
+
+    if top["tipo"] == "foto":
+        if top.get("mejor"):
+            texto = ("Con %s ha salido bien en %d de %d imagenes pagadas. Se "
+                     "manda la misma ropa y el mismo escenario sobre esa foto "
+                     "y cuesta exactamente lo mismo."
+                     % (top["mejor"], top["mejor_ok"], top["mejor_n"]))
+        else:
+            texto = ("Ninguna otra foto tuya tiene todavia tres imagenes "
+                     "pagadas con las que compararla: elige una donde se te "
+                     "vea entera y con buena luz.")
+        return {"titulo": "Elegir otra foto tuya", "texto": texto,
+                "quitar": [], "cambiar": {}, "ajustes": [], "precio": "mismo",
+                "foto": top.get("mejor") or ""}
 
     if top["tipo"] == "ajuste":
         return {"titulo": "Quitar el texto que exige tapar el cuerpo entero",
@@ -934,7 +1122,8 @@ def assess(plan: Any, user_id: str = "", profile_id: Any = "",
         own_n = sum(int(_f(c.get("n"))) for k, c in mine.items()
                     if k.startswith("opt:"))
 
-        findings = _findings(pool, choices, feats)
+        src_key, src_name = _plan_source(plan_d)
+        findings = _findings(pool, choices, feats, src_key, src_name)
 
         # And the one thing no counter can know: has this EXACT request been
         # bought before and come back wrong?  26 paid calls, 1.07 USD, repeated
@@ -951,12 +1140,12 @@ def assess(plan: Any, user_id: str = "", profile_id: Any = "",
         # bought and rejected and nothing would say a word.  That is precisely
         # the case the client's "que no vuelva a ocurrir" is about, so every
         # variant is asked, and the worst answer is the one she is shown.
-        prints = {fingerprint(plan_d.get("source_path"),
+        prints = {fingerprint(src_key or plan_d.get("source_path"),
                               {g: v for g, v in ((var or {}).get("choices") or {}).items()},
                               quality, style, endpoint)
                   for var in (plan_d.get("variants") or [])
                   if (var or {}).get("choices")}
-        prints.add(fingerprint(plan_d.get("source_path"), choices, quality,
+        prints.add(fingerprint(src_key or plan_d.get("source_path"), choices, quality,
                                style, endpoint))
         worst = max((pool.get("fp:%s" % f) for f in prints),
                     key=lambda c: (int(_f((c or {}).get("n")))
@@ -1003,9 +1192,11 @@ def assess(plan: Any, user_id: str = "", profile_id: Any = "",
         confirmacion = ""
         if hard:
             worst = max(hard, key=lambda f: (f["de"], f["veces"]))
-            confirmacion = ("Esta combinacion ha fallado %d de %d veces. Si "
-                            "aun asi quieres pagarla, confirmalo."
-                            % (worst["veces"], worst["de"]))
+            confirmacion = (("Con esta foto han fallado %d de %d imagenes "
+                             "pagadas. Si aun asi quieres pagarla, confirmalo.")
+                            if worst["tipo"] == "foto" else
+                            ("Esta combinacion ha fallado %d de %d veces. Si "
+                             "aun asi quieres pagarla, confirmalo.")) % (worst["veces"], worst["de"])
         titulo = ("Esto ya ha fallado antes" if level == "confirmar"
                   else "Lo que suele salir mal con esta peticion")
         return {"nivel": level, "titulo": titulo,

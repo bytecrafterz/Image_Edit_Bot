@@ -190,6 +190,22 @@ async function upload(view, files) {
   }
 }
 
+/* The paid record of this photograph, in one line. See recordBadge in
+   pages/generate.js for the measurement that put it here. */
+function recordLine(original) {
+  const h = original.historial;
+  const bits = [];
+  if (h && h.pagadas >= 3) {
+    const bad = h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
+    bits.push(bad ? `Ha fallado ${h.cara_fallos} de ${h.cara_medidas} pagadas`
+                  : `Sale bien ${h.buenas} de ${h.pagadas} pagadas`);
+  }
+  if (!bits.length) return null;
+  const bad = h && h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
+  return el('div', { class: 'tiny', text: bits.join(' · '),
+    style: { color: bad ? 'var(--danger, #e5484d)' : 'inherit', fontWeight: bad ? '600' : '400' } });
+}
+
 function card(view, original, index) {
   const quality = original.quality || {};
   return el('div', { class: 'card card--flat', style: { padding: '8px' } }, [
@@ -199,6 +215,7 @@ function card(view, original, index) {
     el('div', { class: 'tiny', text: SHOT_ES[original.shot_type] || 'Sin identificar' }),
     quality.score !== undefined
       ? el('div', { class: 'tiny', text: 'Calidad ' + pct(quality.score) }) : null,
+    recordLine(original),
     el('div', { style: { display: 'flex', gap: '6px', marginTop: '8px' } }, [
       el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
         'aria-label': 'Subir', disabled: index === 0,

@@ -107,25 +107,46 @@ function showAlerts() {
   });
 }
 
+/* The server takes about ten seconds to come back after a deploy, and nginx
+   answers 503 meanwhile.  This used to treat that exactly like "your session
+   is invalid" and throw the token away, so every restart sent her back to the
+   login screen - the one screen on which nothing explains why.  A 401 is the
+   only answer that means the session is gone (api.js already clears the token
+   on it); everything else - no network, a timeout, a 5xx - is waited out, and
+   if it never comes back the token is KEPT so the next load logs her in. */
+const SESSION_RETRIES = 4;
+const SESSION_RETRY_MS = 3000;
+
 export async function loadSession() {
   if (!api.isLoggedIn()) {
     store.set({ user: null, balances: {}, alertsUnread: 0 });
     return null;
   }
-  try {
-    const data = await api.get('/api/auth/me');
-    store.set({
-      user: data.user,
-      balances: data.balances || {},
-      alertsUnread: data.alerts_unread || 0,
-      defaultProfile: data.default_profile || null,
-    });
-    if (data.user && data.user.locale) setLocale(data.user.locale);
-    return data.user;
-  } catch {
-    api.setToken('');
-    store.set({ user: null });
-    return null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const data = await api.get('/api/auth/me');
+      store.set({
+        user: data.user,
+        balances: data.balances || {},
+        alertsUnread: data.alerts_unread || 0,
+        defaultProfile: data.default_profile || null,
+      });
+      if (data.user && data.user.locale) setLocale(data.user.locale);
+      return data.user;
+    } catch (err) {
+      const status = err && typeof err.status === 'number' ? err.status : 0;
+      if (status === 401 || status === 403) {
+        api.setToken('');
+        store.set({ user: null });
+        return null;
+      }
+      if (attempt < SESSION_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, SESSION_RETRY_MS));
+        continue;
+      }
+      store.set({ user: null });
+      return null;
+    }
   }
 }
 

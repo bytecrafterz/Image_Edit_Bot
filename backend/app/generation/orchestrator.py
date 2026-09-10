@@ -737,6 +737,10 @@ def _brief_from(user: dict, analysis: dict, original: dict,
     brief = {
         "shot_type": analysis.get("shot_type") or "unknown",
         "source_path": original["path"],
+        # What the risk record needs to recognise this photograph after any
+        # rename or move - the content hash - and what it needs to name it.
+        "source_sha": original.get("sha256") or "",
+        "source_name": original.get("filename") or "",
         "source_body": analysis.get("body") or {},
         # And the skin of that same photograph.  identity/verify judges the
         # skin tone against the picture this one was made from, not against the
@@ -2584,9 +2588,16 @@ def _learn_risk(user: dict, original: dict, profile: dict, choices: dict,
             choices={str(g): str(v) for g, v in (choices or {}).items()
                      if isinstance(v, str) and v},
             feats=risk_mod.features_of({"envio": features or {}}),
-            fp=risk_mod.fingerprint((original or {}).get("path"), choices,
-                                    quality, style, endpoint),
-            status=status, reason=reason, verdict=verdict or {})
+            # Keyed on the photograph's content, not its path: the path
+            # changed when the installation moved machines and every memory
+            # keyed on it went silent.  See risk.STORE_VERSION.
+            fp=risk_mod.fingerprint(
+                risk_mod.source_key((original or {}).get("sha256"))
+                or (original or {}).get("path"), choices, quality, style,
+                endpoint),
+            status=status, reason=reason, verdict=verdict or {},
+            src=risk_mod.source_key((original or {}).get("sha256")),
+            src_name=str((original or {}).get("filename") or ""))
     except Exception as exc:                              # noqa: BLE001
         log.warning("No se pudo aprender del intento: %s", exc)
 

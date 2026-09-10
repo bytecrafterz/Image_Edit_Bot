@@ -104,6 +104,7 @@ async function renderStep1(view) {
       lazyImg(original.thumb_url, original.filename),
       el('div', { class: 'tile__meta' }, [
         el('span', { text: shotLabel(original.shot_type) }),
+        recordBadge(original),
       ]),
     ]);
     strip.appendChild(tile);
@@ -116,6 +117,25 @@ async function renderStep1(view) {
   if (state.original) {
     view.appendChild(renderChosen(view));
   }
+}
+
+/* What the paid record says about this photograph, on the tile itself.
+   Measured 2026-09-10: her two most-used photographs stood at 17 of 17 and
+   3 of 10 on the face check, and nothing on this screen told her which was
+   which - she paid for the eleventh attempt on the bad one. Three paid images
+   is the same bar the estimate uses before it says anything. */
+export function recordBadge(original) {
+  const h = original.historial;
+  const parts = [];
+  if (h && h.pagadas >= 3) {
+    const bad = h.cara_medidas >= 3 && h.cara_fallos / h.cara_medidas >= 0.4;
+    parts.push(el('span', {
+      text: bad ? `ha fallado ${h.cara_fallos} de ${h.cara_medidas}`
+                : `sale bien ${h.buenas} de ${h.pagadas}`,
+      style: { display: 'block', fontSize: '.7rem', fontWeight: '600',
+               color: bad ? 'var(--danger, #e5484d)' : 'var(--ok, #46a758)' } }));
+  }
+  return parts.length ? el('span', {}, parts) : null;
 }
 
 function shotLabel(shot) {
@@ -550,11 +570,20 @@ function renderRiskCard(view, risk) {
     children.push(el('p', { class: 'tiny', style: { margin: '10px 0 6px' },
       text: ajuste.texto || '' }));
     const applies = (ajuste.quitar || []).length || Object.keys(ajuste.cambiar || {}).length;
+    // The record can also name a PHOTOGRAPH: the same tap, but it swaps the
+    // source and re-prices, because the photo is not one of the choices.
+    const better = ajuste.foto
+      ? (state.originals || []).find((o) => o.filename === ajuste.foto) : null;
     if (applies) {
       children.push(el('button', {
         class: 'btn', type: 'button',
         onClick: () => applyAdjustment(view, ajuste),
       }, ajuste.titulo));
+    } else if (better) {
+      children.push(el('button', {
+        class: 'btn', type: 'button',
+        onClick: () => useOtherPhoto(view, better),
+      }, `Usar ${better.filename}`));
     } else {
       // Nothing to press: the fix is a switch in Ajustes, not one of her
       // choices, and pretending otherwise would be a button that lies.
@@ -563,6 +592,25 @@ function renderRiskCard(view, risk) {
   }
 
   return el('div', { class: 'card' }, children);
+}
+
+/* Swap the source photograph for the one the record recommends and re-price.
+   Nothing is spent.  The choices travel unchanged; a choice that does not
+   exist for the new photograph's framing is dropped by the estimate itself,
+   as it always was. */
+async function useOtherPhoto(view, original) {
+  const before = state.original;
+  state.original = original;
+  state.analysis = null;
+  try {
+    state.analysis = await api.get(`/api/originals/${original.id}/analysis`);
+  } catch { /* the reading is a nicety, not a blocker */ }
+  await goStep3(view);
+  if (state.step === 3 && state.plan) {
+    toast(`Ahora se usa ${original.filename}. Vuelto a calcular, no se ha gastado nada.`, 'ok');
+  } else {
+    state.original = before;
+  }
 }
 
 /* Apply the suggested request and re-price it.  Nothing is spent: this is the

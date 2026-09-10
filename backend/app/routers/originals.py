@@ -20,6 +20,7 @@ from ..analysis import loader
 from ..config import SETTINGS
 from ..identity import onboarding as onboarding_mod
 from ..safety import guard as guard_mod
+from ..generation import risk as risk_mod
 from ..services import storage
 
 log = logging.getLogger("photorobot.originals")
@@ -101,10 +102,18 @@ def _ingest(user: dict, filename: str, data: bytes,
     return out
 
 
-def _decorate(row: dict) -> dict:
+def _decorate(row: dict, records: dict | None = None) -> dict:
     row = dict(row)
     row["url"] = storage.public_url(row["id"], "full")
     row["thumb_url"] = storage.public_url(row["id"], "thumb")
+    # The paid record of THIS photograph, so the tile can say "sale bien 17
+    # de 17" or "ha fallado 7 de 10" before she taps it.  Measured 2026-09-10:
+    # the difference between her two most-used photographs was 17/17 against
+    # 3/10 on the face check, and nothing on the screen told her.
+    if records is not None:
+        rec = records.get(risk_mod.source_key(row.get("sha256")))
+        if rec:
+            row["historial"] = rec
     return row
 
 
@@ -118,11 +127,12 @@ def list_originals(profile_id: str | None = None,
         params.append(profile_id)
     sql += " ORDER BY sort_order, created_at"
     rows = db.rows_to_dicts(db.q(sql, params))
+    records = risk_mod.source_records(user["id"], profile_id or "")
     counts: dict[str, int] = {"closeup": 0, "half": 0, "full": 0, "unknown": 0}
     for row in rows:
         key = row.get("shot_type") or "unknown"
         counts[key if key in counts else "unknown"] += 1
-    return {"originals": [_decorate(r) for r in rows], "total": len(rows),
+    return {"originals": [_decorate(r, records) for r in rows], "total": len(rows),
             "by_shot_type": counts,
             "onboarding": onboarding_mod.readiness(user["id"], profile_id or "")}
 

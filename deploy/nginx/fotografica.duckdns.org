@@ -97,6 +97,20 @@ server {
     # request needs the hour that a streaming site does.  300s is comfortably
     # past the slowest single call measured and still fails fast if uvicorn
     # wedges.
+    # The reference gallery is uploaded in ONE request: onboarding asks for
+    # at least five photographs, the picker allows more, and a phone
+    # photograph is 2-5 MB.  Eight of them is right at the 32 MB above, which
+    # would answer 413 with no sentence she can read.  The app's own limit is
+    # per FILE (30 MB, config.max_upload_mb), so the request may be many times
+    # that.  No proxy_set_header here on purpose: see the note above.
+    location = /api/originals {
+        client_max_body_size 320m;
+        client_body_timeout  600s;
+        proxy_pass http://127.0.0.1:8131;
+        proxy_read_timeout  600s;
+        proxy_send_timeout  600s;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8131;
         proxy_read_timeout  300s;
