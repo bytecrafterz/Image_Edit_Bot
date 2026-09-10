@@ -1,0 +1,128 @@
+# /etc/nginx/sites-available/fotografica.duckdns.org
+# ---------------------------------------------------------------------------
+# fotografica.duckdns.org  ->  Photo Robot  (FastAPI/uvicorn on 127.0.0.1:8131)
+#
+# PROJECT:  ~/apps/9.2 (working copy)  ->  /opt/photorobot (deployed, systemd
+#           unit "photorobot", User=photorobot, ProtectHome=true)
+# DATA:     /opt/photorobot/data - her photographs, the SQLite database and
+#           data/keystore.json with the live fal.ai and Anthropic keys.
+#
+# The service binds 127.0.0.1 and stays that way.  Nothing here changes it:
+# nginx is the only thing that may speak to it, which is what keeps the
+# keystore and the uploads off the public interface even if a location block
+# below is ever written wrongly.
+#
+# WHAT THIS SITE SERVES.  Private, partly intimate photographs of an
+# identifiable person, and an album that spends her money.  Every decision
+# below follows from that rather than from a generic proxy template.
+# ---------------------------------------------------------------------------
+
+# --- :80  ACME challenge + redirect ----------------------------------------
+# Must stay for the life of the site: it is how the certificate is RENEWED,
+# not only how it is issued.
+server {
+    listen       80;
+    listen       [::]:80;
+    server_name  fotografica.duckdns.org;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root          /var/www/acme;
+        default_type  "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# --- :443  the application -------------------------------------------------
+# >>> BEGIN TLS BLOCK  (uncomment after certbot has issued - see step 2 below)
+#server {
+#    listen       443 ssl;
+#    listen       [::]:443 ssl;
+#    http2        on;
+#    server_name  fotografica.duckdns.org;
+#
+#    ssl_certificate      /etc/letsencrypt/live/fotografica.duckdns.org/fullchain.pem;
+#    ssl_certificate_key  /etc/letsencrypt/live/fotografica.duckdns.org/privkey.pem;
+#    include              /etc/letsencrypt/options-ssl-nginx.conf;
+#    ssl_dhparam          /etc/letsencrypt/ssl-dhparams.pem;
+#
+#    # These are private photographs of an identifiable person.  noimageindex
+#    # is not decoration: without it an image that ever leaks a URL can be
+#    # picked up by an image crawler and outlive the album it came from.
+#    add_header Strict-Transport-Security "max-age=31536000" always;
+#    add_header X-Content-Type-Options    "nosniff"          always;
+#    add_header X-Frame-Options           "DENY"             always;
+#    add_header Referrer-Policy           "no-referrer"      always;
+#    add_header X-Robots-Tag              "noindex, nofollow, noimageindex" always;
+#
+#    # backend/app/config.py sets max_upload_mb = 30 and refuses a larger file
+#    # with a sentence she can read.  This only stops the absurd, and must stay
+#    # ABOVE the app's own limit or nginx answers first with a bare 413.
+#    client_max_body_size 32m;
+#    # Several phone photographs on a weak mobile uplink trickle.  The 60s
+#    # default would show her failed uploads with nothing to explain them.
+#    client_body_timeout  120s;
+#
+#    # ---- forwarded headers ----
+#    # X-Forwarded-Proto is load-bearing.  routers/auth.py marks the session
+#    # cookie Secure from this header alone; send "http" or omit it and the
+#    # cookie is not marked, which is the whole reason it is set here.
+#    #
+#    # X-Forwarded-For is deliberately $remote_addr and NOT the usual
+#    # $proxy_add_x_forwarded_for.  security.client_ip takes the FIRST entry of
+#    # that header, and $proxy_add_x_forwarded_for appends the real address to
+#    # whatever the client sent - so an attacker could put any address first
+#    # and walk straight through the login and register rate limits by
+#    # changing it on every request.  Overwriting is what makes those limits
+#    # mean anything once this is reachable from the internet.
+#    proxy_set_header Host              $host;
+#    proxy_set_header X-Forwarded-Proto $scheme;
+#    proxy_set_header X-Forwarded-For   $remote_addr;
+#    proxy_set_header X-Real-IP         $remote_addr;
+#    proxy_http_version 1.1;
+#    proxy_set_header Connection        "";
+#    proxy_redirect off;
+#
+#    # There is NO streaming block here, unlike wonderimg.  This frontend polls
+#    # (frontend/js/pages/generate.js, setInterval on pollRun) instead of
+#    # holding a stream open, so each request is short and proxy_buffering can
+#    # stay on.  Do not copy the /events/ block from the estudio site: it would
+#    # be dead configuration pointing at a path this app does not serve.
+#
+#    # A generation answers in about 20-25s, and a run of several variants can
+#    # take minutes - but the browser polls rather than waiting, so no single
+#    # request needs the hour that a streaming site does.  300s is comfortably
+#    # past the slowest single call measured and still fails fast if uvicorn
+#    # wedges.
+#    location / {
+#        proxy_pass http://127.0.0.1:8131;
+#        proxy_read_timeout  300s;
+#        proxy_send_timeout  300s;
+#    }
+#
+#    # The service worker must never be cached: a stale one pins an old build
+#    # of the app in her browser indefinitely, and frontend/sw.js is explicit
+#    # that a cached private image is the worse half of that bargain.
+#    location = /sw.js {
+#        proxy_pass http://127.0.0.1:8131;
+#        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+#    }
+#
+#    # Her photographs are NOT served from disk.  data/uploads, data/outputs
+#    # and data/previews sit behind the app's session check, and a root/alias
+#    # location for any of them would publish every generated photograph to
+#    # anyone who guessed a filename.  main.py mounts only /css, /js, /icons
+#    # and /assets, all of which are frontend code.  Do not "optimise" this by
+#    # adding a static location for the data directory.
+#
+#    # If uvicorn is down, say so in her language.  The default nginx 502 means
+#    # nothing to her and reads like the album is gone.
+#    error_page 502 503 504 = @photorobot_down;
+#    location @photorobot_down {
+#        default_type text/html; charset utf-8;
+#        return 503 '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font:16px system-ui;background:#111113;color:#f2f2f4;padding:2rem"><h1>Un momento</h1><p>El robot se esta reiniciando. Tus fotos estan a salvo. Vuelve a intentarlo en un minuto.</p></body>';
+#    }
+#}
+# <<< END TLS BLOCK

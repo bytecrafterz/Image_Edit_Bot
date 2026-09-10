@@ -36,10 +36,27 @@ class PasswordBody(BaseModel):
     new_password: str
 
 
-def _set_cookie(response: Response, token: str) -> None:
+def _set_cookie(response: Response, request: Request, token: str) -> None:
+    """Set the session cookie, marked Secure whenever the browser used HTTPS.
+
+    It was never marked Secure because this only ever answered on
+    127.0.0.1, where Secure would have stopped the cookie being sent at all.
+    Now that it answers on a public name over TLS, an unmarked cookie is one
+    the browser will happily put on the wire in clear the first time anything
+    reaches it over plain http - the :80 redirect fires only AFTER that
+    request, cookie included, has already been sent.
+
+    The scheme is read from ``X-Forwarded-Proto``, because uvicorn itself is
+    still spoken to over http by nginx and would otherwise always say http.
+    Set by nginx from ``$scheme``, so it cannot be forged by the browser.  On
+    a direct local connection the header is absent, the cookie is not marked,
+    and testing over http keeps working exactly as before.
+    """
+    https = (request.headers.get("x-forwarded-proto", "").split(",")[0]
+             .strip().lower() == "https")
     response.set_cookie(
         COOKIE, token, max_age=SETTINGS.session_days * 86400,
-        httponly=True, samesite="lax", path="/",
+        httponly=True, samesite="lax", path="/", secure=https,
     )
 
 
@@ -93,7 +110,7 @@ def register(body: RegisterBody, request: Request, response: Response) -> dict:
 
     token, expires = security.create_session(
         user_id, request.headers.get("user-agent", ""))
-    _set_cookie(response, token)
+    _set_cookie(response, request, token)
     return {"user": security.public_user(user), "token": token,
             "expires_at": expires, "needs_approval": False,
             "onboarding": onboarding}
@@ -123,7 +140,7 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
     db.execute("UPDATE users SET last_login_at=? WHERE id=?",
                (db.now(), user["id"]))
     security.purge_expired_sessions()
-    _set_cookie(response, token)
+    _set_cookie(response, request, token)
     db.audit("auth.login", user["id"])
     return {"user": security.public_user(user), "token": token,
             "expires_at": expires}
