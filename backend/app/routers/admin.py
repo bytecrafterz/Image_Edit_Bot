@@ -13,9 +13,20 @@ from pydantic import BaseModel
 
 from .. import config, db, security
 from ..catalog import seed as seed_mod
-from ..services import storage
+from ..services import billing, storage
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+# The providers that hold money.  A recharge on the free engine is a number
+# with nothing behind it, so it is refused rather than written.
+PAID_PROVIDERS = ("fal", "anthropic")
+
+
+class AdminRecharge(BaseModel):
+    provider: str
+    amount_usd: float
+    note: str = ""
 
 
 class PatchUser(BaseModel):
@@ -66,6 +77,11 @@ def list_users(q: str = "", status: str = "",
             "originals": int(stats["originals"] or 0) if stats else 0,
             "images": int(stats["images"] or 0) if stats else 0,
             "spend_30d": round(float(stats["spend_30d"] or 0.0), 4) if stats else 0,
+            # What each account can still spend, next to what it spent: the
+            # administrator tops up from this screen and has to see the
+            # number she is topping up.
+            "balances": {p: round(billing.balance(row["id"], p), 4)
+                         for p in PAID_PROVIDERS},
         })
     return {"users": users, "total": len(users)}
 
@@ -88,6 +104,46 @@ def suspend(user_id: str, admin: dict = Depends(security.admin_user)) -> dict:
     db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
     db.audit("admin.suspend", user_id, actor=admin["email"])
     return {"ok": True}
+
+
+@router.post("/users/{user_id}/reactivate")
+def reactivate(user_id: str, admin: dict = Depends(security.admin_user)) -> dict:
+    """Undo a suspension.  The sessions were deleted on suspend; she logs in."""
+    row = _user_row(user_id)
+    if row.get("status") != "suspended":
+        raise HTTPException(400, "Esa cuenta no esta suspendida.")
+    db.execute("UPDATE users SET status='active' WHERE id=?", (user_id,))
+    db.audit("admin.reactivate", user_id, actor=admin["email"])
+    return {"ok": True}
+
+
+@router.post("/users/{user_id}/recharge")
+def recharge_user(user_id: str, body: AdminRecharge,
+                  admin: dict = Depends(security.admin_user)) -> dict:
+    """Write down money added at the provider for ANOTHER account.
+
+    Same ledger row the account's own /settings/recharge writes, same rule:
+    nothing here moves money, it records money that was already moved on the
+    provider's website.  The note says who wrote it, because a balance that
+    appeared with no name on it is a question the administrator will be
+    asked later.
+    """
+    _user_row(user_id)
+    provider = body.provider.strip().lower()
+    if provider not in PAID_PROVIDERS:
+        raise HTTPException(400, "Solo se anota saldo en %s."
+                            % " o ".join(PAID_PROVIDERS))
+    note = "anotado por %s" % admin["email"]
+    if body.note.strip():
+        note += ": " + body.note.strip()[:200]
+    try:
+        result = billing.recharge(user_id, provider, float(body.amount_usd),
+                                  note=note)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    db.audit("admin.recharge", user_id, actor=admin["email"],
+             provider=provider, amount=float(body.amount_usd))
+    return result
 
 
 @router.patch("/users/{user_id}")

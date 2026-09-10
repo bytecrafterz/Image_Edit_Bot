@@ -18,6 +18,7 @@ const TABS = [
 ];
 
 const STATUS_ES = { active: 'Activa', pending: 'Pendiente', suspended: 'Suspendida' };
+const PROVIDER_ES = { fal: 'fal.ai (imagenes)', anthropic: 'Anthropic (analisis)' };
 
 async function render(view) {
   clear(view);
@@ -95,6 +96,8 @@ async function renderUsers(view, body) {
       kv('Fotos originales', String(user.originals || 0)),
       kv('Imagenes', String(user.images || 0)),
       kv('Gasto 30 dias', moneyExact(user.spend_30d || 0)),
+      kv('Saldo fal.ai', moneyExact((user.balances || {}).fal || 0)),
+      kv('Saldo Anthropic', moneyExact((user.balances || {}).anthropic || 0)),
       kv('Ultimo acceso', user.last_login_at ? dateLabel(user.last_login_at) : 'nunca'),
       el('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap',
         marginTop: '12px' } }, [
@@ -105,7 +108,12 @@ async function renderUsers(view, body) {
         user.status !== 'suspended' ? el('button', {
           class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => act(view, `/api/admin/users/${user.id}/suspend`, 'Suspendida'),
-        }, 'Suspender') : null,
+        }, 'Suspender') : el('button', {
+          class: 'btn btn--sm', type: 'button',
+          onClick: () => act(view, `/api/admin/users/${user.id}/reactivate`, 'Reactivada'),
+        }, 'Reactivar'),
+        el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
+          onClick: () => rechargeUser(view, user) }, 'Anadir saldo'),
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => editUser(view, user) }, 'Editar'),
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
@@ -115,6 +123,41 @@ async function renderUsers(view, body) {
       ]),
     ]));
   }
+}
+
+/* Write down money added for this account at the provider's website.  The
+   same rule as her own Ajustes: this records, it never charges. */
+function rechargeUser(view, user) {
+  const provider = el('select', {}, Object.entries(PROVIDER_ES).map(([key, label]) =>
+    el('option', { value: key, text: label })));
+  const amount = el('input', { type: 'number', step: '1', min: '1', value: '10' });
+  const noteInput = el('input', { type: 'text', placeholder: 'Opcional: referencia del pago' });
+  const current = (p) => moneyExact((user.balances || {})[p] || 0);
+  const now = el('div', { class: 'tiny', text: `Saldo actual: ${current(provider.value)}` });
+  provider.addEventListener('change', () => { now.textContent = `Saldo actual: ${current(provider.value)}`; });
+  sheet({
+    title: `Anadir saldo a ${user.display_name || user.email}`,
+    body: el('div', {}, [
+      field('Proveedor', provider),
+      now,
+      field('Importe anadido (USD)', amount),
+      field('Nota', noteInput),
+      el('p', { class: 'tiny', text: 'Solo se anota: la aplicacion no cobra nada. '
+        + 'Registra aqui el dinero que ya has puesto en la web del proveedor.' }),
+    ]),
+    actions: [
+      { label: 'Cancelar', kind: 'secondary' },
+      { label: 'Anotar', onClick: async () => {
+          try {
+            const result = await api.post(`/api/admin/users/${user.id}/recharge`, {
+              provider: provider.value, amount_usd: Number(amount.value),
+              note: noteInput.value });
+            toast(`Anotado. Saldo de ${PROVIDER_ES[provider.value]}: ${moneyExact(result.balance)}`, 'ok');
+            render(view);
+          } catch (err) { toast(err.message, 'danger'); }
+        } },
+    ],
+  });
 }
 
 async function act(view, path, message) {
