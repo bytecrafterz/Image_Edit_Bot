@@ -1133,6 +1133,9 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
 
     # The same limits the run will obey, read once and handed to the estimate,
     # so the ceiling she is shown is the ceiling _run_variant can reach.
+    # The engine the request names rides on the plan, so the estimate prices
+    # the model that will really run (gpt-image-1 costs six times Kontext).
+    plan["engine"] = str(engine or "")
     estimate = router_mod.estimate_run_cost(plan, quality or "preview",
                                             router_mod.user_limits(user["id"]),
                                             user["id"])
