@@ -340,6 +340,26 @@ def user_image_download(user_id: str, image_id: str,
                         filename=f"{image_id}.jpg")
 
 
+@router.get("/demo/{filename}")
+def demo_file(filename: str, admin: dict = Depends(security.admin_user)):
+    """A bundle prepared for the client, downloadable by the administrator.
+
+    Files under data/demo - a zip of finals, a report - and nothing else: the
+    name is reduced to its last path segment and must exist inside that folder,
+    so this cannot be pointed at a photograph, a key or the database.  Only an
+    administrator's session opens it, and every download is written to the
+    audit.
+    """
+    from ..config import DATA_DIR
+    folder = (DATA_DIR / "demo").resolve()
+    target = (folder / Path(filename).name).resolve()
+    if target.parent != folder or not target.is_file():
+        raise HTTPException(404, "Ese archivo no existe.")
+    db.audit("admin.demo_download", admin["id"], actor=admin["email"],
+             archivo=target.name)
+    return FileResponse(str(target), filename=target.name)
+
+
 @router.get("/stats")
 def stats(admin: dict = Depends(security.admin_user)) -> dict:
     users = db.rows_to_dicts(db.q(
