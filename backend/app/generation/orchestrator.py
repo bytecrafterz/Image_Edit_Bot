@@ -810,13 +810,44 @@ def _brief_from(user: dict, analysis: dict, original: dict,
 
 # ----------------------------------------------------------------- preparing
 
+def _source_row(user_id: str, source_id: str) -> dict:
+    """The picture a run starts from: one of her photographs, or one of the
+    robot's own results.
+
+    "No, cambia el escote" is an edit on the image she is looking at, not on
+    the photograph it came from - so a generated image can be the source of
+    the next request.  It is shaped like an original for everything that
+    reads one (path, size, hash), its analysis is measured fresh, and the
+    identity check still runs against her PROFILE, never against the image
+    being edited.
+    """
+    row = db.row_to_dict(db.q1(
+        "SELECT * FROM originals WHERE id=? AND user_id=? AND deleted_at IS NULL",
+        (source_id, user_id)))
+    if row:
+        return row
+    img = db.row_to_dict(db.q1(
+        "SELECT * FROM images WHERE id=? AND user_id=? AND deleted_at IS NULL",
+        (source_id, user_id)))
+    if not img:
+        return {}
+    return {"id": img["id"], "user_id": user_id, "path": img["path"],
+            "thumb_path": img.get("thumb_path"),
+            "width": img.get("width"), "height": img.get("height"),
+            "filename": "%s.jpg" % img["id"], "sha256": img.get("sha256") or "",
+            "profile_id": img.get("profile_id"), "shot_type": "",
+            "analysis": None, "quality": None, "es_resultado": True,
+            # runs.original_id is a foreign key to originals: the run is
+            # filed under the photograph this result came from, and the
+            # result itself travels in the run's options as source_image_id.
+            "original_id": img.get("original_id") or ""}
+
+
 def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
                 quality: str, profile_id: str | None = None,
                 style_key: str | None = None, engine: str | None = None) -> dict:
     """Plan and price a run.  Spends nothing."""
-    original = db.row_to_dict(db.q1(
-        "SELECT * FROM originals WHERE id=? AND user_id=? AND deleted_at IS NULL",
-        (original_id, user["id"])))
+    original = _source_row(user["id"], original_id)
     if not original:
         raise ValueError("Esa foto no existe o fue eliminada.")
 
@@ -902,7 +933,7 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     if not verdict["allowed"]:
         raise PermissionError(verdict["reason"])
 
-    clean = options_mod.resolve_choices(choices, shot)
+    clean = options_mod.resolve_choices(choices, shot, user["id"])
 
     # WHAT THIS PHOTOGRAPH CANNOT WEAR, SAID BEFORE THE MONEY.  resolve_choices
     # drops a full length gown from a head and shoulders crop, which is right,
@@ -914,14 +945,14 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     # and why; and when EVERYTHING she asked for was dropped, the run is
     # refused here, where it still costs nothing, instead of being paid for
     # and explained away afterwards.
-    dropped = options_mod.dropped_choices(choices, shot)
+    dropped = options_mod.dropped_choices(choices, shot, user["id"])
     for item in dropped:
         note = ("%s. Elige otra prenda o una foto tuya %s."
                 % (item["motivo"],
                    options_mod.SHOT_ES.get("full", "de cuerpo entero")))
         if note not in warnings:
             warnings.append(note)
-    asked = bool(options_mod.resolve_choices(choices, "unknown"))
+    asked = bool(options_mod.resolve_choices(choices, "unknown", user["id"]))
     if dropped and asked and not clean:
         raise PermissionError(
             "En esta foto no se puede poner nada de lo que has elegido: %s. "
@@ -1187,9 +1218,14 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
         "INSERT INTO runs(id,user_id,original_id,profile_id,mode,status,"
         "options_json,plan_json,n_requested,est_cost_usd,created_at) "
         "VALUES(?,?,?,?,'preview','queued',?,?,?,?,?)",
-        (run_id, user["id"], original_id, (profile or {}).get("id"),
+        # The foreign key is the photograph; a result being edited travels in
+        # the options as source_image_id and is filed under its photograph.
+        (run_id, user["id"],
+         (original.get("original_id") if original.get("es_resultado") else original["id"]),
+         (profile or {}).get("id"),
          db.dumps({"choices": clean, "quality": quality or "preview",
                    "style": style["key"], "engine": str(engine or ""),
+                   "source_image_id": (original["id"] if original.get("es_resultado") else ""),
                    "brief": _jsonable_brief(dict(brief, engine=str(engine or "")))}),
          db.dumps(plan), len(plan.get("variants") or []),
          float(estimate.get("total_usd") or 0.0), db.now()),
@@ -1448,8 +1484,7 @@ def run_previews(user: dict, run_id: str) -> dict:
     plan = run.get("plan") or {}
     quality = str(opts.get("quality") or "preview")
     variants = plan.get("variants") or []
-    original = db.row_to_dict(db.q1("SELECT * FROM originals WHERE id=?",
-                                    (run["original_id"],)))
+    original = _source_row(user["id"], str((run.get("options") or {}).get("source_image_id") or run["original_id"]))
     if not original:
         _set(run_id, status="failed", error="La foto original ya no existe.",
              finished_at=db.now())
@@ -1751,7 +1786,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             guidance=float(merged.get("guidance", 4.0)),
             steps=int(merged.get("steps", 28)),
             identity_weight=float(merged.get("identity_weight", 0.85)),
-            extra={**hints, "engine": str((brief or {}).get("engine") or "")},
+            extra={**hints, "engine": str((brief or {}).get("engine") or ""),
+                   "garment_path": str(merged.get("garment_image") or "")},
         )
 
         # The router needs both halves of the question: who she prefers, and
@@ -1786,7 +1822,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                 guidance=float(merged.get("guidance", 4.0)),
                 steps=int(merged.get("steps", 28)),
                 identity_weight=float(merged.get("identity_weight", 0.85)),
-                extra={**hints, "engine": str((brief or {}).get("engine") or "")},
+                extra={**hints, "engine": str((brief or {}).get("engine") or ""),
+                   "garment_path": str(merged.get("garment_image") or "")},
             )
             provider, model, why = router_mod.choose_provider(
                 "generate", quality, budget_usd=None, prefer=prefer,
@@ -2871,8 +2908,7 @@ def run_final(user: dict, run_id: str) -> dict:
              finished_at=db.now())
         return {"ok": False, "error": "No elegiste ninguna imagen."}
 
-    original = db.row_to_dict(db.q1("SELECT * FROM originals WHERE id=?",
-                                    (run["original_id"],)))
+    original = _source_row(user["id"], str((run.get("options") or {}).get("source_image_id") or run["original_id"]))
     analysis = analyse_original(original) if original else {}
     profile = _profile_for(user, run.get("profile_id"))
     style = styles_mod.get_style(opts.get("style")) or styles_mod.default_style(

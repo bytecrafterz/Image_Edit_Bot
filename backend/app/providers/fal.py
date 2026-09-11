@@ -823,8 +823,24 @@ class FalProvider(ImageProvider):
                 uri, size = _encode(str(req.source_path), side)
                 urls.append(uri)
                 meta["source_size"] = [size[0], size[1]]
-            for ref in list(req.reference_paths or [])[:3]:
+            garment = str(((getattr(req, "extra", None) or {}).get("garment_path")) or "")
+            garment_ok = bool(garment) and os.path.isfile(garment)
+            # Room for the garment: two of her references instead of three.
+            for ref in list(req.reference_paths or [])[:(2 if garment_ok else 3)]:
                 urls.append(_encode(str(ref), side)[0])
+            if garment_ok:
+                # The picture she sent of the dress, on somebody else.  Said
+                # plainly to the engine: take the garment from it, and nothing
+                # else - identity comes only from her own pictures.
+                urls.append(_encode(garment, side)[0])
+                meta["garment_sent"] = True
+                payload["prompt"] = (payload["prompt"] + "\n\nThe LAST input "
+                    "image shows a garment worn by a different person: dress "
+                    "the person from the first image in that exact garment - "
+                    "same cut, neckline, sleeves, colour, fabric and details - "
+                    "fitted to her own body. Take nothing else from the last "
+                    "image: her face, hair, body and skin come only from the "
+                    "first images.")
             if urls:
                 payload["image_urls"] = urls
                 meta["n_references"] = len(urls) - (1 if req.source_path else 0)

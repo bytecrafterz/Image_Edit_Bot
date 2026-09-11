@@ -7,7 +7,7 @@ showing one fixed list forever.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
 
 from .. import db, security
 from ..catalog import options as options_mod
@@ -64,6 +64,46 @@ def get_options(shot_type: str = "unknown", original_id: str | None = None,
     return {"shot_type": shot_type, "groups": groups,
             "suggested": suggestion["suggested"],
             "reason": suggestion["reason"]}
+
+
+@router.post("/referencia")
+async def referencia(file: UploadFile = File(...), texto: str = Form(""),
+                     user: dict = Depends(security.active_user)) -> dict:
+    """A picture of a garment (or a place) she likes becomes a value of hers.
+
+    Stored apart from her own photographs - it is of somebody else and must
+    never enter her identity profile - described by Claude cut by cut, and
+    saved as a clothing (or scene) value that carries the picture, so the
+    engine receives the garment image itself alongside the words.
+    """
+    from ..config import DATA_DIR
+    from ..providers import registry
+    try:
+        vision = registry.get_vision_provider("claude")
+    except Exception:                                     # noqa: BLE001
+        vision = None
+    if not vision or not getattr(vision, "available", lambda: False)() \
+            or not hasattr(vision, "describe_garment"):
+        raise HTTPException(400, "Para usar una foto de referencia hace falta la "
+                            "clave de Anthropic en Ajustes.")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "El archivo esta vacio.")
+    folder = DATA_DIR / "referencias" / str(user["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    ref_id = db.new_id("ref")
+    path = folder / f"{ref_id}.jpg"
+    path.write_bytes(data)
+    desc = vision.describe_garment(str(path), texto)
+    if not desc.get("ok"):
+        raise HTTPException(502, str(desc.get("error") or "No se pudo leer la prenda."))
+    row = options_mod.add_user_value(
+        user["id"], desc["grupo"], desc["label_es"], desc["prompt"], desc.get("negative", ""),
+        params={"garment_image": str(path)} if desc["grupo"] == "clothing" else {})
+    db.audit("catalog.referencia", user["id"], value=row["value_key"], grupo=desc["grupo"],
+             coste=desc.get("cost_usd"))
+    return {"value": row, "grupo": desc["grupo"], "descripcion": desc["prompt"],
+            "coste_usd": desc.get("cost_usd") or 0.0}
 
 
 @router.get("/styles")

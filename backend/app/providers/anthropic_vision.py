@@ -167,6 +167,43 @@ Rules:
 
 # ------------------------------------------------------------------ parsing
 
+_INTERPRET_SYSTEM = """You turn a client's request, written or dictated in Spanish, into
+choices for a photo studio that edits HER OWN photograph. Identity is fixed:
+the face, body, proportions, skin and marks of the person are never a choice.
+
+You receive the catalogue as JSON: groups (clothing, scene, pose, hair,
+lighting, expression, clothing_color, framing...) with value keys and Spanish
+labels. Optionally an image of a garment or a place she wants, and optionally
+the image she is currently editing.
+
+Answer with ONE JSON object and nothing else:
+{"elecciones": {"<group_key>": [ {"valor": "<existing value_key>"} |
+                                  {"nueva": {"label_es": "short Spanish label, no accents",
+                                             "prompt": "precise English description for the image model",
+                                             "negative": "optional, English"}} ]},
+ "vistas": 3,
+ "resumen": "one sentence in Spanish, no accents, restating what will be done",
+ "rechazado": "Spanish sentence, no accents, for anything asked that changes WHO she is (slimmer, younger, another face, other skin); empty if nothing"}
+
+Rules:
+- Use an existing value whenever it matches her words; create "nueva" only for
+  what the catalogue lacks, and describe garments by cut, neckline, sleeve,
+  fabric, colour, hem, details.
+- Only groups from the catalogue. Never invent groups.
+- A garment picture goes to "clothing"; a place picture to "scene".
+- Never describe her body or face in any prompt.
+"""
+
+_GARMENT_SYSTEM = """You describe ONE garment (or one place) from a picture, for an image model
+that will dress a different real person in it. Answer with ONE JSON object:
+{"grupo": "clothing" | "scene",
+ "label_es": "short Spanish label, no accents",
+ "prompt": "precise English description: cut, neckline, sleeves, length, fabric, colour, closures, details (or the place: setting, light, materials)",
+ "negative": "optional English"}
+Describe the garment only. Never describe the person wearing it.
+"""
+
+
 def _extract_json(text: str) -> dict | None:
     """Pull the outermost JSON object out of a model answer.
 
@@ -536,6 +573,52 @@ class ClaudeVision(VisionProvider):
                 "repairable": repairable, "detail": _s(item.get("detail"), 300)}
 
     # -------------------------------------------------------- prompt writer
+
+    def interpret_request(self, texto: str, catalogo: dict,
+                          garment_image: str | None = None,
+                          current_image: str | None = None,
+                          context: dict | None = None) -> dict:
+        """Her words (and pictures) -> catalogue choices.  Never raises."""
+        blocks: list[dict] = []
+        if garment_image:
+            enc = _encode_image(str(garment_image))
+            if enc:
+                blocks.append({"type": "text", "text": "Reference picture she sent:"})
+                blocks.append(_image_block(enc))
+        if current_image:
+            enc = _encode_image(str(current_image))
+            if enc:
+                blocks.append({"type": "text", "text": "The image she is editing now:"})
+                blocks.append(_image_block(enc))
+        blocks.append({"type": "text", "text":
+                       "Catalogue (JSON):\n" + _context_text(catalogo, 6000)
+                       + "\n\nHer request (Spanish):\n" + str(texto or "").strip()[:2000]
+                       + ("\n\nContext (JSON): " + _context_text(context, 800) if context else "")
+                       + "\n\nAnswer with the JSON object."})
+        parsed, cost, note = self._ask(_INTERPRET_SYSTEM, blocks, 1600)
+        if parsed is None:
+            return {"ok": False, "error": note or "Claude no respondio.", "cost_usd": cost}
+        return {"ok": True, "elecciones": parsed.get("elecciones") or {},
+                "vistas": int(_f(parsed.get("vistas"), 0) or 0),
+                "resumen": _s(parsed.get("resumen"), 400),
+                "rechazado": _s(parsed.get("rechazado"), 400), "cost_usd": cost}
+
+    def describe_garment(self, image_path: str, texto: str = "") -> dict:
+        """One garment (or place) picture -> a catalogue value.  Never raises."""
+        enc = _encode_image(str(image_path))
+        if enc is None:
+            return {"ok": False, "error": "No se pudo leer la imagen."}
+        blocks = [_image_block(enc), {"type": "text", "text":
+                  "Describe this for the image model and answer with the JSON object."
+                  + ("\nWhat she said about it (Spanish): " + str(texto)[:500] if texto else "")}]
+        parsed, cost, note = self._ask(_GARMENT_SYSTEM, blocks, 800)
+        if parsed is None:
+            return {"ok": False, "error": note or "Claude no respondio.", "cost_usd": cost}
+        grupo = _s(parsed.get("grupo"), 20).lower()
+        return {"ok": True, "grupo": "scene" if grupo == "scene" else "clothing",
+                "label_es": _s(parsed.get("label_es"), 80) or "prenda de referencia",
+                "prompt": _s(parsed.get("prompt"), 1200), "negative": _s(parsed.get("negative"), 400),
+                "cost_usd": cost}
 
     def write_prompt(self, brief: dict) -> dict:
         """Author a prompt from a brief.  {} means 'no opinion, use the

@@ -15,6 +15,8 @@ say what the legs were wearing cost the client a paid image.
 from __future__ import annotations
 
 import re
+
+from .. import db
 from typing import Any
 
 
@@ -598,7 +600,50 @@ def suggest_for_analysis(analysis: dict) -> dict:
             "shot_type": shot}
 
 
-def resolve_choices(choices: dict, shot_type: str) -> dict:
+def user_value_keys(user_id: str | None, group_key: str) -> set[str]:
+    """The value keys this account has added to a group - from a sentence of
+    hers or a garment picture (see add_user_value).  Empty for nobody."""
+    if not user_id:
+        return set()
+    try:
+        rows = db.q("SELECT value_key FROM options WHERE user_id=? AND group_key=? "
+                    "AND enabled=1", (str(user_id), str(group_key)))
+    except Exception:                                     # noqa: BLE001
+        return set()
+    return {str(r["value_key"]) for r in (rows or [])}
+
+
+def add_user_value(user_id: str, group_key: str, label_es: str, prompt_en: str,
+                   negative: str = "", params: dict | None = None,
+                   shot_types: str = "closeup,half,full") -> dict:
+    """A value of her own in the catalogue, from her words or her picture.
+
+    This is how free text reaches the engine without a second code path: the
+    interpreter (or the garment upload) writes what she asked for as a row of
+    the same table the built-in values live in, and everything downstream -
+    the shot filter, the guard, the risk record, the plan, the chips on her
+    screen - sees one more value.  The key is stable for the same prompt, so
+    asking twice does not create two rows.
+    """
+    import hashlib
+    slug = re.sub(r"[^a-z0-9]+", "_", (label_es or "").lower()).strip("_")[:20] or "valor"
+    key = "mi_%s_%s" % (slug, hashlib.sha1((prompt_en or label_es).encode("utf-8")).hexdigest()[:6])
+    db.execute(
+        "INSERT INTO options(id,user_id,group_key,value_key,label_es,label_en,"
+        "prompt_fragment,negative_fragment,params_json,shot_types,enabled,"
+        "sort_order,builtin,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,500,0,?) "
+        "ON CONFLICT(user_id,group_key,value_key) DO UPDATE SET "
+        "label_es=excluded.label_es, prompt_fragment=excluded.prompt_fragment, "
+        "negative_fragment=excluded.negative_fragment, "
+        "params_json=excluded.params_json, enabled=1",
+        (db.new_id("opt"), str(user_id), str(group_key), key, label_es[:80],
+         "", prompt_en[:1200], (negative or "")[:600], db.dumps(params or {}),
+         shot_types, db.now()))
+    return {"group_key": group_key, "value_key": key, "label_es": label_es[:80],
+            "prompt_fragment": prompt_en[:1200], "params": dict(params or {})}
+
+
+def resolve_choices(choices: dict, shot_type: str, user_id: str | None = None) -> dict:
     """Drop anything that is not in the catalogue for this kind of photograph."""
     valid = {g["group_key"]: {v["value_key"] for v in g["values"]}
              for g in groups_for_shot(shot_type)}
@@ -607,6 +652,7 @@ def resolve_choices(choices: dict, shot_type: str) -> dict:
         allowed = valid.get(group)
         if not allowed:
             continue
+        allowed = allowed | user_value_keys(user_id, group)
         if not isinstance(values, (list, tuple, set)):
             values = [values]
         kept = [str(v) for v in values if str(v) in allowed]
@@ -623,7 +669,7 @@ SHOT_ES: dict[str, str] = {"closeup": "un primer plano (solo cara y hombros)",
                            "unknown": "de un encuadre que no se ha podido leer"}
 
 
-def dropped_choices(choices: dict, shot_type: str) -> list[dict]:
+def dropped_choices(choices: dict, shot_type: str, user_id: str | None = None) -> list[dict]:
     """What she asked for that this photograph cannot carry, and why.
 
     ``resolve_choices`` above simply drops it, which is right - a floor length
@@ -643,6 +689,7 @@ def dropped_choices(choices: dict, shot_type: str) -> list[dict]:
     out: list[dict] = []
     for group, values in (choices or {}).items():
         allowed = valid.get(group) or set()
+        allowed = allowed | user_value_keys(user_id, group)
         if not isinstance(values, (list, tuple, set)):
             values = [values]
         for value in values:

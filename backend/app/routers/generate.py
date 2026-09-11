@@ -22,7 +22,8 @@ router = APIRouter(prefix="/generate", tags=["generate"])
 
 
 class AnalyzeBody(BaseModel):
-    original_id: str
+    # One of the two: a photograph of hers, or (source_image_id) a result.
+    original_id: str | None = None
     profile_id: str | None = None
     style: str | None = None
     options: dict = Field(default_factory=dict)
@@ -31,6 +32,16 @@ class AnalyzeBody(BaseModel):
     # Which edit engine draws it (a provider role such as identity_banana);
     # empty means the provider's own choice.  See providers/fal MODELS.
     engine: str | None = None
+    # Edit one of the robot's own results instead of a photograph: "no,
+    # cambia el escote" starts from the image she is looking at.
+    source_image_id: str | None = None
+
+
+class InterpretBody(BaseModel):
+    texto: str = ""
+    original_id: str | None = None
+    source_image_id: str | None = None
+    referencia_value: str | None = None
 
 
 class RunBody(BaseModel):
@@ -71,15 +82,94 @@ def _image_payload(row: dict) -> dict:
     }
 
 
+@router.post("/interpretar")
+def interpretar(body: InterpretBody, user: dict = Depends(security.active_user)) -> dict:
+    """Her words - typed or dictated - into choices, before anything is priced.
+
+    Claude reads the catalogue, her sentence and, when she attached one, the
+    picture of the garment or of a previous result, and answers with existing
+    values where they fit and new ones where the catalogue had nothing; the new
+    ones become values of her own (options.add_user_value) so the plan, the
+    guard and the record see nothing unusual.  Costs a fraction of a cent of
+    Anthropic usage and no image generation.
+    """
+    from ..catalog import options as options_mod
+    from ..providers import registry
+    texto = (body.texto or "").strip()
+    if not texto and not body.referencia_value:
+        raise HTTPException(400, "Dime que quieres cambiar, o elige una prenda.")
+    try:
+        vision = registry.get_vision_provider("claude")
+    except Exception:                                     # noqa: BLE001
+        vision = None
+    if not vision or not getattr(vision, "available", lambda: False)() \
+            or not hasattr(vision, "interpret_request"):
+        raise HTTPException(400, "Para escribir o dictar lo que quieres hace "
+                            "falta la clave de Anthropic en Ajustes.")
+    source = orchestrator._source_row(user["id"], body.source_image_id or body.original_id or "")
+    shot = "unknown"
+    if source and not source.get("es_resultado"):
+        shot = str(orchestrator.analyse_original(source).get("shot_type") or "unknown")
+    groups = options_mod.groups_for_shot(shot)
+    catalogo = {g["group_key"]: {"label_es": g["label_es"],
+                                 "values": [{"value_key": v["value_key"], "label_es": v["label_es"]}
+                                            for v in g["values"]]
+                                           + [{"value_key": k, "label_es": k} for k in
+                                              sorted(options_mod.user_value_keys(user["id"], g["group_key"]))]}
+                for g in groups}
+    garment = None
+    if body.referencia_value:
+        row = db.row_to_dict(db.q1("SELECT * FROM options WHERE user_id=? AND value_key=?",
+                                   (user["id"], body.referencia_value)))
+        garment = ((row or {}).get("params") or {}).get("garment_image")
+    result = vision.interpret_request(
+        texto or "Quiero llevar la prenda de la foto de referencia.", catalogo,
+        garment_image=garment,
+        current_image=(source or {}).get("path") if (source or {}).get("es_resultado") else None,
+        context={"plano": shot})
+    if not result.get("ok"):
+        raise HTTPException(502, str(result.get("error") or "No se pudo interpretar."))
+    choices: dict[str, list[str]] = {}
+    nuevas: list[dict] = []
+    for group, items in (result.get("elecciones") or {}).items():
+        if group not in catalogo or not isinstance(items, list):
+            continue
+        keys: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("valor"):
+                key = str(item["valor"])
+                if any(v["value_key"] == key for v in catalogo[group]["values"]):
+                    keys.append(key)
+            elif isinstance(item.get("nueva"), dict) and (item["nueva"].get("prompt") or "").strip():
+                nv = item["nueva"]
+                row = options_mod.add_user_value(
+                    user["id"], group, str(nv.get("label_es") or "a tu manera"),
+                    str(nv["prompt"]), str(nv.get("negative") or ""))
+                keys.append(row["value_key"]); nuevas.append(row)
+        if keys:
+            choices[group] = keys
+    if body.referencia_value and "clothing" not in choices:
+        choices["clothing"] = [body.referencia_value]
+    db.audit("generate.interpretar", user["id"], texto=texto[:200], grupos=sorted(choices),
+             nuevas=len(nuevas), coste=result.get("cost_usd"))
+    return {"choices": choices, "resumen": result.get("resumen") or "",
+            "rechazado": result.get("rechazado") or "", "nuevas": nuevas,
+            "vistas": result.get("vistas") or 0, "coste_usd": result.get("cost_usd") or 0.0}
+
+
 @router.post("/analyze")
 def analyze(body: AnalyzeBody,
             user: dict = Depends(security.active_user)) -> dict:
+    if not (body.original_id or body.source_image_id):
+        raise HTTPException(400, "Elige una foto tuya o una imagen del album.")
     if not 1 <= int(body.n_previews) <= SETTINGS.limits.max_previews_per_run:
         raise HTTPException(400, "Puedes pedir entre 1 y %d vistas previas."
                             % SETTINGS.limits.max_previews_per_run)
     try:
         return orchestrator.prepare_run(
-            user, body.original_id, body.options, body.n_previews,
+            user, body.source_image_id or body.original_id, body.options, body.n_previews,
             body.quality, body.profile_id, body.style,
             engine=body.engine)
     except PermissionError as exc:
