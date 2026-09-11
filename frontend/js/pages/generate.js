@@ -1124,8 +1124,31 @@ async function loadAndRender(view) {
   await renderStep1(view);
 }
 
+/* Arriving from the album with "Cambiar": the tapped result becomes the
+   source of the next request, its photograph stays the reference for the
+   options menu, and the screen opens on step 2 to hear what to change. */
+async function mountFromImage(view, imageId) {
+  reset();
+  clear(view);
+  view.appendChild(spinner('Preparando la imagen...'));
+  try {
+    await loadOriginals();
+    const img = await api.get(`/api/album?limit=200`).then((d) => (d.images || []).find((i) => i.id === imageId));
+    if (!img) { toast('Esa imagen ya no esta en el album.'); await renderStep1(view); return; }
+    state.sourceImage = imageId;
+    state.original = state.originals.find((o) => o.id === img.original_id) || state.originals[0] || null;
+    state.analysis = null;
+    await goStep2(view);
+    toast('La siguiente imagen se hara a partir de la que has elegido en el album.', 'ok');
+  } catch (err) {
+    clear(view);
+    view.appendChild(note('danger', 'No se pudo preparar la imagen', err.message));
+  }
+}
+
 export default {
-  async mount(view) {
+  async mount(view, params) {
+    if (params && params.desde) { await mountFromImage(view, params.desde); return; }
     if (!state) reset();
     await loadAndRender(view);
   },

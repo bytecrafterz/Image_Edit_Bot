@@ -597,3 +597,35 @@ Shared JS modules:
 * `js/router.js` — hash router + page registry.
 * `js/ui.js` — DOM helpers (`el`, `toast`, `modal`, `confirm`, `spinner`).
 * `js/i18n.js` — Spanish default, English fallback strings.
+
+
+## 9. Free text, references and conversation (2026-09-11)
+
+### `POST /api/generate/interpretar`
+```
+# in : {"texto": str, "original_id"?: str, "source_image_id"?: str, "referencia_value"?: str}
+# out: {"choices": {group: [value_key,...]}, "resumen": str, "rechazado": str,
+#       "nuevas": [option rows created for this user], "vistas": int, "coste_usd": float}
+```
+Claude (`providers/anthropic_vision.ClaudeVision.interpret_request`) maps the
+sentence onto the catalogue; anything missing becomes a per-user option via
+`catalog/options.add_user_value`.  400 without an Anthropic key.
+
+### `POST /api/catalog/referencia`  (multipart: file, texto)
+```
+# out: {"value": option row, "grupo": "clothing"|"scene", "descripcion": str, "coste_usd": float}
+```
+The picture is stored under `data/referencias/<user>/`, never among originals.
+A clothing value carries `params.garment_image`; `providers/fal._payload`
+appends it as the last input image with a plain instruction.
+
+### `GenRequest.extra`
+```
+# {"engine": "identity_banana"|"identity_gpt"|"", "garment_path": str, ...local hints}
+```
+`engine` wins in `FalProvider.pick_model` when it names an images-capable
+role; `plan_requests` carries it so the estimate prices the same model.
+
+### `POST /api/generate/analyze` additions
+`engine`, `source_image_id` (a result of hers as the source; `runs.original_id`
+stays the photograph it came from, the result id travels in `options`).

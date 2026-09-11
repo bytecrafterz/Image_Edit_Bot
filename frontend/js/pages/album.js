@@ -157,6 +157,10 @@ function openViewer(img) {
         'Descargar'),
       el('button', { class: 'btn', type: 'button',
         onClick: () => showInfo(images[index]) }, 'Ficha'),
+      // "No, cambia el escote": the next request starts from THIS image.
+      el('button', { class: 'btn', type: 'button',
+        onClick: () => { close(); location.hash = `#/generate?desde=${images[index].id}`; } },
+        'Cambiar'),
       el('button', { class: 'btn', type: 'button',
         onClick: async () => {
           const ok = await confirmSheet('Se eliminara esta imagen.',

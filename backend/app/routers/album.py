@@ -24,6 +24,7 @@ def _payload(row: dict) -> dict:
     meta = row.get("meta") or {}
     return {
         "id": row["id"], "kind": row.get("kind"), "run_id": row.get("run_id"),
+        "original_id": row.get("original_id"),
         "url": storage.public_url(row["id"], "full"),
         "thumb_url": storage.public_url(row["id"], "thumb"),
         "width": row.get("width"), "height": row.get("height"),

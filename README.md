@@ -288,6 +288,42 @@ prenda, y el revisor deja de recibir un torso sin cabeza.
 
 ---
 
+## Dilo con tus palabras
+
+Desde el 11 de septiembre de 2026 la pantalla de crear admite tres cosas que
+antes no existían, pedidas por la clienta con sus propias palabras:
+
+- **Escribir o dictar** lo que quieres ("vestido rojo cruzado, en un
+  restaurante, de pie"). El botón *Dictar* usa el reconocimiento de voz del
+  propio navegador (español); en iPhone Safari funciona. La frase va a
+  `POST /api/generate/interpretar`, que la convierte en opciones del catálogo:
+  las que ya existen se eligen, las que faltan se crean como **opciones tuyas**
+  (filas de la tabla `options` con tu `user_id`), y a partir de ahí todo sigue
+  igual: presupuesto, aviso de riesgo, comprobaciones. Entender la frase no
+  gasta imágenes. Lo que pidas que cambie *quién eres* (más delgada, otra cara)
+  se rechaza y se te dice.
+- **Una foto de una prenda** ("quiero algo como esto"). `POST
+  /api/catalog/referencia` la guarda aparte de tus fotos (es de otra persona y
+  nunca entra en tu perfil), Claude describe la prenda corte a corte, y queda
+  como opción tuya que además lleva la imagen: el motor recibe la foto de la
+  prenda como última imagen de entrada con la instrucción de tomar de ella
+  solo la prenda.
+- **Cambiar sobre un resultado** ("no, cambia el escote"). En el paso 5 y desde
+  el álbum (*Cambiar*), la siguiente petición parte de la imagen que estás
+  mirando (`source_image_id`), no de la foto original. La comprobación de
+  identidad sigue midiéndose contra tu perfil, nunca contra la imagen que se
+  edita.
+
+### Motores
+
+El proveedor de pago ofrece tres motores de edición, elegibles por petición
+(`engine`): *Automático* (FLUX Kontext, 0,04 USD), *Gemini* (Nano Banana,
+0,039 USD) y *OpenAI* (gpt-image-1 en alta calidad, 0,25 USD). Los dos últimos
+se añadieron cuando la clienta rechazó a la vista todos los resultados de
+Kontext mientras la puerta de identidad los daba por buenos: la puerta separa
+a la clienta de una desconocida, no certifica el parecido, y eso lo decide el
+motor. Se comparan con sus fotos y ella juzga.
+
 ## Cómo se mide la identidad
 
 Cada imagen generada se vuelve a medir con los mismos analizadores que
