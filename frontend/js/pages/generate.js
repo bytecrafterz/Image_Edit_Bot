@@ -297,11 +297,11 @@ function freeTextCard(view) {
       rec = new SR(); rec.lang = 'es-ES'; rec.interimResults = true; rec.continuous = false;
       const before = box.value ? box.value.trim() + ' ' : '';
       rec.onresult = (ev) => { box.value = before + Array.from(ev.results).map((r) => r[0].transcript).join(' '); };
-      rec.onend = () => { rec = null; mic.textContent = 'Dictar'; };
-      rec.onerror = () => { rec = null; mic.textContent = 'Dictar'; toast('No se ha podido escuchar. Escribelo.'); };
-      mic.textContent = 'Escuchando... (toca para parar)';
-      try { rec.start(); } catch { rec = null; mic.textContent = 'Dictar'; }
-    } }, 'Dictar');
+      rec.onend = () => { rec = null; mic.textContent = '\u{1F3A4} Dictar'; };
+      rec.onerror = () => { rec = null; mic.textContent = '\u{1F3A4} Dictar'; toast('No se ha podido escuchar. Escribelo.'); };
+      mic.textContent = '\u{1F534} Escuchando... (toca para parar)';
+      try { rec.start(); } catch { rec = null; mic.textContent = '\u{1F3A4} Dictar'; }
+    } }, '\u{1F3A4} Dictar');
   const refName = el('span', { class: 'tiny', text: state.referencia ? `Prenda: ${state.referencia.label_es}` : '' });
   const fileInput = el('input', { type: 'file', accept: 'image/*', hidden: true,
     onChange: async (e) => {
@@ -334,6 +334,8 @@ function freeTextCard(view) {
           onClick: () => fileInput.click() }, 'Foto de una prenda'),
         refName,
       ]),
+      el('p', { class: 'tiny', style: { margin: '6px 0 0' },
+        text: 'Dictar: pulsa, habla en espanol y lo que digas aparece arriba. Vuelve a pulsar para parar.' }),
       el('div', { class: 'tiny', style: { marginTop: '8px' }, text: 'Motor de imagen' }),
       enginesRow,
       el('div', { style: { marginTop: '10px' } }, go),
