@@ -1098,6 +1098,13 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
             ("the same garment as in the source photograph, " + same))
     if "hair" not in changed_groups:
         hair_style = _vision_text(brf, "hair", prof)
+        # The free local reader guesses hair from a crop: it called her long
+        # wavy hair "short black hair" on 2026-09-11 and the prompt asked the
+        # engine to keep a hairstyle she does not have, beside a subject line
+        # that said "long black hair".  Her profile measured the length over
+        # her photographs; when the reading was a guess, the measurement wins.
+        if _norm_ws(brf.get("vision_provider")).lower() == "heuristic":
+            hair_style = hair_description(prof) or hair_style
         preserve_bits.append("the same hairstyle" + (": " + hair_style
                                                      if hair_style else ""))
     if "makeup" not in changed_groups:

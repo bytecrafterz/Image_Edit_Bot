@@ -109,8 +109,12 @@ MODELS: dict[str, dict[str, Any]] = {
     # reference pictures and plain-language edits, which is what she is
     # paying for elsewhere, and both are hosted here.  Same request shape:
     # her photograph first, her references after, one prompt.  Chosen per
-    # request through GenRequest.extra["engine"]; never by default until one
-    # of them has earned it on her photographs.
+    # request through GenRequest.extra["engine"].  Gemini earned the default
+    # on 2026-09-11: four dresses in two settings from her full-body
+    # photograph, Gemini held her face at 0.71-0.80 on every accepted image
+    # while Kontext ranged 0.50-0.78, and the same evening her own Kontext
+    # runs came back at 0.52-0.63 - "her appearance has changed completely".
+    # Same price (0.039 against 0.040).  See DEFAULT_IDENTITY_ENGINE.
     "identity_banana": {
         "endpoint": "fal-ai/nano-banana/edit",
         "price_usd": 0.039,
@@ -161,6 +165,9 @@ MODELS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_ROLE = "identity"
+# The identity engine used when the request names none.  Measured, not
+# preferred: see the note above MODELS["identity_banana"].
+DEFAULT_IDENTITY_ENGINE = "identity_banana"
 
 _SUBMIT_TIMEOUT = 60.0
 _POLL_TIMEOUT = 30.0
@@ -720,6 +727,11 @@ class FalProvider(ImageProvider):
         if wanted in MODELS and "images" in tuple(MODELS[wanted].get("knobs") or ()) \
                 and has_source:
             return wanted
+        # No engine named: the one that keeps her face best takes the work.
+        # The estimate and the run both come through here, so the quote and
+        # the bill name the same endpoint.
+        if not wanted and has_source and DEFAULT_IDENTITY_ENGINE in MODELS:
+            return DEFAULT_IDENTITY_ENGINE
         if not has_source:
             return "draft" if quality in ("draft", "preview") else "identity"
         if quality == "draft":

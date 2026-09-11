@@ -701,8 +701,12 @@ def _check_identity_face(img: np.ndarray, face_d: dict, profile: dict,
                     "No se pudo comparar el rostro con tu firma facial, "
                     "comprobacion omitida."), 0.0, False)
     similarity = _clamp01(similarity)
-    passed = similarity >= face_min
-    if not passed:
+    like_min = max(face_min, _f(thresholds.get("face_like_min"),
+                                DEFAULT_THRESHOLDS["face_like_min"]))
+    is_her = similarity >= face_min
+    passed = similarity >= like_min
+    n_photos = int(_f((profile.get("face") or {}).get("embedding_n"), 0))
+    if not is_her:
         bbox = _int_bbox(face_d.get("bbox"))
         # The distance below the line is worth far more than it was against the
         # old descriptor, whose entire population lived inside 0.04 of scale:
@@ -717,14 +721,24 @@ def _check_identity_face(img: np.ndarray, face_d: dict, profile: dict,
             "severity": round(severity, 3), "repairable": False,
             "detail": "El rostro no es el tuyo: no coincide con tus fotos.",
         })
+        detail = ("Parecido facial %.2f (minimo %.2f), medido sobre la firma de "
+                  "tus %d fotos. Esta cara no es la tuya: cambian los rasgos, "
+                  "no solo el peinado o la luz." % (similarity, like_min, n_photos))
+        return _mk(name, similarity, like_min, False, detail), similarity, True
+    if not passed:
+        # Hers, but not enough like her to hand over: see face_like_min in
+        # identity/profile.py.  Not a defect a repair can paint out - the
+        # whole face is a little off - so the run rolls the seed again.
+        detail = ("Parecido facial %.2f: se reconoce que eres tu (mas de %.2f), "
+                  "pero se parece poco a tus %d fotos (se pide %.2f). Se "
+                  "descarta y se vuelve a intentar."
+                  % (similarity, face_min, n_photos, like_min))
+        check = _mk(name, similarity, like_min, False, detail)
+        check["fail_es"] = "la cara ha salido poco parecida a ti"
+        return check, similarity, True
     detail = ("Parecido facial %.2f (minimo %.2f), medido sobre la firma de "
-              "tus %d fotos. %s"
-              % (similarity, face_min,
-                 int(_f((profile.get("face") or {}).get("embedding_n"), 0)),
-                 "Eres tu." if passed
-                 else "Esta cara no es la tuya: cambian los rasgos, no solo el "
-                      "peinado o la luz."))
-    return _mk(name, similarity, face_min, passed, detail), similarity, True
+              "tus %d fotos. Eres tu." % (similarity, like_min, n_photos))
+    return _mk(name, similarity, like_min, True, detail), similarity, True
 
 
 def _source_path(brief: dict) -> str:

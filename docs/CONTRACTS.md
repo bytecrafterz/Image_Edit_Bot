@@ -621,7 +621,8 @@ appends it as the last input image with a plain instruction.
 
 ### `GenRequest.extra`
 ```
-# {"engine": "identity_banana"|"identity_gpt"|"", "garment_path": str, ...local hints}
+# {"engine": "identity_banana"|"identity_multi"|"identity_gpt"|"", "garment_path": str, ...local hints}
+# "" means the default identity engine (fal.DEFAULT_IDENTITY_ENGINE, Gemini since 2026-09-11)
 ```
 `engine` wins in `FalProvider.pick_model` when it names an images-capable
 role; `plan_requests` carries it so the estimate prices the same model.

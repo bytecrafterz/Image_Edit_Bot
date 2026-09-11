@@ -30,7 +30,8 @@ function reset() {
     style: null,
     choices: {},
     nPreviews: store.restore('n_previews', 6),
-    engine: store.restore('engine', ''),
+    // '' (the old "Automatico") now means Gemini on the server too; see fal.py.
+    engine: store.restore('engine', '') || 'identity_banana',
     sourceImage: null,     // a result being edited ("no, cambia el escote")
     referencia: null,      // the garment value she uploaded this time
     quality: store.restore('quality', 'preview'),
@@ -272,9 +273,12 @@ function choiceSentence(group) {
   return `Se combinaran estas ${chosen.length} opciones entre las fotos.`;
 }
 
+/* Gemini first and preselected: measured on her photographs on 2026-09-11 it
+   kept her face at 0.71-0.80 where FLUX Kontext ranged 0.50-0.78 and she
+   rejected the Kontext results on sight.  Same price. */
 const ENGINES = [
-  ['', 'Automatico'],
-  ['identity_banana', 'Gemini'],
+  ['identity_banana', 'Gemini (recomendado)'],
+  ['identity_multi', 'FLUX Kontext'],
   ['identity_gpt', 'OpenAI'],
 ];
 

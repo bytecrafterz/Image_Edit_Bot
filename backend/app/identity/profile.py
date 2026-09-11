@@ -63,6 +63,16 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # pays for a faithful generation being noisier than a photograph, and 0.05
     # above the worst face the check has to reject.
     "face_embed_min": 0.45,
+    # Being her is not the same as looking like her.  0.45 tells her from a
+    # stranger; on 2026-09-11 three Kontext previews read 0.52, 0.54 and 0.63
+    # against her five photographs, passed, and she saw "a completely
+    # different person".  Her own photographs sit at 0.83-0.87 against the
+    # same signature and Gemini's accepted results at 0.71-0.80, so a second
+    # line at 0.60 keeps everything she has ever approved and refuses the
+    # band she has always rejected.  A face between the two lines is hers
+    # in the sense that matters to a gate and not in the sense that matters
+    # to her; the image is refused and the seed rolled again.
+    "face_like_min": 0.60,
     # Skin is gated on chroma, not on raw CIE76 distance: exposure moves L by
     # far more than a real change of skin tone moves a and b.  The effective
     # limit is widened per person from their own measured spread, so a woman
