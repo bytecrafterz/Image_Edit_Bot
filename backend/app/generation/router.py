@@ -1021,6 +1021,9 @@ def plan_requests(plan: dict, quality: str,
         # will carry, so provider.pick_model cannot answer differently.
         mask = _text(shield.get("mask_path")) or ("mask.png" if masked else "")
         out.append(_probe_request("inpaint" if masked else "generate", quality,
+            # The engine named on the plan, so the estimate prices the model
+            # that will really run: gpt-image-1 costs six times Kontext.
+            extra={"engine": str(plan.get("engine") or "")},
                                   source_path=source_path,
                                   source_size=source_size,
                                   mask_path=mask or None,
