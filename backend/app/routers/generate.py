@@ -28,6 +28,9 @@ class AnalyzeBody(BaseModel):
     options: dict = Field(default_factory=dict)
     n_previews: int = 6
     quality: str = "preview"
+    # Which edit engine draws it (a provider role such as identity_banana);
+    # empty means the provider's own choice.  See providers/fal MODELS.
+    engine: str | None = None
 
 
 class RunBody(BaseModel):
@@ -77,7 +80,8 @@ def analyze(body: AnalyzeBody,
     try:
         return orchestrator.prepare_run(
             user, body.original_id, body.options, body.n_previews,
-            body.quality, body.profile_id, body.style)
+            body.quality, body.profile_id, body.style,
+            engine=body.engine)
     except PermissionError as exc:
         raise HTTPException(400, str(exc))
     except ValueError as exc:

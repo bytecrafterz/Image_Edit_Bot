@@ -100,6 +100,33 @@ MODELS: dict[str, dict[str, Any]] = {
         "out_max_side": 1024,
         "notes": "Kontext multi: acepta fotos de referencia de la persona.",
     },
+    # THE TWO ENGINES THE CLIENT COMPARES US WITH.  On 2026-09-11 she rejected
+    # every Kontext result on sight - "el cuerpo no es mio y la cara no me
+    # gusta" - while the gate read them at 0.73-0.84, inside the range of her
+    # own photographs.  Both can be true: SFace tells her from a stranger, it
+    # does not certify likeness, and Kontext redraws the face from one or two
+    # references.  Gemini's image editor and OpenAI's are built around
+    # reference pictures and plain-language edits, which is what she is
+    # paying for elsewhere, and both are hosted here.  Same request shape:
+    # her photograph first, her references after, one prompt.  Chosen per
+    # request through GenRequest.extra["engine"]; never by default until one
+    # of them has earned it on her photographs.
+    "identity_banana": {
+        "endpoint": "fal-ai/nano-banana/edit",
+        "price_usd": 0.039,
+        "per_megapixel": False,
+        "knobs": ("images",),
+        "out_max_side": 1024,
+        "notes": "Gemini 2.5 Flash Image (Nano Banana): edicion con fotos de referencia.",
+    },
+    "identity_gpt": {
+        "endpoint": "fal-ai/gpt-image-1/edit-image",
+        "price_usd": 0.25,
+        "per_megapixel": False,
+        "knobs": ("images", "gpt"),
+        "out_max_side": 1536,
+        "notes": "OpenAI gpt-image-1 (alta calidad): edicion con fotos de referencia.",
+    },
     "identity_max": {
         "endpoint": "fal-ai/flux-pro/kontext/max",
         "price_usd": 0.080,
@@ -645,6 +672,12 @@ class FalProvider(ImageProvider):
         has_mask = bool(getattr(req, "mask_path", ""))
         if operation == "inpaint" or has_mask:
             return "inpaint"
+        # An engine named on the request wins, when it is one that edits from
+        # her photographs.  See the note above identity_banana.
+        wanted = str(((getattr(req, "extra", None) or {}).get("engine")) or "").strip()
+        if wanted in MODELS and "images" in tuple(MODELS[wanted].get("knobs") or ()) \
+                and has_source:
+            return wanted
         if not has_source:
             return "draft" if quality in ("draft", "preview") else "identity"
         if quality == "draft":
@@ -835,6 +868,16 @@ class FalProvider(ImageProvider):
             payload["seed"] = int(req.seed) & 0x7FFFFFFF
         if "size" in knobs and req.width and req.height:
             payload["image_size"] = {"width": int(req.width), "height": int(req.height)}
+        if "gpt" in knobs:
+            # gpt-image-1 takes a named size and a quality tier, not pixels.
+            # Portrait for her portraits; "high" because a likeness test at
+            # "low" would be a test of the wrong thing.
+            size = meta.get("source_size") or []
+            width = int(req.width or (size[0] if len(size) == 2 else 0))
+            height = int(req.height or (size[1] if len(size) == 2 else 0))
+            payload["image_size"] = ("1024x1536" if height > width
+                                     else "1536x1024" if width > height else "1024x1024")
+            payload["quality"] = "high"
         if "aspect" in knobs:
             # Her photographs are 2316x3088 - 3:4 - and Kontext reframes to
             # whatever ratio it is told, so a wrong one here crops or squeezes

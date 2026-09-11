@@ -812,7 +812,7 @@ def _brief_from(user: dict, analysis: dict, original: dict,
 
 def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
                 quality: str, profile_id: str | None = None,
-                style_key: str | None = None) -> dict:
+                style_key: str | None = None, engine: str | None = None) -> dict:
     """Plan and price a run.  Spends nothing."""
     original = db.row_to_dict(db.q1(
         "SELECT * FROM originals WHERE id=? AND user_id=? AND deleted_at IS NULL",
@@ -1189,7 +1189,8 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
         "VALUES(?,?,?,?,'preview','queued',?,?,?,?,?)",
         (run_id, user["id"], original_id, (profile or {}).get("id"),
          db.dumps({"choices": clean, "quality": quality or "preview",
-                   "style": style["key"], "brief": _jsonable_brief(brief)}),
+                   "style": style["key"], "engine": str(engine or ""),
+                   "brief": _jsonable_brief(dict(brief, engine=str(engine or "")))}),
          db.dumps(plan), len(plan.get("variants") or []),
          float(estimate.get("total_usd") or 0.0), db.now()),
     )
@@ -1750,7 +1751,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             guidance=float(merged.get("guidance", 4.0)),
             steps=int(merged.get("steps", 28)),
             identity_weight=float(merged.get("identity_weight", 0.85)),
-            extra=hints,
+            extra={**hints, "engine": str((brief or {}).get("engine") or "")},
         )
 
         # The router needs both halves of the question: who she prefers, and
@@ -1785,7 +1786,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                 guidance=float(merged.get("guidance", 4.0)),
                 steps=int(merged.get("steps", 28)),
                 identity_weight=float(merged.get("identity_weight", 0.85)),
-                extra=hints,
+                extra={**hints, "engine": str((brief or {}).get("engine") or "")},
             )
             provider, model, why = router_mod.choose_provider(
                 "generate", quality, budget_usd=None, prefer=prefer,
