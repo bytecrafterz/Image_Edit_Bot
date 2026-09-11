@@ -447,6 +447,45 @@ def _wire_safe(text: str) -> tuple[str, list[str]]:
     return out, swapped
 
 
+# THE TWO EDITORS READ THE PROMPT BEFORE THEY DRAW.  On 2026-09-11 every one
+# of 16 gpt-image-1 calls came back 422 content_policy_violation on the PROMPT,
+# and 9 of 16 Nano Banana calls 422 no_media_generated - both before any
+# image, both at no charge - on a prompt written for Kontext, which has no
+# reader.  The words that did it are anatomical bookkeeping: "same bust, waist
+# and hip proportions", "visible pores, moles and blemishes", "deep plunging V
+# neckline", and the folded negative list that literally says "altered breast
+# size, different person".  Kontext needs them; a reviewer sees them as a
+# request about a body.  So for the roles that have a reader the prompt is
+# rewritten in plain clothing terms, the negative list is not folded in at
+# all, and what was swapped is recorded on the attempt.
+_EDITOR_ROLES = ("identity_banana", "identity_gpt")
+_EDITOR_MAP = (
+    (re.compile(r"real skin texture with visible pores, moles and blemishes kept as they are", re.I),
+     "her natural skin texture and her marks exactly as in her photographs"),
+    (re.compile(r"natural skin texture with visible pores and fine lines", re.I),
+     "her natural skin texture"),
+    (re.compile(r"same bust, waist and hip proportions", re.I), "the same figure and proportions"),
+    (re.compile(r"altered breast size,?\s*", re.I), ""),
+    (re.compile(r"deep plunging V neckline", re.I), "V neckline"),
+    (re.compile(r"plunging", re.I), "low"),
+    (re.compile(r"\bbust\b", re.I), "upper body"),
+    (re.compile(r"\bcleavage\b", re.I), "neckline"),
+    (re.compile(r"visible pores", re.I), "natural skin"),
+)
+
+
+def _editor_safe(text: str) -> tuple[str, list[str]]:
+    """The same instruction in words an image editor's reader will accept."""
+    out = str(text or "")
+    swapped: list[str] = []
+    for pattern, plain in _EDITOR_MAP:
+        hits = pattern.findall(out)
+        if hits:
+            swapped.append("%s -> %s (x%d)" % (str(hits[0]).lower()[:40], plain or "(quitado)", len(hits)))
+            out = pattern.sub(plain, out)
+    return re.sub(r"[ \t]+", " ", out).strip(), swapped
+
+
 def _covered_negative(negative: str, masked: bool = False) -> tuple[str, list[str]]:
     """The negative, minus every term that names a state of undress.
 
@@ -749,6 +788,12 @@ class FalProvider(ImageProvider):
         # to send (see _PARTIAL_DRESS), so it is read before the prompt is
         # assembled rather than below where the crop is taken.
         masked = bool(req.mask_path and "mask" in knobs and "image" in knobs)
+        if role in _EDITOR_ROLES:
+            # See _EDITOR_ROLES: plain words, and no negative list at all.
+            prompt, swapped_editor = _editor_safe(prompt)
+            if swapped_editor:
+                meta["texto_editor"] = swapped_editor
+            negative = ""
         if negative and "negative" not in knobs:
             # FLUX endpoints have no negative_prompt field, so the no-beautify
             # block has to ride inside the instruction or it does nothing - and
