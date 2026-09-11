@@ -776,6 +776,13 @@ def _read_photo(user: dict, original: dict, analysis: dict) -> dict:
 def _brief_from(user: dict, analysis: dict, original: dict,
                 choices: dict) -> dict:
     brief = {
+        # The prompt builder and the planner look her own catalogue values up
+        # by this id: a scene she described in a sentence, a dress she sent a
+        # picture of.  Without it those values resolve to nothing and only
+        # their keys reach the engine - "mi fachada de restauran e35bdb" -
+        # which no model reads as "a restaurant facade".  That is exactly how
+        # "the place does not change" happened on 2026-09-11.
+        "user_id": str(user.get("id") or ""),
         "shot_type": analysis.get("shot_type") or "unknown",
         "source_path": original["path"],
         # What the risk record needs to recognise this photograph after any

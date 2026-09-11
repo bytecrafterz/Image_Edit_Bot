@@ -1039,7 +1039,10 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
             fragment = (opt.get("prompt") or opt.get("label_en")
                         or opt["value"].replace("_", " "))
             fragment = _norm_ws(fragment)
-            if fragment:
+            # A new place gets its own replacement order in section 4; naming
+            # it here as well only makes a long prompt longer.
+            if fragment and canon_group(group) not in ("scene", "background",
+                                                        "location"):
                 change_bits.append(fragment)
             if opt.get("negative"):
                 negatives.append(opt["negative"])
@@ -1129,19 +1132,36 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
 
     # ---- 4. scene and lighting --------------------------------------
     scene_bits: list[str] = []
-    if "background" not in changed_groups and "scene" not in changed_groups \
-            and "location" not in changed_groups:
+    new_scene = _chosen_fragments(kept, ("scene", "background", "location"))
+    new_light = _chosen_fragments(kept, ("lighting",))
+    if not new_scene:
         setting = _vision_text(brf, "setting", prof)
         scene_bits.append(("the same setting as the source photograph: " + setting)
                           if setting else
                           "the same setting as the source photograph")
-    if "lighting" not in changed_groups:
+    else:
+        # Editing engines keep the background unless told to replace it: a
+        # scene named only inside the "change only" list next to a dress and a
+        # colour came back as the same grey room with a new dress (the
+        # restaurant runs of 2026-09-11).  So the new place is an order of its
+        # own, and nothing of the old one is asked to survive.
+        scene_bits.append("replace the entire background and setting with: "
+                          + new_scene + ", nothing of the original location "
+                          "remains visible, her figure placed in the new "
+                          "setting with matching perspective, ground contact "
+                          "and cast shadows")
+    if new_light:
+        pass                      # the chosen lighting already sits in "change only"
+    elif new_scene:
+        scene_bits.append("lighting that belongs to the new setting, her face "
+                          "lit as clearly and evenly as in the source photograph")
+    else:
         light = _vision_text(brf, "lighting", prof)
         scene_bits.append(("the same lighting as the source photograph: " + light)
                           if light else
                           "the same soft natural lighting as the source photograph, "
                           "same direction and colour temperature")
-    style_scene = _style_scene(sty, brf, prof)
+    style_scene = _style_scene(sty, brf, prof, scene=new_scene, lighting=new_light)
     if style_scene:
         scene_bits.append(style_scene)
         tokens.append("estilo: " + style_scene)
@@ -1193,8 +1213,27 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
     }
 
 
-def _style_scene(style: dict, brief: dict, profile: dict) -> str:
-    """The style contributes scene and finish language, never the whole order."""
+def _chosen_fragments(kept: dict, groups: tuple) -> str:
+    """The English phrases of the options chosen in these groups, joined."""
+    bits: list[str] = []
+    for group, opts in (kept or {}).items():
+        if canon_group(group) not in groups:
+            continue
+        for opt in opts or []:
+            frag = _norm_ws(opt.get("prompt") or opt.get("label_en") or "")
+            if frag and frag not in bits:
+                bits.append(frag)
+    return _join(bits)
+
+
+def _style_scene(style: dict, brief: dict, profile: dict,
+                 scene: str = "", lighting: str = "") -> str:
+    """The style contributes scene and finish language, never the whole order.
+
+    ``scene`` and ``lighting`` are the chosen replacements, when there are
+    any: a template that says "{scene}" must describe the place she asked
+    for, not the room the photograph was taken in.
+    """
     template = _norm_ws(style.get("prompt_template")) or _norm_ws(style.get("prompt"))
     if not template:
         return ""
@@ -1202,8 +1241,8 @@ def _style_scene(style: dict, brief: dict, profile: dict) -> str:
         mapping = {
             "subject": _vision_text(brief, "subject", profile),
             "identity": "", "changes": "", "preserve": "",
-            "scene": _vision_text(brief, "setting", profile),
-            "lighting": _vision_text(brief, "lighting", profile),
+            "scene": scene or _vision_text(brief, "setting", profile),
+            "lighting": lighting or _vision_text(brief, "lighting", profile),
             "camera": "", "quality": "",
             "hair": hair_description(profile),
             "skin": skin_description(profile),
