@@ -999,8 +999,16 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
     # ---- 1. subject and identity ------------------------------------
     subject_bits: list[str] = []
     subject = _vision_text(brf, "subject", prof)
-    subject_bits.append(subject or "the same adult person from the source photograph")
     changed_groups = {canon_group(g) for g, v in chosen.items() if v}
+    if subject and "scene" in changed_groups:
+        # The vision reading names where the photograph was taken - "woman
+        # standing in a kitchen" - and on 2026-09-11 that opened every prompt
+        # that had asked for a restaurant or a street, so the engine was told
+        # two places at once.  When a scene is chosen the place comes from the
+        # choice alone; the person's description keeps everything else.
+        subject = re.sub(r"\s+(?:in|at|on|inside|outside|by|near|against)\s+"
+                         r"(?:a|an|the|her|his)\s+[^,.;]+", "", subject).strip()
+    subject_bits.append(subject or "the same adult person from the source photograph")
     if "hair" not in changed_groups:
         subject_bits.append(hair_description(prof))
     subject_bits.append(skin_description(prof))

@@ -470,7 +470,10 @@ _EDITOR_MAP = (
     (re.compile(r"plunging", re.I), "low"),
     (re.compile(r"\bbust\b", re.I), "upper body"),
     (re.compile(r"\bcleavage\b", re.I), "neckline"),
+    (re.compile(r"(?:real )?skin texture with pores and blemishes", re.I), "her natural skin texture"),
     (re.compile(r"visible pores", re.I), "natural skin"),
+    (re.compile(r"\bpores\b", re.I), "skin texture"),
+    (re.compile(r"\bblemishes\b", re.I), "marks"),
 )
 
 
