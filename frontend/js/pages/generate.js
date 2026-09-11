@@ -30,6 +30,9 @@ function reset() {
     style: null,
     choices: {},
     nPreviews: store.restore('n_previews', 6),
+    engine: store.restore('engine', ''),
+    sourceImage: null,     // a result being edited ("no, cambia el escote")
+    referencia: null,      // the garment value she uploaded this time
     quality: store.restore('quality', 'preview'),
     plan: null,
     run: null,
@@ -269,9 +272,104 @@ function choiceSentence(group) {
   return `Se combinaran estas ${chosen.length} opciones entre las fotos.`;
 }
 
+const ENGINES = [
+  ['', 'Automatico'],
+  ['identity_banana', 'Gemini'],
+  ['identity_gpt', 'OpenAI'],
+];
+
+/* Her words, typed or dictated, and a picture of a garment she likes.  What
+   she asked for on 2026-09-11 in her own terms: "quiero poder hablar por voz",
+   "subir una foto y decir quiero algo parecido a esto".  The sentence goes to
+   /api/generate/interpretar, comes back as choices - existing ones where they
+   fit, new values of her own where the catalogue had nothing - and the usual
+   estimate follows.  Dictation is the browser's own (es-ES); iPhone Safari has
+   it.  Nothing here spends on images. */
+function freeTextCard(view) {
+  const box = el('textarea', { rows: 3, placeholder:
+    'Dime lo que quieres: "vestido rojo cruzado, en un restaurante, de pie" o "como la foto de la prenda pero en azul marino"',
+    style: { width: '100%', boxSizing: 'border-box' } });
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null;
+  const mic = el('button', { class: 'btn btn--secondary btn--sm', type: 'button', hidden: !SR,
+    onClick: () => {
+      if (rec) { rec.stop(); return; }
+      rec = new SR(); rec.lang = 'es-ES'; rec.interimResults = true; rec.continuous = false;
+      const before = box.value ? box.value.trim() + ' ' : '';
+      rec.onresult = (ev) => { box.value = before + Array.from(ev.results).map((r) => r[0].transcript).join(' '); };
+      rec.onend = () => { rec = null; mic.textContent = 'Dictar'; };
+      rec.onerror = () => { rec = null; mic.textContent = 'Dictar'; toast('No se ha podido escuchar. Escribelo.'); };
+      mic.textContent = 'Escuchando... (toca para parar)';
+      try { rec.start(); } catch { rec = null; mic.textContent = 'Dictar'; }
+    } }, 'Dictar');
+  const refName = el('span', { class: 'tiny', text: state.referencia ? `Prenda: ${state.referencia.label_es}` : '' });
+  const fileInput = el('input', { type: 'file', accept: 'image/*', hidden: true,
+    onChange: async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      refName.textContent = 'Leyendo la prenda...';
+      try {
+        const data = await api.upload('/api/catalog/referencia', [file], { texto: box.value || '' });
+        state.referencia = data.value;
+        refName.textContent = `Prenda: ${data.value.label_es}`;
+        toast('Prenda guardada como opcion tuya. Ahora dime que quieres hacer con ella, o calcula directamente.', 'ok');
+      } catch (err) { refName.textContent = ''; toast(err.message, 'danger'); }
+    } });
+  const go = el('button', { class: 'btn', type: 'button',
+    onClick: () => interpretAndPrice(view, box.value) }, 'Entender y calcular');
+  const enginesRow = el('div', { class: 'chips', style: { marginTop: '8px' } },
+    ENGINES.map(([key, label]) => el('button', {
+      class: 'chip' + (state.engine === key ? ' chip--on' : ''), type: 'button',
+      onClick: (ev) => {
+        state.engine = key; store.persist('engine', key);
+        for (const c of enginesRow.children) c.classList.toggle('chip--on', c === ev.currentTarget);
+      } }, label)));
+  return el('div', { class: 'section' }, [
+    el('div', { class: 'section__title', text: 'Dilo con tus palabras' }),
+    el('div', { class: 'card' }, [
+      box, fileInput,
+      el('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px', alignItems: 'center' } }, [
+        mic,
+        el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
+          onClick: () => fileInput.click() }, 'Foto de una prenda'),
+        refName,
+      ]),
+      el('div', { class: 'tiny', style: { marginTop: '8px' }, text: 'Motor de imagen' }),
+      enginesRow,
+      el('div', { style: { marginTop: '10px' } }, go),
+      el('p', { class: 'tiny', style: { margin: '8px 0 0' },
+        text: 'O elige abajo con las opciones de siempre. Entender lo que dices no cuesta imagenes.' }),
+    ]),
+  ]);
+}
+
+/* Her sentence -> choices -> the same estimate as always.  Whatever the
+   catalogue already had is picked; whatever it lacked becomes a value of
+   hers; anything that would change who she is comes back as "rechazado"
+   and is said, not done. */
+async function interpretAndPrice(view, texto) {
+  const clean = (texto || '').trim();
+  if (!clean && !state.referencia) { toast('Escribe o dicta lo que quieres, o sube una prenda.'); return; }
+  const btnNote = toast('Entendiendo lo que pides...');
+  try {
+    const data = await api.post('/api/generate/interpretar', {
+      texto: clean,
+      original_id: state.sourceImage ? null : (state.original ? state.original.id : null),
+      source_image_id: state.sourceImage || null,
+      referencia_value: state.referencia ? state.referencia.value_key : null,
+    }, { timeout: 120000 });
+    Object.assign(state.choices, data.choices || {});
+    if (data.vistas > 0) { state.nPreviews = Math.min(6, Math.max(1, data.vistas)); store.persist('n_previews', state.nPreviews); }
+    if (data.rechazado) toast(data.rechazado, 'danger');
+    if (data.resumen) toast(data.resumen, 'ok');
+    await goStep3(view);
+  } catch (err) { toast(err.message, 'danger'); }
+}
+
 function renderStep2(view) {
   clear(view);
   view.appendChild(stepHeader(view));
+  view.appendChild(freeTextCard(view));
 
   // Style carousel
   const styleRow = dragScroll(el('div', { class: 'scroller' }));
@@ -423,7 +521,9 @@ async function goStep3(view) {
     // request that was working perfectly.  Later estimates read the stored
     // report and come back in under a second.
     const plan = await api.post('/api/generate/analyze', {
-      original_id: state.original.id,
+      original_id: state.original ? state.original.id : null,
+      source_image_id: state.sourceImage || null,
+      engine: state.engine || null,
       style: state.style ? state.style.key : null,
       options: state.choices,
       n_previews: state.nPreviews,
@@ -839,6 +939,25 @@ function renderStep5(view) {
     text: 'Toca las que te gusten y luego generalas en alta calidad.' }));
 
   view.appendChild(el('div', { class: 'grid' }, run.images.map((img) => tile(img, true))));
+
+  // "NO, CAMBIA EL ESCOTE."  The next request starts from the image she
+  // taps, not from the photograph: say what to change, the robot re-prices,
+  // and the identity check still runs against her profile.
+  const change = el('textarea', { rows: 2, placeholder: 'Que cambiar en la imagen elegida: "cambia el escote", "mas elegante", "en azul"...',
+    style: { width: '100%', boxSizing: 'border-box' } });
+  view.appendChild(el('div', { class: 'card', style: { marginTop: '12px' } }, [
+    el('div', { class: 'section__title', text: 'Cambiar algo en una imagen' }),
+    el('p', { class: 'tiny', text: 'Toca una imagen y dime que cambiar: la siguiente se hace a partir de ella.' }),
+    change,
+    el('button', { class: 'btn btn--secondary', type: 'button', style: { marginTop: '8px' },
+      onClick: () => {
+        const first = Array.from(state.selected)[0];
+        if (!first) { toast('Toca primero la imagen que quieres cambiar.'); return; }
+        state.sourceImage = first;
+        state.choices = {};
+        interpretAndPrice(view, change.value);
+      } }, 'Cambiar sobre la imagen elegida'),
+  ]));
 
   view.appendChild(el('div', { class: 'card', style: { marginTop: '16px' } }, [
     el('div', { class: 'card__row' }, [
