@@ -2041,6 +2041,27 @@ def verify_image(image_path: str, profile: dict, brief: dict | None = None) -> d
     score = (sum(w * s for w, s in scored) / total_weight) if total_weight > 0 else 0.0
     passed = all(c["passed"] for c in checks if c["weight"] > 0)
 
+    # A GENERATED IMAGE WHOSE FACE COULD NOT BE CHECKED IS NOT DELIVERED.  The
+    # rule above - an uncomputed check never fails - is right for a metric
+    # and wrong for the one question the product exists to answer.  On
+    # 2026-09-10 an account with no face signature generated three images;
+    # identity_face reported itself uncomputed, the verdict passed on the
+    # other checks, and the client was handed a stranger.  The orchestrator
+    # sets ``exige_identidad`` for every generative provider (never for the
+    # free engine, which composites her own pixels), and under it a missing
+    # reading is a refusal with its reason, not an abstention.
+    if brf.get("exige_identidad") and "identity_face" in skipped:
+        passed = False
+        score = min(score, 0.2)
+        for chk in checks:
+            if chk["name"] == "identity_face":
+                chk["passed"] = False
+                chk["fail_es"] = "no se ha podido comprobar que seas tu"
+                chk["detail"] = (str(chk.get("detail") or "").strip()
+                                 + " Esta imagen no se entrega: el motor la ha "
+                                 "dibujado entera y nadie ha podido comprobar "
+                                 "que seas tu.").strip()
+
     # "Never fail someone for what could not be measured" is right for one
     # missing metric and catastrophic as a blanket rule: an image damaged badly
     # enough that no face, no pose and no body can be found skips EVERY identity

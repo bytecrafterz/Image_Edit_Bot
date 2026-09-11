@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from .. import config, db, security
 from ..catalog import seed as seed_mod
+from ..generation import orchestrator as orchestrator_mod
+from ..identity import onboarding as onboarding_mod
 from ..services import billing, storage
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -217,6 +219,38 @@ def delete_user(user_id: str,
     db.execute("DELETE FROM users WHERE id=?", (user_id,))
     db.audit("admin.delete_user", user_id, actor=admin["email"])
     return {"ok": True}
+
+
+@router.post("/users/{user_id}/rebuild-profile")
+def rebuild_profile(user_id: str, admin: dict = Depends(security.admin_user)) -> dict:
+    """Build - or rebuild - an account's identity profile from its photographs.
+
+    The repair for the account that generated without a profile on
+    2026-09-10, and the button for any account whose photographs changed.
+    Free: the measuring is local.  Answers whether a face signature came out
+    of it, because that is the thing every paid image is checked against.
+    """
+    user_row = _user_row(user_id)
+    prof = db.row_to_dict(db.q1(
+        "SELECT * FROM profiles WHERE user_id=? AND deleted_at IS NULL "
+        "ORDER BY is_default DESC, updated_at DESC LIMIT 1", (user_id,))) or {}
+    if not prof:
+        prof = orchestrator_mod._ensure_default_profile(user_row)
+    if not prof:
+        raise HTTPException(400, "No se pudo crear el perfil.")
+    try:
+        report = onboarding_mod.build_first_run(user_row, prof["id"], force=True)
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:                              # noqa: BLE001
+        raise HTTPException(500, "No se pudo construir el perfil: %s" % str(exc)[:160])
+    prof = orchestrator_mod._profile_for(user_row, prof["id"])
+    firma = bool((prof.get("face") or {}).get("embedding_mean"))
+    fotos = int(prof.get("n_sources") or 0)
+    db.audit("admin.rebuild_profile", user_id, actor=admin["email"],
+             profile_id=prof["id"], fotos=fotos, firma=firma)
+    return {"ok": True, "profile_id": prof["id"], "fotos": fotos,
+            "firma_facial": firma, "resumen": str((report or {}).get("resumen") or "")}
 
 
 @router.get("/users/{user_id}/images")

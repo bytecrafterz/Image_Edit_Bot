@@ -118,6 +118,8 @@ async function renderUsers(view, body) {
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => viewImages(user) }, 'Ver imagenes'),
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
+          onClick: () => rebuildProfile(view, user) }, 'Reconstruir perfil'),
+        el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => editUser(view, user) }, 'Editar'),
         el('button', { class: 'btn btn--secondary btn--sm', type: 'button',
           onClick: () => resetPassword(user) }, 'Contrasena'),
@@ -126,6 +128,21 @@ async function renderUsers(view, body) {
       ]),
     ]));
   }
+}
+
+/* Build the account's identity profile from its photographs, free.  Says
+   whether a face signature came out, because without one nothing generated
+   can be checked against her - which is how a stranger got delivered once. */
+async function rebuildProfile(view, user) {
+  toast('Midiendo sus fotos... puede tardar medio minuto.');
+  try {
+    const r = await api.post(`/api/admin/users/${user.id}/rebuild-profile`, {}, { timeout: 300000 });
+    toast(r.firma_facial
+      ? `Perfil listo: ${r.fotos} fotos, firma facial construida.`
+      : `Perfil creado con ${r.fotos} fotos, pero SIN firma facial: hacen falta fotos con la cara de frente y bien iluminada.`,
+      r.firma_facial ? 'ok' : 'danger');
+    render(view);
+  } catch (err) { toast(err.message, 'danger'); }
 }
 
 /* The images one account has generated, in a sheet: finals first, previews

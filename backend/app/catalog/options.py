@@ -125,6 +125,31 @@ BUILTIN_OPTIONS: list[dict] = [
             _v("vestido_rojo", "Vestido rojo largo", "Long red dress",
                "a long crimson dress in flowing crepe, simple neckline", shots="full",
                garment=_complete("dress")),
+            # --- the four dresses the client sent as reference pictures on
+            # 2026-09-11, described garment by garment so the engine has the
+            # cut, the neckline, the sleeve and the hem, not just a colour ---
+            _v("vestido_rojo_cruzado", "Vestido rojo cruzado con botones dorados",
+               "Red wrap blazer dress",
+               "a fitted bright red long-sleeved wrap blazer dress with structured "
+               "shoulders, a deep V neckline, two rows of small gold buttons at the "
+               "hips, asymmetric wrap hem ending just above the knee",
+               shots="half,full", garment=_complete("dress")),
+            _v("vestido_blanco_escote", "Vestido blanco ajustado con escote profundo",
+               "White plunge bodycon midi dress",
+               "a white long-sleeved bodycon midi dress in smooth stretch fabric, "
+               "deep plunging V neckline, ruched fitted waist, pencil skirt to the knee",
+               shots="half,full", garment=_complete("dress")),
+            _v("vestido_negro_solapa", "Vestido negro palabra de honor con solapa blanca",
+               "Black strapless dress with white lapel",
+               "a black strapless bodycon midi dress in satin, sweetheart neckline "
+               "with one folded white satin lapel across the bust, pencil skirt to "
+               "the knee",
+               shots="half,full", garment=_complete("dress")),
+            _v("vestido_negro_escote", "Vestido negro ajustado con escote profundo",
+               "Black plunge bodycon midi dress",
+               "a black long-sleeved bodycon midi dress in smooth stretch fabric, "
+               "deep plunging V neckline, ruched fitted waist, pencil skirt to the knee",
+               shots="half,full", garment=_complete("dress")),
 
             # --- upper body only: each one names the lower half it needs ---
             # This is the group the delivered image came from.  Every default
@@ -326,6 +351,15 @@ BUILTIN_OPTIONS: list[dict] = [
             _v("ciudad_noche", "Ciudad de noche", "City at night",
                "a city street at night, distant lights thrown out of focus",
                local={"scene": "bokeh_city", "blur_background": 0.9}),
+            # The two settings the client asked for by name on 2026-09-11.
+            _v("calle_dia", "Calle de ciudad de dia", "City street by day",
+               "a city street in daylight, pavement and shopfronts softly out of "
+               "focus behind the subject, natural light",
+               local={"scene": "bokeh_city", "blur_background": 0.85}),
+            _v("restaurante", "Restaurante elegante", "Elegant restaurant",
+               "inside an elegant restaurant, warm lamps, tables with white "
+               "tablecloths softly out of focus behind the subject",
+               local={"scene": "bokeh_warm", "blur_background": 0.85}),
             _v("playa_atardecer", "Playa al atardecer", "Beach at sunset",
                "a wide beach at golden hour, soft haze on the horizon",
                local={"scene": "beach_haze"}),

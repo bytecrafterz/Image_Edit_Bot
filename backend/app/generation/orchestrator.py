@@ -552,6 +552,46 @@ def _plan_note(run_id: str, note: str) -> None:
                    (db.dumps(plan), run_id))
 
 
+def _exigente(brief: dict, provider) -> dict:
+    """The brief a generated image is judged by: identity is not optional.
+
+    The free engine composites her own pixels and cannot change who she is;
+    a generative provider redraws her entirely, so an image whose face could
+    not be measured is not "unchecked", it is unsafe to hand over.  See
+    identity/verify.verify_image, ``exige_identidad``.
+    """
+    name = str(getattr(provider, "name", "") or "")
+    return {**(brief or {}), "exige_identidad": name not in ("local", "")}
+
+
+def _ensure_default_profile(user: dict) -> dict:
+    """Create the account's default profile from its own photographs.
+
+    What scripts/import_nayane.py did by hand for the first person, done for
+    every account at its first estimate: one profile row, consent recorded as
+    the person herself (they are her own photographs, uploaded by her), and
+    every photograph she uploaded without a profile attached to it.  The
+    measuring - build_profile over the gallery - is prepare_run's next step.
+    """
+    name = str(user.get("display_name") or "").strip() \
+        or str(user.get("email") or "").split("@")[0] or "perfil"
+    profile_id = db.new_id("prf")
+    now = db.now()
+    db.execute("UPDATE profiles SET is_default=0 WHERE user_id=?", (user["id"],))
+    db.execute(
+        "INSERT INTO profiles(id,user_id,person_name,status,is_default,"
+        "created_at,updated_at) VALUES(?,?,?,'draft',1,?,?)",
+        (profile_id, user["id"], name, now, now))
+    try:
+        consent_mod.record_consent(user["id"], profile_id, {"relationship": "self"})
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("No se pudo registrar el consentimiento: %s", exc)
+    db.execute("UPDATE originals SET profile_id=? WHERE user_id=? "
+               "AND profile_id IS NULL", (profile_id, user["id"]))
+    db.audit("profile.auto_create", user["id"], profile_id=profile_id)
+    return _profile_for(user, profile_id)
+
+
 def _profile_for(user: dict, profile_id: str | None) -> dict:
     row = None
     if profile_id:
@@ -806,6 +846,18 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     # photographs plus a hand reading on at most eight of them - is paid on the
     # first estimate and never again.  A failure here must not block a run, so
     # it is logged and the estimate goes on without the section.
+    # A SECOND ACCOUNT NEVER GOT A PROFILE.  The first person's profile was
+    # created by the import script; for everyone after her this branch only
+    # appended a warning - "Ve a Mis fotos y pulsa Crear perfil" - and let the
+    # run go on.  On 2026-09-10 the client registered her own account,
+    # uploaded five photographs, generated three images and was shown a
+    # stranger: with no profile there was no face signature, the identity
+    # check reported itself "not computed", and the image was delivered as
+    # accepted.  So the profile is created here, from her own photographs,
+    # before anything is priced.
+    if not profile:
+        profile = _ensure_default_profile(user)
+
     first_run: dict = {}
     if profile:
         first_run = onboarding_mod.stored_report(profile["id"], user["id"])
@@ -819,8 +871,18 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
                 profile = _profile_for(user, profile["id"])
 
     if not profile:
-        warnings.append("Todavia no has creado tu perfil: no se podran comprobar "
-                        "tus proporciones. Ve a Mis fotos y pulsa Crear perfil.")
+        raise PermissionError("No se ha podido crear tu perfil con tus fotos. "
+                              "Sube fotos donde se te vea la cara con claridad "
+                              "y vuelve a intentarlo.")
+    if not ((profile.get("face") or {}).get("embedding_mean")):
+        # Without a signature nothing generated can be checked against her,
+        # and an image nobody checked is not sold as if it were her.
+        raise PermissionError("Tu perfil todavia no tiene firma facial: el "
+                              "robot no podria comprobar que las imagenes son "
+                              "tuyas, asi que no se cobra nada. Sube fotos "
+                              "donde se te vea la cara de frente y con buena "
+                              "luz, o pide al administrador que reconstruya "
+                              "tu perfil.")
     else:
         problem = consent_mod.consent_problem(profile["id"])
         if problem:
@@ -2090,7 +2152,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                        merged["textura"].get("ganancia") or 1.0))
 
         batch.detail("Revisando la imagen %d" % (index + 1))
-        verdict = verify_mod.verify_image(result.image_path, profile, checked)
+        verdict = verify_mod.verify_image(result.image_path, profile, _exigente(checked, provider))
 
         # The image is bought.  Before anything else is considered - and before
         # a single further cent can be spent - her own photographs are asked to
@@ -2106,7 +2168,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             # robot retouching her own hand to satisfy a reading of her own
             # camera.
             verdict, corrections, notes = _correct_free(
-                run_id, result.image_path, profile, checked, verdict,
+                run_id, result.image_path, profile, _exigente(checked, provider), verdict,
                 [d for d in (verdict.get("defects") or [])
                  if not d.get("de_tu_foto")])
             correction_notes.extend(notes)
@@ -2128,8 +2190,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                         str(target), quality=COMPOSE_QUALITY)
                     if again.get("ok"):
                         result.image_path = again["image_path"]
-                        verdict = verify_mod.verify_image(result.image_path,
-                                                          profile, checked)
+                        verdict = verify_mod.verify_image(result.image_path, profile, _exigente(checked, provider))
                         correction_notes.append(
                             "Las correcciones se aplicaron solo dentro de la "
                             "zona repintada: fuera de ella la imagen sigue "
@@ -2248,8 +2309,7 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                             str(target), quality=COMPOSE_QUALITY)
                         if again.get("ok"):
                             result.image_path = again["image_path"]
-                    verdict = verify_mod.verify_image(result.image_path,
-                                                      profile, checked)
+                    verdict = verify_mod.verify_image(result.image_path, profile, _exigente(checked, provider))
             finally:
                 if not repair_settled:
                     billing.release(repair_gate["hold_id"])
