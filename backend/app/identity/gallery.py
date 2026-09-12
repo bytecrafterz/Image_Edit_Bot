@@ -445,7 +445,8 @@ def _leave_one_out(vectors: list[list[float]]) -> list[float]:
     return out
 
 
-def choose_references(profile: dict, n: int = 3, must_include: str = "") -> dict:
+def choose_references(profile: dict, n: int = 3, must_include: str = "",
+                      prefer_shot: str = "") -> dict:
     """Up to ``n`` deliberately different photographs of her, by measurement.
 
     ``must_include`` is the photograph the run is editing.  It travels to the
@@ -528,6 +529,16 @@ def choose_references(profile: dict, n: int = 3, must_include: str = "") -> dict
     # Fewer usable photographs than references asked for is not a failure: two
     # good references still pool better than one.
     n = min(n, len(candidates))
+    # ``prefer_shot``: the engine learns her BODY from the references as much
+    # as her face, and a full-length edit whose companions are all closeups
+    # shows it no body at all.  The client's verdict of 2026-09-11 - face
+    # right, body wrong - is what this costs.  When she has a photograph of
+    # that framing, one of the companions is one.
+    want_shot = str(prefer_shot or "").strip().lower()
+    if want_shot in ("full", "half"):
+        want_shot = "full"
+    has_shot = any(str(c.get("shot_type") or "") == want_shot
+                   for c in candidates) if want_shot else False
 
     best = None
     best_relaxed = None
@@ -535,6 +546,10 @@ def choose_references(profile: dict, n: int = 3, must_include: str = "") -> dict
         if forced_index >= 0 and forced_index not in combo:
             continue
         picked = [candidates[i] for i in combo]
+        if has_shot and n >= 2 and not any(
+                str(p.get("shot_type") or "") == want_shot
+                and str(p.get("path")) != forced for p in picked):
+            continue
         mean = embedding_mod.gallery_mean(
             [p["face"]["embedding"] for p in picked])
         if not mean:

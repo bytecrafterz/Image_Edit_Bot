@@ -25,6 +25,7 @@ DEFAULTS: dict = {
     "default_quality": "preview",
     "default_provider": "auto",
     "autorepair": True,
+    "upscale_finals": True,
     "max_repair_rounds": SETTINGS.limits.max_repair_rounds,
     "max_retries": SETTINGS.limits.max_retries_per_variant,
     "strictness": "normal",
@@ -114,7 +115,7 @@ def _validate(key: str, value):
     elif key == "strictness":
         if value not in STRICTNESS_ES:
             raise ValueError("La estrictez debe ser suave, normal o estricto.")
-    elif key in ("autorepair", "notify_low_balance", "masked_inpaint",
+    elif key in ("autorepair", "notify_low_balance", "masked_inpaint", "upscale_finals",
                  "outfit_coverage_text"):
         value = bool(value)
     elif key == "reference_photos":

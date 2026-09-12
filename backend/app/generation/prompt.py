@@ -803,6 +803,12 @@ def _body_clause(profile: dict) -> str:
             "torso ratio, no slimming and no reshaping")
     if measured:
         base += ", these proportions are measured and verified after generation"
+    # Said against the pictures, not only against the words: the engines that
+    # take reference photographs (Gemini, Kontext multi) copy a build they can
+    # see far better than one they are told about, and "the body is not mine"
+    # was her verdict on the half-body results of 2026-09-11.
+    base += (", her build, height, waist and hips exactly as in the reference "
+             "photographs of her, never slimmer, taller or more idealised")
     return base
 
 

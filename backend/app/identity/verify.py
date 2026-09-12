@@ -277,6 +277,16 @@ HEAD_TOL_MAX = 0.10
 # the false alarm above.  All 14 rejections of a real 12% or 18% slim survive
 # it untouched.
 HEAD_ROWS_MAD_MAX = 0.05
+# The two excuses above have a ceiling from 2026-09-12.  On 2026-09-11 the
+# client wrote that in the half-body results "the body is not mine", and the
+# record shows why the gate had nothing to say: a result 27% wider than her
+# photograph was excused as "the new clothes can widen you" (a fitted dress
+# cannot add a quarter of a torso), and a result 21% narrower was excused
+# because its rows disagreed by 6%.  A garment excuses at most WIDEN_EXCUSE_MAX;
+# disagreeing rows excuse at most DISPUTED_MAX.  Past either, the median is
+# the verdict.
+WIDEN_EXCUSE_MAX = 0.15
+DISPUTED_MAX = 0.16
 # The width profile and the head profile read the very same mask, so the ratio
 # between their two medians is not about her width at all: it is how much the
 # torso unit (pose landmarks) moved against the head unit (face mesh) between
@@ -1187,22 +1197,30 @@ def _check_body_paired(gen_body: dict, src_body: dict, thresholds: dict,
     # A widening the new clothes can explain is reported and not held against
     # the image, and it is not evidence that her shape survived either, so the
     # summary is told below that only half a test ran.
-    excused = head_one_sided and wider
+    excused = head_one_sided and wider and deviation <= WIDEN_EXCUSE_MAX
     # A reading the rows themselves do not support cannot spend one of her paid
     # images.  It is still measured, still printed and still says which way it
     # went; it just does not reject.  See HEAD_ROWS_MAD_MAX.
     rows_mad = _f(head_ratio.get("mad"))
     disputed = bool(deviation > tol and not excused
-                    and rows_mad > HEAD_ROWS_MAD_MAX)
+                    and rows_mad > HEAD_ROWS_MAD_MAX
+                    and deviation <= DISPUTED_MAX)
     if deviation > tol and excused:
         excused_widths.append("tu figura un %d%% mas ancha de arriba abajo" % pct)
     elif disputed:
         pass
     elif deviation > tol:
+        why = ""
+        if head_one_sided and wider:
+            why = (": ninguna prenda ajustada te ensancha mas de un %d%%"
+                   % int(round(WIDEN_EXCUSE_MAX * 100)))
+        elif rows_mad > HEAD_ROWS_MAD_MAX:
+            why = (": aunque las alturas discrepan, una diferencia de mas del "
+                   "%d%% no la explica el encuadre" % int(round(DISPUTED_MAX * 100)))
         offenders.append("tu figura es un %d%% %s de arriba abajo (silueta "
-                         "medida en %d alturas, en cabezas)"
+                         "medida en %d alturas, en cabezas)%s"
                          % (pct, "mas ancha" if wider else "mas estrecha",
-                            head_ratio["n"]))
+                            head_ratio["n"], why))
 
     score = _clamp01(1.0 - (deviation / max(tol, 1e-6)) / 2.0)
 

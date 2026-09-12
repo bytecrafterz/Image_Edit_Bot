@@ -139,6 +139,23 @@ MODELS: dict[str, dict[str, Any]] = {
         "out_max_side": 1024,
         "notes": "Kontext [max]: la entrega final, mas fiel y mas cara.",
     },
+    # FINALS ONLY, AND NEVER CHOSEN BY THE ROUTER.  Every identity engine
+    # above hands back about 1 MP (out_max_side 1024), which is a screen
+    # picture and not a print.  The final tier now buys one more step: a
+    # 2x super-resolution of the approved image, creativity near zero so it
+    # sharpens what is there instead of inventing, and the identity gate reads
+    # the result again before it replaces the 1x file.  capabilities() keeps
+    # ``upscale=False`` on purpose: the router must not start sending the free
+    # engine's enlargements here; orchestrator._upscale_finals is the one
+    # caller.  0.03 USD per output megapixel (fal, 2026-09-12).
+    "upscale": {
+        "endpoint": "fal-ai/clarity-upscaler",
+        "price_usd": 0.03,
+        "per_megapixel": True,
+        "knobs": ("image", "upscale"),
+        "out_max_side": 4096,
+        "notes": "Clarity upscaler: ampliacion 2x de la imagen final aprobada.",
+    },
     "inpaint": {
         "endpoint": "fal-ai/flux-pro/v1/fill",
         "price_usd": 0.050,
@@ -1320,6 +1337,87 @@ class FalProvider(ImageProvider):
         )
 
     # ------------------------------------------------------------- upscale
+
+    UPSCALE_FACTOR = 2
+
+    def upscale_price(self, width: int, height: int) -> float:
+        """What the 2x enlargement of a picture this size will cost."""
+        spec = self._spec("upscale")
+        mp = (width * self.UPSCALE_FACTOR) * (height * self.UPSCALE_FACTOR) / 1e6
+        return round(float(spec.get("price_usd") or 0.0) * max(0.25, mp), 4)
+
+    def upscale_final(self, image_path: str | Path, out_path: str | Path,
+                      prompt: str = "") -> GenResult:
+        """2x super-resolution of an APPROVED final.  Paid; see MODELS["upscale"].
+
+        Deliberately not ``upscale()``: that name is the router's, and the
+        router is told this provider does not enlarge.  This one is called by
+        the orchestrator for finals only, after the identity gate has passed
+        the 1x picture, and the gate reads the 2x picture again before it is
+        kept.
+        """
+        key = get_api_key("fal")
+        if not key:
+            raise ProviderError("Falta la clave de fal.ai en Ajustes.",
+                                retryable=False, code="missing_key")
+        spec = self._spec("upscale")
+        endpoint = str(spec["endpoint"])
+        src = Path(image_path)
+        out = Path(out_path)
+        started = time.monotonic()
+        uri, (width, height) = _encode(str(src), 2048)
+        payload = {
+            "image_url": uri,
+            "upscale_factor": self.UPSCALE_FACTOR,
+            # Near-zero creativity: sharpen and resolve, never redraw.  The
+            # default (0.35) repaints faces, which is the one thing forbidden.
+            "creativity": 0.05,
+            "resemblance": 0.9,
+            "prompt": (prompt or "real photograph of the same person, natural "
+                       "skin texture with visible pores, individual hair "
+                       "strands, sharp fabric weave, no retouching"),
+            "negative_prompt": "painting, illustration, smooth plastic skin, "
+                               "different face, extra fingers",
+            "num_inference_steps": 18,
+            "enable_safety_checker": False,
+        }
+        meta: dict[str, Any] = {"role": "upscale", "endpoint": endpoint,
+                                "from": [int(width), int(height)],
+                                "factor": self.UPSCALE_FACTOR}
+        rehearsal = replay_dir()
+        if rehearsal is not None:
+            raise ProviderError("La ampliacion no se ensaya: no hay respuesta "
+                                "grabada para este paso.", retryable=False,
+                                code="unsupported")
+        headers = {"Authorization": f"Key {key}", "Content-Type": "application/json",
+                   "Accept": "application/json"}
+        try:
+            with httpx.Client(headers=headers, follow_redirects=True,
+                              timeout=_SUBMIT_TIMEOUT) as client:
+                request_id, status_url, response_url = self._submit(
+                    client, endpoint, payload)
+                meta["request_id"] = request_id
+                result = self._wait(client, status_url, response_url,
+                                    started + _OVERALL_TIMEOUT)
+                image = self._first_image(result)
+                meta["bytes"] = self._download(client, str(image["url"]), out)
+        except ProviderError as exc:
+            if not getattr(exc, "meta", None):
+                exc.meta = dict(meta)
+            raise
+        except httpx.TimeoutException as exc:
+            raise ProviderError("fal.ai ha tardado demasiado en ampliar la imagen. "
+                                "Se entrega sin ampliar.", retryable=True,
+                                code="timeout") from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError("No se ha podido conectar con fal.ai para ampliar "
+                                "la imagen. Se entrega sin ampliar.",
+                                retryable=True, code="network") from exc
+        meta["to"] = [int(image.get("width") or 0), int(image.get("height") or 0)]
+        return GenResult(ok=True, image_path=str(out), provider=self.name,
+                         model=endpoint, cost_usd=self.upscale_price(width, height),
+                         latency_ms=int((time.monotonic() - started) * 1000),
+                         meta=meta)
 
     def upscale(self, req: GenRequest, out_path: str | Path) -> GenResult:
         """Refused, in rehearsal exactly as in production.

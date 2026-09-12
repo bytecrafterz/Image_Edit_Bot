@@ -1065,7 +1065,8 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     if profile and wanted > 0:
         try:
             picked = gallery_mod.choose_references(
-                profile, wanted + 1, must_include=original["path"])
+                profile, wanted + 1, must_include=original["path"],
+                prefer_shot=str(analysis.get("shot_type") or ""))
         except Exception as exc:                          # noqa: BLE001
             log.warning("Eleccion de referencias fallida: %s", exc)
             picked = {"paths": [], "reason": ""}
@@ -2902,6 +2903,149 @@ def _record_attempt(run_id: str, user_id: str, index: int, attempt_no: int,
 
 # -------------------------------------------------------------------- finals
 
+# THE FINAL IS A PRINT, NOT A SCREEN PICTURE.  Every identity engine hands
+# back about 1 MP, and "alta calidad" used to end there.  From 2026-09-12 a
+# final that passed the gate is enlarged 2x by fal's clarity upscaler at near
+# zero creativity, and the enlarged picture is measured AGAIN: if its face
+# reads lower than the 1x file by more than UPSCALE_FACE_DROP, or under the
+# likeness line, the 1x file stays and the enlargement is thrown away (the
+# money is spent either way, so the row says so).  Only images below
+# UPSCALE_MAX_SIDE are enlarged; the client can switch the step off with the
+# ``upscale_finals`` setting.
+UPSCALE_MAX_SIDE = 1800
+UPSCALE_FACE_DROP = 0.05
+
+
+def _upscale_finals(user: dict, run_id: str, profile: dict, brief: dict,
+                    out_dir: Path) -> dict:
+    """Enlarge every final of this run that is still a 1 MP picture."""
+    from ..providers import registry
+    from ..providers.base import ProviderError
+    from ..identity import verify as verify_mod
+    done = {"n": 0, "cost": 0.0, "kept_1x": 0, "skipped": 0, "notes": []}
+    try:
+        row = db.q1("SELECT value_json FROM user_settings WHERE user_id=? "
+                    "AND key='upscale_finals'", (user["id"],))
+        pref = db.loads(row["value_json"]) if row else True
+    except Exception:                                     # noqa: BLE001
+        pref = True
+    if str(pref).lower() in ("false", "0", "no"):
+        done["skipped"] = -1
+        return done
+    try:
+        provider = registry.get_image_provider("fal")
+    except Exception as exc:                              # noqa: BLE001
+        done["notes"].append("sin motor de ampliacion: %s" % exc)
+        return done
+    if not hasattr(provider, "upscale_final") or not provider.available():
+        done["notes"].append("fal.ai no esta configurado; finales sin ampliar")
+        return done
+    rows = db.rows_to_dicts(db.q(
+        "SELECT * FROM images WHERE run_id=? AND user_id=? AND kind='final' "
+        "AND deleted_at IS NULL ORDER BY created_at", (run_id, user["id"])))
+    for row in rows:
+        meta = dict(row.get("meta") or {})
+        path = Path(str(row.get("path") or ""))
+        if meta.get("ampliada") or not path.is_file():
+            done["skipped"] += 1
+            continue
+        w, h = int(row.get("width") or 0), int(row.get("height") or 0)
+        if max(w, h) >= UPSCALE_MAX_SIDE:
+            done["skipped"] += 1
+            continue
+        price = float(provider.upscale_price(w, h))
+        gate = billing.reserve(user["id"], provider.name, price,
+                               ref=f"{run_id}:up:{row['id']}")
+        if not gate["ok"]:
+            done["notes"].append("ampliacion no pagada: %s" % gate["reason"])
+            break
+        hold = gate["hold_id"]
+        target = path.with_name(path.stem + "_2x.jpg")
+        started = time.monotonic()
+        try:
+            result = provider.upscale_final(path, target)
+        except ProviderError as exc:
+            charged = price if getattr(exc, "billed", False) else 0.0
+            if charged:
+                billing.settle(user["id"], provider.name, hold, charged,
+                               ref=f"{run_id}:up:{row['id']}",
+                               note="ampliacion fallida (cobrada)")
+                done["cost"] += charged
+            else:
+                billing.release(hold)
+            done["notes"].append("ampliacion fallida: %s" % exc)
+            _record_attempt(run_id, user["id"], 0, 1, provider.name,
+                            "fal-ai/clarity-upscaler", "upscale", "", "",
+                            getattr(exc, "meta", None) or {}, {}, [],
+                            "error", str(exc), charged,
+                            int((time.monotonic() - started) * 1000), row["id"])
+            continue
+        cost = float(result.cost_usd or price)
+        billing.settle(user["id"], provider.name, hold, cost,
+                       ref=f"{run_id}:up:{row['id']}", note="ampliacion 2x")
+        done["cost"] += cost
+        # Measured again, against the same profile and brief the 1x passed.
+        verdict = {}
+        try:
+            verdict = verify_mod.verify_image(str(target), profile, brief)
+        except Exception as exc:                          # noqa: BLE001
+            done["notes"].append("no se pudo medir la ampliacion: %s" % exc)
+        before = _face_value(row.get("verdict") or {})
+        after = _face_value(verdict)
+        like_min = float((verify_mod._thresholds(profile) or {}).get("face_like_min") or 0.6)
+        keep = bool(verdict.get("passed")) and (
+            after is None or before is None
+            or after >= max(like_min, before - UPSCALE_FACE_DROP))
+        status = "accepted" if keep else "rejected"
+        reason = "" if keep else ("la ampliacion te cambio la cara (%.2f -> %.2f); "
+                                  "se entrega la imagen sin ampliar"
+                                  % (before or 0.0, after or 0.0))
+        _record_attempt(run_id, user["id"], 0, 1, provider.name, result.model,
+                        "upscale", "", "", result.meta or {}, verdict, [],
+                        status, reason, cost, int(result.latency_ms or 0), row["id"])
+        if not keep:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            done["kept_1x"] += 1
+            meta["ampliacion_rechazada"] = reason
+            db.execute("UPDATE images SET meta_json=?, cost_usd=cost_usd+? WHERE id=?",
+                       (db.dumps(meta), cost, row["id"]))
+            continue
+        info = loader.image_info(target)
+        thumb = target.with_name(target.stem + "_thumb.jpg")
+        try:
+            loader.make_thumb(target, thumb, 512)
+        except Exception:                                 # noqa: BLE001
+            thumb = Path(str(row.get("thumb_path") or ""))
+        meta["ampliada"] = {"factor": 2, "de": [w, h],
+                            "a": [int(info.get("width") or 0), int(info.get("height") or 0)],
+                            "cara_antes": before, "cara_despues": after,
+                            "original_1x": str(path)}
+        db.execute(
+            "UPDATE images SET path=?, thumb_path=?, width=?, height=?, bytes=?, "
+            "sha256=?, cost_usd=cost_usd+?, score=?, verdict_json=?, meta_json=? "
+            "WHERE id=?",
+            (str(target), str(thumb), int(info.get("width") or 0),
+             int(info.get("height") or 0), int(info.get("bytes") or 0),
+             str(info.get("sha256") or ""), cost,
+             float(verdict.get("score") or row.get("score") or 0.0),
+             db.dumps(verdict or row.get("verdict") or {}), db.dumps(meta), row["id"]))
+        done["n"] += 1
+    return done
+
+
+def _face_value(verdict: dict) -> float | None:
+    for check in (verdict or {}).get("checks") or []:
+        if isinstance(check, dict) and check.get("name") == "identity_face":
+            try:
+                return float(check.get("value"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def run_final(user: dict, run_id: str) -> dict:
     """Re-render the chosen previews at full quality from the original photo."""
     run = db.row_to_dict(db.q1("SELECT * FROM runs WHERE id=? AND user_id=?",
@@ -2965,11 +3109,16 @@ def run_final(user: dict, run_id: str) -> dict:
                                  original, profile, out_dir)
     if promoted is not None:
         _order_images_by_variant(run_id)
+        _set(run_id, stage="Ampliando %d imagen(es) a 2x" % promoted, progress=0.8)
+        up = _upscale_finals(user, run_id, profile, brief, out_dir)
+        stage = "Listo: %d en alta calidad, sin volver a pagar" % promoted
+        if up["n"]:
+            stage = ("Listo: %d en alta calidad, %d ampliada(s) a 2x (%.2f USD)"
+                     % (promoted, up["n"], up["cost"]))
         _set(run_id, status="done", progress=1.0, finished_at=db.now(),
-             n_accepted=promoted, cost_usd=0.0,
-             stage="Listo: %d en alta calidad, sin volver a pagar" % promoted)
-        return {"ok": True, "accepted": promoted, "cost_usd": 0.0,
-                "promoted": True}
+             n_accepted=promoted, cost_usd=round(up["cost"], 6), stage=stage)
+        return {"ok": True, "accepted": promoted, "cost_usd": round(up["cost"], 4),
+                "promoted": True, "ampliadas": up["n"]}
 
     results, batch = _run_batch(user, run_id, variants, brief, profile, style,
                                 quality, out_dir, original, "Alta calidad",
@@ -2990,9 +3139,16 @@ def run_final(user: dict, run_id: str) -> dict:
         return {"ok": True, "cancelled": True, "accepted": accepted,
                 "cost_usd": round(spent, 4)}
 
+    up = {"n": 0, "cost": 0.0}
+    if accepted:
+        _set(run_id, stage="Ampliando %d imagen(es) a 2x" % accepted, progress=0.9)
+        up = _upscale_finals(user, run_id, profile, brief, out_dir)
+        spent += float(up["cost"])
+    stage = "Listo: %d en alta calidad" % accepted
+    if up["n"]:
+        stage += ", %d ampliada(s) a 2x" % up["n"]
     _set(run_id, status="done", progress=1.0, finished_at=db.now(),
-         n_accepted=accepted, cost_usd=round(spent, 6),
-         stage="Listo: %d en alta calidad" % accepted)
+         n_accepted=accepted, cost_usd=round(spent, 6), stage=stage)
     return {"ok": True, "accepted": accepted, "cost_usd": round(spent, 4)}
 
 
