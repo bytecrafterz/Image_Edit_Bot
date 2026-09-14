@@ -425,6 +425,21 @@ BUILTIN_OPTIONS: list[dict] = [
                local={"framing": "portrait_full"}),
             _v("medio_cuerpo", "Medio cuerpo", "Half body",
                "waist up framing", local={"framing": "portrait_half"}),
+            # A half-body picture she has already approved - the face is
+            # right - extended DOWN to her feet.  Only offered on half-body
+            # sources: the engine draws the legs it cannot see, from her
+            # full-length reference photographs (gallery.choose_references
+            # always sends one), and the body gate then reads the result
+            # against the source rows it does have.  Asked for on 2026-09-14:
+            # "full body, the face identical to the half-body photo".
+            _v("ampliar_cuerpo_entero", "Ampliar a cuerpo entero (desde medio cuerpo)",
+               "Extend to full body",
+               "extend the picture downward into a full body view, head to feet "
+               "in frame, the whole figure with legs and shoes visible, her body, "
+               "height and build exactly as in the reference photographs of her, "
+               "the added lower half continuing the same garment, the same light "
+               "and the same place, the head and face untouched",
+               shots="half", local={"framing": "portrait_full"}),
             _v("primer_plano", "Primer plano", "Close up",
                "a close up portrait, head and chest",
                local={"framing": "portrait_closeup"}),
