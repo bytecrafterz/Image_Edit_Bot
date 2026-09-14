@@ -491,6 +491,16 @@ _EDITOR_MAP = (
     (re.compile(r"same bust, waist and hip proportions", re.I), "the same figure and proportions"),
     (re.compile(r"altered breast size,?\s*", re.I), ""),
     (re.compile(r"deep plunging V neckline", re.I), "V neckline"),
+    # Her own dress pictures, described by Claude on 2026-09-14, were refused
+    # by fal's prompt checker for the white one ("plunging deep V-neckline
+    # extending to the waist ... bodycon silhouette through hips and thighs").
+    # The garment is the same garment in plainer words.
+    (re.compile(r"(?:plunging )?deep V-?neckline extending to the waist", re.I), "low V neckline"),
+    (re.compile(r"extending to the waist", re.I), ""),
+    (re.compile(r"\bbodycon\b", re.I), "fitted"),
+    (re.compile(r"\bform-fitting\b", re.I), "fitted"),
+    (re.compile(r"through (?:the )?hips and thighs", re.I), "through the hips"),
+    (re.compile(r"\bthighs?\b", re.I), "legs"),
     (re.compile(r"plunging", re.I), "low"),
     (re.compile(r"\bbust\b", re.I), "upper body"),
     (re.compile(r"\bcleavage\b", re.I), "neckline"),
