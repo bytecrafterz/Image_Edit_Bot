@@ -783,6 +783,9 @@ def _brief_from(user: dict, analysis: dict, original: dict,
         # which no model reads as "a restaurant facade".  That is exactly how
         # "the place does not change" happened on 2026-09-11.
         "user_id": str(user.get("id") or ""),
+        # A picture made from one of her results: the planner must not vary
+        # anything that redraws the face she approved (see planner.plan_run).
+        "es_resultado": bool(original.get("es_resultado")),
         "shot_type": analysis.get("shot_type") or "unknown",
         "source_path": original["path"],
         # What the risk record needs to recognise this photograph after any
@@ -2891,6 +2894,19 @@ def _adjust_next(user: dict, profile: dict, original: dict, choices: dict,
     if not plan.get("ok"):
         return plan
     new_choices, _cover = adjust_mod.apply_to(choices, coverage_text, plan)
+    # THE DRESS SHE SENT IS NOT NEGOTIABLE.  On 2026-09-14 a body failure on
+    # the white dress she had photographed was "fixed" by swapping it for a
+    # leather jacket, and the jacket was delivered as the white dress.  A
+    # garment that is one of her own values (a picture or her own words)
+    # stays; the seed is the only thing left to roll.
+    old_garment = str((choices or {}).get("clothing") or "")
+    new_garment = str((new_choices or {}).get("clothing") or "")
+    if old_garment.startswith("mi_") and new_garment != old_garment:
+        return dict(plan, ok=False,
+                    parar=("La prenda la elegiste tu (%s) y no se cambia por "
+                           "otra para que pase la comprobacion; se deja esta "
+                           "imagen y se tira otra semilla si quedan vistas."
+                           % old_garment))
     # Only when her CHOICES really moved.  A fingerprint is source photograph +
     # options + tier + style + endpoint, so switching off a phrase in the text
     # leaves it identical to the request that just failed - asking it would

@@ -25,6 +25,12 @@ from . import prompt as prompt_mod
 PRODUCT_CAP = 4096          # bound on the cartesian product we will enumerate
 MAX_FREE_GROUPS = 2         # more than two free axes and nothing is comparable
 NEVER_FREE = ("body", "style", "framing")
+# Groups that describe the GARMENT: when she chose a garment, these follow it.
+# On 2026-09-14 the robot "varied" a dress she had photographed into cream,
+# camel, sky blue, sheer gauze and thin fabric, and delivered those.
+GARMENT_FAMILY = ("clothing_color", "color", "transparency", "fabric",
+                  "material", "pattern", "texture", "sheerness", "tejido",
+                  "transparencia")
 
 # How much a group changes what the photograph looks like, per shot type.  Used
 # only to pick which untouched groups are worth varying by ourselves.
@@ -195,10 +201,17 @@ def plan_run(brief: dict, options: dict, n_previews: int, profile: dict,
     # ---- free groups the robot varies by itself -----------------------
     catalog = prompt_mod.catalog_groups(shot, user_id)
     free_candidates: list[tuple[str, list[dict]]] = []
+    garment_chosen = any(prompt_mod.canon_group(g) in ("clothing", "outfit")
+                         and v for g, v in list(locked.items()) + list(crossed.items()))
+    from_result = bool(brf.get("es_resultado"))
     for group, values in catalog.items():
         if group in locked or group in crossed:
             continue
         if prompt_mod.canon_group(group) in NEVER_FREE:
+            continue
+        if garment_chosen and (str(group).lower() in GARMENT_FAMILY
+                               or prompt_mod.canon_group(group) in GARMENT_FAMILY
+                               or str(group).lower().startswith("clothing")):
             continue
         usable = [opt for opt in values
                   if body_allowed or not prompt_mod.body_change_reason(opt)]
@@ -224,6 +237,11 @@ def plan_run(brief: dict, options: dict, n_previews: int, profile: dict,
 
     free_candidates.sort(key=lambda item: (not _keeps_face(item[0]),
                                            -_priority(item[0], shot), item[0]))
+    # Editing one of her results: the face she approved is the point, so no
+    # group that would redraw it is varied on the robot's own initiative.
+    # Fewer distinct combinations than views only means more seeds.
+    if from_result:
+        free_candidates = [item for item in free_candidates if _keeps_face(item[0])]
 
     combos, left_out, short = _combos(crossed, count)
     base = len(combos) or 1
