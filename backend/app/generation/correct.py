@@ -362,6 +362,63 @@ def restore_face(image_path: str, profile: dict, brief: dict | None = None,
                        "aqui: %s" % (before, donor.get("reason") or ""),
                        antes=round(before, 4), donante="")
 
+    return _graft_from(gen, face_g, before, donor["path"], profile, image_path,
+                       out_path, face_min, FACE_MIN_GAIN,
+                       donor.get("detail", {}).get("elegida") or donor["path"],
+                       "se injerto tu rostro desde tu propia foto")
+
+
+def graft_face(image_path: str, donor_path: str, profile: dict,
+               out_path: str | None = None, min_gain: float = 0.0) -> dict:
+    """Put the face of an APPROVED result back onto a picture made from it.
+
+    restore_face above takes the donor from her photographs and refuses when
+    the face already passes; this one takes the donor she named - the result
+    she approved, which the new picture was generated from - and asks only
+    that the graft not make her less herself.  Same alignment, same colour
+    and seam gates, same Poisson blend over the inner face.  Written for
+    "ampliar a cuerpo entero" on 2026-09-14: the engine keeps the composition
+    of the source but redraws the face a little every time (0.64-0.78 against
+    sources at 0.82-0.84), and she asked for the face to be the one she
+    approved, not a close cousin of it.
+    """
+    image_path = str(image_path)
+    out_path = str(out_path or image_path)
+    face_min = _face_min(profile)
+    if not _reference(profile):
+        return _result(False, image_path,
+                       "el perfil no guarda tu firma facial: no se puede "
+                       "comprobar ni corregir el rostro")
+    try:
+        gen = loader.load_image(image_path)
+    except Exception as exc:                              # noqa: BLE001
+        return _result(False, image_path,
+                       "no se pudo abrir la imagen: %s" % str(exc)[:80])
+    face_g = face_mod.detect_face(gen)
+    if not face_g.get("ok") or not face_g.get("mesh"):
+        return _result(False, image_path,
+                       "no hay un rostro con malla en la imagen generada: no "
+                       "se puede injertar nada")
+    before = _identity(gen, profile, face_g)
+    if before is None:
+        return _result(False, image_path,
+                       "no se pudo medir el parecido facial de esta imagen")
+    if before < face_min - FACE_FLOOR_MARGIN:
+        return _result(False, image_path,
+                       "esta imagen no es de ti (%.2f): pegar tu cara encima "
+                       "seria un montaje, no una correccion" % before,
+                       antes=round(before, 4), donante="")
+    return _graft_from(gen, face_g, before, str(donor_path), profile, image_path,
+                       out_path, face_min, float(min_gain), str(donor_path),
+                       "se puso el rostro de la imagen que aprobaste")
+
+
+def _graft_from(gen: np.ndarray, face_g: dict, before: float, donor_path: str,
+                profile: dict, image_path: str, out_path: str, face_min: float,
+                min_gain: float, donor_label: str, ok_reason: str) -> dict:
+    """The graft itself, shared by restore_face and graft_face."""
+    donor = {"path": donor_path, "detail": {"elegida": donor_label}}
+    height, width = gen.shape[:2]
     try:
         src = loader.load_image(donor["path"], gallery_mod.READ_MAX_SIDE)
     except Exception as exc:                              # noqa: BLE001
@@ -445,7 +502,7 @@ def restore_face(image_path: str, profile: dict, brief: dict | None = None,
         return _result(False, image_path,
                        "tras el injerto no se pudo medir el rostro: se deja la "
                        "imagen como vino")
-    if after < face_min or after < before + FACE_MIN_GAIN:
+    if after < face_min or after < before + min_gain:
         return _result(False, image_path,
                        "el injerto no consigue que seas tu (%.2f -> %.2f, "
                        "minimo %.2f): se deja la imagen como vino"
@@ -465,8 +522,7 @@ def restore_face(image_path: str, profile: dict, brief: dict | None = None,
     except Exception as exc:                              # noqa: BLE001
         return _result(False, image_path,
                        "no se pudo guardar el resultado: %s" % str(exc)[:80])
-    return _result(True, written,
-                   "se injerto tu rostro desde tu propia foto",
+    return _result(True, written, ok_reason,
                    nota=("Se corrigio el rostro con tu foto %s: el parecido "
                          "paso de %.2f a %.2f. La imagen esta retocada por el "
                          "robot, no salio asi del motor."

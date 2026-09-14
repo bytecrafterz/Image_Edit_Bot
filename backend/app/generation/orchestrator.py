@@ -838,16 +838,22 @@ def _source_row(user_id: str, source_id: str) -> dict:
         (source_id, user_id)))
     if not img:
         return {}
+    # runs.original_id is a foreign key to originals: the run is filed under
+    # the PHOTOGRAPH this result came from, and the result itself travels in
+    # the run's options as source_image_id.  A result of a result carries an
+    # image id there (2026-09-14: FOREIGN KEY constraint failed on the second
+    # generation of edits), so the photograph is read from its run instead.
+    photo_id = str(img.get("original_id") or "")
+    if not photo_id or not db.q1("SELECT id FROM originals WHERE id=?", (photo_id,)):
+        parent = db.q1("SELECT original_id FROM runs WHERE id=?", (img.get("run_id"),))
+        photo_id = str((parent["original_id"] if parent else "") or "")
     return {"id": img["id"], "user_id": user_id, "path": img["path"],
             "thumb_path": img.get("thumb_path"),
             "width": img.get("width"), "height": img.get("height"),
             "filename": "%s.jpg" % img["id"], "sha256": img.get("sha256") or "",
             "profile_id": img.get("profile_id"), "shot_type": "",
             "analysis": None, "quality": None, "es_resultado": True,
-            # runs.original_id is a foreign key to originals: the run is
-            # filed under the photograph this result came from, and the
-            # result itself travels in the run's options as source_image_id.
-            "original_id": img.get("original_id") or ""}
+            "original_id": photo_id}
 
 
 def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
@@ -2202,6 +2208,30 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
 
         batch.detail("Revisando la imagen %d" % (index + 1))
         verdict = verify_mod.verify_image(result.image_path, profile, _exigente(checked, provider))
+        # THE FACE SHE APPROVED, PUT BACK.  A picture made from one of her
+        # results ("ampliar a cuerpo entero", "cambia el escote") keeps that
+        # result's composition, but the engine redraws the face a little every
+        # time: 0.64-0.78 on 2026-09-14 against sources she had approved at
+        # 0.82-0.84.  When the request did not ask to change the face, the
+        # source's own face is grafted back (generation/correct.graft_face:
+        # same alignment, colour and seam gates as restore_face) and the
+        # image is measured again.  A graft that would not make her more
+        # herself is refused there and the file is left as it came.
+        if original.get("es_resultado") and _keeps_face(choices):
+            batch.detail("Poniendo tu rostro aprobado en la imagen %d" % (index + 1))
+            graft = correct_mod.graft_face(result.image_path, original["path"], profile)
+            if graft.get("ok"):
+                verdict = verify_mod.verify_image(result.image_path, profile, _exigente(checked, provider))
+                correction_notes.append(
+                    "Se puso el rostro de la imagen que aprobaste: el parecido "
+                    "paso de %.2f a %.2f." % (float(graft.get("antes") or 0.0),
+                                              float(graft.get("despues") or 0.0)))
+                merged["rostro_injertado"] = {k: graft.get(k) for k in
+                                              ("antes", "despues", "costura", "donante")}
+                merged["corregida"] = True
+            else:
+                _plan_note(run_id, "Imagen %d: no se ha puesto tu rostro aprobado (%s)."
+                           % (index + 1, str(graft.get("reason") or "")[:160]))
 
         # The image is bought.  Before anything else is considered - and before
         # a single further cent can be spent - her own photographs are asked to
@@ -2744,7 +2774,10 @@ def _store_image(user: dict, run_id: str, original: dict, profile: dict,
         "kind,path,thumb_path,width,height,bytes,sha256,provider,model,cost_usd,"
         "score,verdict_json,meta_json,created_at) "
         "VALUES(?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (image_id, user["id"], run_id, original["id"], (profile or {}).get("id"),
+        (image_id, user["id"], run_id,
+         # The photograph, never a result: see _source_row.
+         (original.get("original_id") if original.get("es_resultado") else original["id"])
+         or original["id"], (profile or {}).get("id"),
          kind, str(path), str(thumb) if thumb else None,
          int(info.get("width") or 0), int(info.get("height") or 0),
          int(info.get("bytes") or 0), str(info.get("sha256") or ""),
@@ -3034,6 +3067,18 @@ def _upscale_finals(user: dict, run_id: str, profile: dict, brief: dict,
              db.dumps(verdict or row.get("verdict") or {}), db.dumps(meta), row["id"]))
         done["n"] += 1
     return done
+
+
+_FACE_GROUPS = ("hair", "peinado", "makeup", "maquillaje", "expression",
+                "expresion", "pose", "postura")
+
+
+def _keeps_face(choices: dict) -> bool:
+    """Did the request leave her face alone?  Then the approved face may go back."""
+    for group, values in (choices or {}).items():
+        if str(group).lower() in _FACE_GROUPS and values:
+            return False
+    return True
 
 
 def _face_value(verdict: dict) -> float | None:
