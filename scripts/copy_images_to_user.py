@@ -4,6 +4,8 @@
         --db /opt/photorobot/data/photorobot.sqlite3 --data /opt/photorobot/data \
         --to someone@example.com img_aaa img_bbb ...
 
+or a whole album:  ... --to someone@example.com --from admin@example.com [--kind final|preview|all]
+
 Each image file (and its thumbnail) is COPIED under the target account's own
 outputs folder and a new album row is written for it, so the copy survives
 whatever the source account later does with the original.  The copy costs the
@@ -15,7 +17,10 @@ import argparse, hashlib, json, os, shutil, sqlite3, sys, time, uuid
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("images", nargs="+")
+    ap.add_argument("images", nargs="*")
+    ap.add_argument("--from", dest="source", default="", help="copy the whole album of this account (email)")
+    ap.add_argument("--kind", default="final", choices=("final", "preview", "all"),
+                    help="with --from: which images (default: finals only)")
     ap.add_argument("--to", required=True, help="email of the target account")
     ap.add_argument("--db", required=True)
     ap.add_argument("--data", required=True, help="the data directory (holds outputs/)")
@@ -27,8 +32,19 @@ def main() -> None:
     user = con.execute("SELECT id, email FROM users WHERE lower(email)=?", (a.to.strip().lower(),)).fetchone()
     if not user:
         sys.exit("No existe la cuenta %s" % a.to)
+    ids = list(a.images)
+    if a.source:
+        owner = con.execute("SELECT id FROM users WHERE lower(email)=?", (a.source.strip().lower(),)).fetchone()
+        if not owner:
+            sys.exit("No existe la cuenta de origen %s" % a.source)
+        sql = "SELECT id FROM images WHERE user_id=? AND deleted_at IS NULL"
+        if a.kind != "all":
+            sql += " AND kind='%s'" % a.kind
+        ids += [r["id"] for r in con.execute(sql + " ORDER BY created_at", (owner["id"],))]
+    if not ids:
+        sys.exit("Nada que copiar: da ids de imagen o --from <email>")
     done = 0
-    for image_id in a.images:
+    for image_id in ids:
         src = con.execute("SELECT * FROM images WHERE id=? AND deleted_at IS NULL", (image_id,)).fetchone()
         if not src:
             print("no existe o esta borrada:", image_id); continue
