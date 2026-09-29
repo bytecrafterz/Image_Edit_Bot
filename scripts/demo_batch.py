@@ -2,7 +2,8 @@
 
     python scripts/demo_batch.py <cookiejar.txt> <out.json> [--shots full,half]
         [--dresses vestido_rojo_cruzado,...] [--scenes restaurante,calle_dia]
-        [--engine identity_banana] [--n 1] [--photos IMG_7871,IMG_7880]
+        [--engine identity_gpt2] [--n 1] [--photos IMG_7871,IMG_7880]
+        (--engine "" is the server default: GPT Image 2 since 2026-09-29)
 
 Every chosen photograph is edited once per dress, scenes alternating.  The
 cookie jar is a Mozilla-format jar of a logged-in session (the account whose
@@ -21,7 +22,7 @@ def main() -> None:
     ap.add_argument("--shots", default="full,half")
     ap.add_argument("--dresses", default=",".join(DRESSES))
     ap.add_argument("--scenes", default=",".join(SCENES))
-    ap.add_argument("--engine", default="identity_banana")
+    ap.add_argument("--engine", default="")
     ap.add_argument("--n", type=int, default=1)
     ap.add_argument("--photos", default="", help="comma separated filename prefixes; default all")
     ap.add_argument("--base", default=B)
@@ -55,7 +56,7 @@ def main() -> None:
         for d in dresses:
             sc = scenes[i % len(scenes)]; i += 1
             body = {"original_id": src["id"], "options": {"clothing": [d], "scene": [sc]},
-                    "n_previews": a.n, "quality": "preview", "engine": a.engine}
+                    "n_previews": a.n, "quality": "preview", "engine": a.engine or None}
             try:
                 est = call("/api/generate/analyze", body)
                 r = call("/api/generate/run", {"run_id": est["run_id"], "confirmar_riesgo": True})

@@ -48,6 +48,7 @@ from ..safety import guard as guard_mod
 from ..services import billing, jobs, storage
 from . import adjust as adjust_mod
 from . import correct as correct_mod
+from . import engine_memory
 from . import learning, planner, prompt as prompt_mod, repair as repair_mod
 from . import protect as protect_mod
 from . import retouch as retouch_mod
@@ -884,6 +885,12 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     shot = analysis.get("shot_type") or "unknown"
     profile = _profile_for(user, profile_id)
     warnings: list[str] = []
+    # A PHOTOGRAPH AN ENGINE HAS ALREADY REFUSED IS NOT SENT TO IT AGAIN.  The
+    # plan, the price and the run all read ``engine`` from here on, so the
+    # switch is made once and said once, before anything is quoted.
+    engine, switched = engine_memory.effective_engine(engine, original["path"])
+    if switched:
+        warnings.append(switched)
 
     # THE FIRST GENERATION FOR A PERSON READS HER PHOTOGRAPHS PROPERLY.  The
     # client asked for a detailed analysis on the first composite, and this is
@@ -1060,22 +1067,57 @@ def prepare_run(user: dict, original_id: str, choices: dict, n_previews: int,
     # so the estimate, the run and the report answer from ONE value even if
     # Ajustes is edited between the quote and the button.
     features = router_mod.user_features(user["id"])
+    wanted = int(features["reference_photos"])
+    # AN ENGINE THAT READS MANY PICTURES IS SENT MANY OF HER.  Ajustes caps
+    # companions at three because that is what the four-picture endpoints
+    # take; GPT Image 2 reads sixteen and Gemini Pro fourteen, and "usa mis 24
+    # fotos" was the client's own instruction on 2026-09-14.  The engine's own
+    # number (providers/fal MODELS "refs") wins when it is larger.
+    try:
+        from ..providers import fal as fal_mod
+        wanted = max(wanted, int(fal_mod.engine_references(engine)))
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("Referencias por motor no disponibles: %s", exc)
     plan["envio"] = {"masked_inpaint": bool(features["masked_inpaint"]),
-                     "reference_photos": int(features["reference_photos"]),
+                     "reference_photos": wanted,
                      "outfit_coverage_text":
                          bool(features["outfit_coverage_text"])}
-    wanted = int(features["reference_photos"])
     plan["reference_paths"] = [original["path"]]
     plan["reference_detail"] = {}
     # Empty rather than undefined: with the companions switched off there is no
     # chooser and therefore no sentence explaining a choice nobody made, and
     # the note below has to read something.
     picked: dict = {}
+    # ONLY PHOTOGRAPHS THIS ENGINE'S READER HAS ALREADY ACCEPTED.  GPT Image 2
+    # refuses a whole request when any one picture in it is refused, and it
+    # refused three of her photographs on 2026-09-29; companions it has never
+    # seen are therefore not sent to it at all (engine_memory).  The photograph
+    # being edited always goes - that is the one she chose.
+    only_paths = None
+    role_for_refs = str(engine or "").strip()
+    try:
+        from ..providers import fal as fal_mod
+        role_for_refs = role_for_refs or fal_mod.DEFAULT_IDENTITY_ENGINE
+    except Exception:                                     # noqa: BLE001
+        pass
+    if profile and role_for_refs in engine_memory.REMEMBERED:
+        gallery_paths = [str(r["path"]) for r in db.q(
+            "SELECT path FROM originals WHERE user_id=? AND deleted_at IS NULL",
+            (user["id"],)) if r["path"]]
+        only_paths = set(engine_memory.accepted(role_for_refs, gallery_paths))
+        only_paths.discard(str(original["path"]))
+        plan.setdefault("notes", []).append(
+            "Con el motor de ChatGPT viajan solo tus fotos que ya ha aceptado "
+            "antes (%d de %d); las demas no se le envian para que no rechace "
+            "la peticion entera." % (len(only_paths), len(gallery_paths)))
+        if not only_paths:
+            wanted = 0
     if profile and wanted > 0:
         try:
             picked = gallery_mod.choose_references(
                 profile, wanted + 1, must_include=original["path"],
-                prefer_shot=str(analysis.get("shot_type") or ""))
+                prefer_shot=str(analysis.get("shot_type") or ""),
+                only_paths=only_paths)
         except Exception as exc:                          # noqa: BLE001
             log.warning("Eleccion de referencias fallida: %s", exc)
             picked = {"paths": [], "reason": ""}
@@ -1807,7 +1849,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
             steps=int(merged.get("steps", 28)),
             identity_weight=float(merged.get("identity_weight", 0.85)),
             extra={**hints, "engine": str((brief or {}).get("engine") or ""),
-                   "garment_path": str(merged.get("garment_image") or "")},
+                   "garment_path": str(merged.get("garment_image") or ""),
+                   "prompt_natural": str(built.get("prompt_natural") or "")},
         )
 
         # The router needs both halves of the question: who she prefers, and
@@ -1843,7 +1886,8 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                 steps=int(merged.get("steps", 28)),
                 identity_weight=float(merged.get("identity_weight", 0.85)),
                 extra={**hints, "engine": str((brief or {}).get("engine") or ""),
-                   "garment_path": str(merged.get("garment_image") or "")},
+                       "garment_path": str(merged.get("garment_image") or ""),
+                       "prompt_natural": str(built.get("prompt_natural") or "")},
             )
             provider, model, why = router_mod.choose_provider(
                 "generate", quality, budget_usd=None, prefer=prefer,
@@ -1951,6 +1995,9 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                 # attempt row, and the note below says it in her language so
                 # that a charge she cannot see is never a charge she is not
                 # told about.
+                # What the content readers said about her photographs, kept for
+                # the next estimate (generation/engine_memory).
+                _learn_engine_verdict(request, getattr(exc, "meta", None), "", False)
                 charged = 0.0
                 if getattr(exc, "billed", False):
                     charged = price
@@ -1985,7 +2032,10 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
                     merged["envio"] = {k: em[k] for k in
                                        ("endpoint", "request_id",
                                         "envio_completo", "enviado",
-                                        "source_size", "negativo_retirado")
+                                        "source_size", "negativo_retirado",
+                                        "motor_rechazado", "refs_sent",
+                                        "garment_sent", "prompt_natural",
+                                        "texto_enviado")
                                        if em.get(k) is not None}
                 # A BLOCK IS NOT A DEFECT IN THE IMAGE, so its row says so in
                 # a form the status endpoint can count: 'rejected' rows are the
@@ -2162,9 +2212,18 @@ def _run_variant(user: dict, run_id: str, variant: dict, brief: dict,
         # values on a row that already exists, and they are what makes the next
         # incident auditable from here.
         pm = getattr(result, "meta", None) or {}
+        _learn_engine_verdict(request, pm, str(getattr(result, "model", "") or ""), True)
         envio = {k: pm[k] for k in ("endpoint", "request_id",
                                     "envio_completo", "enviado", "source_size",
-                                    "bytes", "timings", "negativo_retirado")
+                                    "bytes", "timings", "negativo_retirado",
+                                    # How many of her photographs went out,
+                                    # the size ordered, whether the plain
+                                    # prompt was used and which engine refused
+                                    # before another one drew it.
+                                    "n_references", "refs_sent", "garment_sent",
+                                    "image_size", "resolution",
+                                    "prompt_natural", "motor_rechazado",
+                                    "texto_editor", "texto_enviado")
                  if pm.get(k) is not None}
         if envio:
             merged["envio"] = envio
@@ -2789,6 +2848,14 @@ def _store_image(user: dict, run_id: str, original: dict, profile: dict,
          db.dumps(meta), db.now()),
     )
     return image_id
+
+
+def _learn_engine_verdict(request, meta, model: str, ok: bool) -> None:
+    """engine_memory.learn_from, never allowed to break a paid attempt."""
+    try:
+        engine_memory.learn_from(request, meta, model, ok)
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("Memoria de motor no actualizada: %s", exc)
 
 
 def _learn_risk(user: dict, original: dict, profile: dict, choices: dict,

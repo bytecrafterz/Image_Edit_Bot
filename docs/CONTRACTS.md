@@ -621,11 +621,30 @@ appends it as the last input image with a plain instruction.
 
 ### `GenRequest.extra`
 ```
-# {"engine": "identity_banana"|"identity_multi"|"identity_gpt"|"", "garment_path": str, ...local hints}
-# "" means the default identity engine (fal.DEFAULT_IDENTITY_ENGINE, Gemini since 2026-09-11)
+# {"engine": "identity_gpt2"|"identity_banana_pro"|"identity_banana"|"identity_multi"|"identity_gpt"|"",
+#  "garment_path": str, "prompt_natural": str, ...local hints}
+# "" means the default identity engine (fal.DEFAULT_IDENTITY_ENGINE)
 ```
 `engine` wins in `FalProvider.pick_model` when it names an images-capable
 role; `plan_requests` carries it so the estimate prices the same model.
+
+Engines (2026-09-29), all through fal:
+
+| role | endpoint | her photos per call | output | price reserved |
+|---|---|---|---|---|
+| `identity_gpt2` | `openai/gpt-image-2/edit` (ChatGPT's model) | 7 (+ garment) | 1536x2048 | 0.30 |
+| `identity_banana_pro` | `fal-ai/nano-banana-pro/edit` (Gemini 3 Pro Image) | 7 (+ garment) | 2K | 0.15 |
+| `identity_banana` | `fal-ai/nano-banana/edit` (Gemini 2.5) | 4 | ~1 MP | 0.039 |
+| `identity_multi` | `fal-ai/flux-pro/kontext/multi` | 4 | ~1 MP | 0.040 |
+
+The two newer roles declare `"natural"`: they receive `extra.prompt_natural`
+(`generation/prompt.natural_prompt`, built from the same resolved choices)
+instead of the Kontext checklist, and `"refs"` companion photographs chosen by
+`gallery.choose_references` (greedy past `EXHAUSTIVE_MAX_COMBOS`).  When one of
+them refuses a request at the content check (unbilled 422), the other is asked
+inside the same attempt (`fal._REFUSAL_FALLBACK`); the attempt row records it
+under `params.envio.motor_rechazado` and is billed at the price of the engine
+that drew the image.
 
 ### `POST /api/generate/analyze` additions
 `engine`, `source_image_id` (a result of hers as the source; `runs.original_id`

@@ -30,8 +30,20 @@ function reset() {
     style: null,
     choices: {},
     nPreviews: store.restore('n_previews', 6),
-    // '' (the old "Automatico") now means Gemini on the server too; see fal.py.
-    engine: store.restore('engine', '') || 'identity_banana',
+    // '' means the server's default engine (fal.DEFAULT_IDENTITY_ENGINE); a
+    // stored gpt-image-1 choice moves on to its successor, GPT Image 2.
+    engine: (() => {
+      // One-time move (2026-09-29): gpt-image-1 and the old default Gemini 2.5
+      // both give way to GPT Image 2, the engine that measured best on her
+      // photographs.  A choice made after this move is kept as it is.
+      let e = store.restore('engine', '');
+      if (store.restore('engine_v', 0) < 2) {
+        if (e === 'identity_gpt' || e === 'identity_banana') e = 'identity_gpt2';
+        store.persist('engine_v', 2);
+        store.persist('engine', e);
+      }
+      return e || 'identity_gpt2';
+    })(),
     sourceImage: null,     // a result being edited ("no, cambia el escote")
     referencia: null,      // the garment value she uploaded this time
     quality: store.restore('quality', 'preview'),
@@ -273,13 +285,16 @@ function choiceSentence(group) {
   return `Se combinaran estas ${chosen.length} opciones entre las fotos.`;
 }
 
-/* Gemini first and preselected: measured on her photographs on 2026-09-11 it
-   kept her face at 0.71-0.80 where FLUX Kontext ranged 0.50-0.78 and she
-   rejected the Kontext results on sight.  Same price. */
+/* The engine she compares us with comes first: GPT Image 2 is the model
+   behind ChatGPT's images, and Gemini Pro is Google's current editor.  Both
+   read seven of her photographs per image and answer at 2048-2400 px.  The
+   older two stay for comparison.  The old 'identity_gpt' (gpt-image-1) chip
+   is gone: GPT Image 2 replaces it, and a stored choice of it is mapped on. */
 const ENGINES = [
-  ['identity_banana', 'Gemini (recomendado)'],
+  ['identity_gpt2', 'ChatGPT (recomendado)'],
+  ['identity_banana_pro', 'Gemini Pro'],
+  ['identity_banana', 'Gemini rapido'],
   ['identity_multi', 'FLUX Kontext'],
-  ['identity_gpt', 'OpenAI'],
 ];
 
 /* Her words, typed or dictated, and a picture of a garment she likes.  What

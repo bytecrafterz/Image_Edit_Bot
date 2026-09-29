@@ -420,9 +420,15 @@ BUILTIN_OPTIONS: list[dict] = [
         "group_key": "framing", "label_es": "Encuadre", "label_en": "Framing",
         "multi": False, "sort_order": 80,
         "values": [
+            # ``params.natural`` is what the editors that read like a person
+            # are told instead of the Kontext fragment (prompt.natural_prompt).
+            # GPT Image 2's content check refused requests carrying body
+            # vocabulary on 2026-09-29, and accepted "full body from head to
+            # feet" said plainly; these say the same framing in those words.
             _v("cuerpo_entero", "Cuerpo entero", "Full body",
                "full body framing, head to feet in frame", shots="full",
-               local={"framing": "portrait_full"}),
+               local={"framing": "portrait_full"},
+               params={"natural": "full length from head to feet"}),
             _v("medio_cuerpo", "Medio cuerpo", "Half body",
                "waist up framing", local={"framing": "portrait_half"}),
             # A half-body picture she has already approved - the face is
@@ -439,7 +445,10 @@ BUILTIN_OPTIONS: list[dict] = [
                "height and build exactly as in the reference photographs of her, "
                "the added lower half continuing the same garment, the same light "
                "and the same place, the head and face untouched",
-               shots="half", local={"framing": "portrait_full"}),
+               shots="half", local={"framing": "portrait_full"},
+               params={"natural": "shown full length from head to feet, shoes "
+                                  "visible, the outfit, the place and the light "
+                                  "continuing naturally down to her feet"}),
             _v("primer_plano", "Primer plano", "Close up",
                "a close up portrait, head and chest",
                local={"framing": "portrait_closeup"}),

@@ -131,6 +131,43 @@ MODELS: dict[str, dict[str, Any]] = {
         "out_max_side": 1536,
         "notes": "OpenAI gpt-image-1 (alta calidad): edicion con fotos de referencia.",
     },
+    # THE ENGINE THE CLIENT USES HERSELF.  On 2026-09-14 she answered four
+    # Gemini 2.5 images with "no se parece nada conmigo" and "ChatGPT lo hace
+    # perfecto": she uploads her photographs, asks for a picture like her
+    # reference "manteniendo exactamente mi cara y mi cuerpo", and gets her.
+    # fal hosts that very model - openai/gpt-image-2/edit, tagged
+    # chatgpt-images-2 - and it reads up to 16 pictures in one call, so her
+    # face and her body travel as seven photographs of her instead of the one
+    # to three the older endpoints took ("refs").  It is also the only engine
+    # here that names its output size in pixels, so the preview is already a
+    # 2048 px print and the final needs no upscaler (which cost the face 0.01
+    # to 0.05 on 2026-09-14).  Billed in tokens: fal's table (2026-09-29) says
+    # 0.178 USD for a high 1024x1536 and 0.234 for 1440x2560 of output, plus
+    # her input pictures; 0.30 is what the balance gate reserves so the quote
+    # never undershoots the invoice.
+    "identity_gpt2": {
+        "endpoint": "openai/gpt-image-2/edit",
+        "price_usd": 0.30,
+        "per_megapixel": False,
+        "knobs": ("images", "gpt2", "natural"),
+        "refs": 6,
+        "max_images": 16,
+        "out_max_side": 2048,
+        "notes": "OpenAI GPT Image 2 (el motor de ChatGPT): edicion con siete fotos tuyas, 2048 px.",
+    },
+    # Google's current top editor (Gemini 3 Pro Image), the successor of the
+    # Nano Banana that held her face best on 2026-09-11.  Flat 0.15 USD at 1K
+    # and 2K alike, so it is always asked for 2K; up to 14 pictures per call.
+    "identity_banana_pro": {
+        "endpoint": "fal-ai/nano-banana-pro/edit",
+        "price_usd": 0.15,
+        "per_megapixel": False,
+        "knobs": ("images", "banana_pro", "seed", "natural"),
+        "refs": 6,
+        "max_images": 14,
+        "out_max_side": 2400,
+        "notes": "Gemini 3 Pro Image (Nano Banana Pro): edicion con siete fotos tuyas, 2K.",
+    },
     "identity_max": {
         "endpoint": "fal-ai/flux-pro/kontext/max",
         "price_usd": 0.080,
@@ -183,8 +220,14 @@ MODELS: dict[str, dict[str, Any]] = {
 
 DEFAULT_ROLE = "identity"
 # The identity engine used when the request names none.  Measured, not
-# preferred: see the note above MODELS["identity_banana"].
-DEFAULT_IDENTITY_ENGINE = "identity_banana"
+# preferred.  2026-09-11: Gemini 2.5 over Kontext (see the note above
+# MODELS["identity_banana"]).  2026-09-29, on her own photographs: GPT Image 2
+# drew her at 0.841-0.854 on her face signature - her own photographs score
+# 0.83-0.87 - while Gemini Pro scored 0.62-0.71 and Gemini 2.5 0.30-0.48 on the
+# same restaurant request.  GPT Image 2's reader refuses some of her
+# photographs; those go to Gemini Pro in the same attempt (_REFUSAL_FALLBACK)
+# and, once known, straight to it (generation/engine_memory).
+DEFAULT_IDENTITY_ENGINE = "identity_gpt2"
 
 _SUBMIT_TIMEOUT = 60.0
 _POLL_TIMEOUT = 30.0
@@ -482,7 +525,90 @@ def _wire_safe(text: str) -> tuple[str, list[str]]:
 # request about a body.  So for the roles that have a reader the prompt is
 # rewritten in plain clothing terms, the negative list is not folded in at
 # all, and what was swapped is recorded on the attempt.
-_EDITOR_ROLES = ("identity_banana", "identity_gpt")
+_EDITOR_ROLES = ("identity_banana", "identity_gpt", "identity_gpt2",
+                 "identity_banana_pro")
+
+# ONE REFUSAL IS NOT THE END OF THE ATTEMPT.  Each editor has its own reader,
+# and they do not refuse the same photographs: gpt-image-1 turned down her
+# full-length IMG_7871 as an input on every wording tried (2026-09-11) while
+# Gemini drew from it.  A refusal is answered before any image exists and is
+# not billed, so when the engine she chose refuses, the other one is asked in
+# the same attempt instead of failing the image; the attempt row records both.
+_REFUSAL_FALLBACK = {"identity_gpt2": "identity_banana_pro",
+                     "identity_banana_pro": "identity_gpt2"}
+_REFUSAL_WORDS = ("content_policy", "content policy", "flagged", "safety",
+                  "moderation", "no_media_generated", "content checker",
+                  "violat", "not allowed", "refus")
+
+# Nano Banana Pro's own list of shapes; nearest wins.
+_BANANA_PRO_ASPECTS = (("21:9", 21 / 9), ("16:9", 16 / 9), ("3:2", 3 / 2),
+                       ("4:3", 4 / 3), ("5:4", 5 / 4), ("1:1", 1.0),
+                       ("4:5", 4 / 5), ("3:4", 3 / 4), ("2:3", 2 / 3),
+                       ("9:16", 9 / 16))
+
+
+def _banana_pro_aspect(width: int, height: int) -> str:
+    if width <= 0 or height <= 0:
+        return "auto"
+    ratio = width / float(height)
+    return min(_BANANA_PRO_ASPECTS, key=lambda row: abs(row[1] - ratio))[0]
+
+
+def _gpt2_size(width: int, height: int, long_side: int = 2048) -> dict:
+    """A pixel box GPT Image 2 accepts, in her own shape.
+
+    OpenAI's rules for this model: both sides multiples of 16, the long side at
+    most 3840, a ratio no wider than 3:1 and between 0.65 and 8.3 megapixels.
+    Her photographs are 3:4, so a 2048 px long side is 1536x2048 - about 3.1
+    megapixels, between the 1024x1536 and 1440x2560 rows of fal's price table.
+    """
+    if width <= 0 or height <= 0:
+        width, height = 3, 4
+    ratio = width / float(height)
+    ratio = max(1 / 3.0, min(3.0, ratio))
+    if ratio >= 1.0:
+        w, h = long_side, long_side / ratio
+    else:
+        w, h = long_side * ratio, long_side
+
+    def _16(value: float) -> int:
+        return max(16, int(round(value / 16.0)) * 16)
+
+    return {"width": _16(w), "height": _16(h)}
+
+
+def engine_references(engine: str | None) -> int:
+    """How many companion photographs of her this engine is built to read.
+
+    0 for the endpoints that predate the "refs" field: for those Ajustes
+    decides, exactly as before.  An empty engine is the default one.
+    """
+    role = str(engine or "").strip() or DEFAULT_IDENTITY_ENGINE
+    return int((MODELS.get(role) or {}).get("refs") or 0)
+
+
+def _garment_ok(req: GenRequest) -> bool:
+    garment = str(((getattr(req, "extra", None) or {}).get("garment_path")) or "")
+    return bool(garment) and os.path.isfile(garment)
+
+
+def _ref_room(spec: dict, has_source: int, garment: bool) -> int:
+    """How many of her reference photographs fit in one call of this model.
+
+    The older endpoints (Kontext multi, Gemini 2.5, gpt-image-1) were fed four
+    pictures: the photograph being edited and three more, one of which gives
+    way to the garment picture when there is one.  The newer ones declare how
+    many companions they want ("refs") and how many pictures they read at all
+    ("max_images"), and the garment still has to fit inside that.
+    """
+    if spec.get("refs") is None:
+        return 2 if garment else 3
+    room = int(spec.get("refs") or 0)
+    top = int(spec.get("max_images") or 4) - int(has_source) - (1 if garment else 0)
+    return max(0, min(room, top))
+
+
+# The plain-word substitutions for _EDITOR_ROLES; see the note above it.
 _EDITOR_MAP = (
     (re.compile(r"real skin texture with visible pores, moles and blemishes kept as they are", re.I),
      "her natural skin texture and her marks exactly as in her photographs"),
@@ -661,11 +787,15 @@ def _check(resp: httpx.Response) -> None:
     # picture and her money, because until 2026-09-04 a raw
     # ``{"detail":"Unprocessable Entity"}`` was shown to her verbatim.
     log.warning("fal.ai HTTP %d: %s", code, body)
-    raise ProviderError(
+    err = ProviderError(
         "fal.ai (el servicio que dibuja las imagenes) no ha aceptado esta "
         "peticion. No se ha cobrado esta imagen. Prueba a cambiar alguna "
         "opcion o intentalo mas tarde.",
         retryable=False, code=f"http_{code}")
+    # A content reader said no - as opposed to a malformed request, which the
+    # other engine would refuse just the same.  See _REFUSAL_FALLBACK.
+    err.refused = any(word in low for word in _REFUSAL_WORDS)
+    raise err
 
 
 def _json(resp: httpx.Response) -> dict:
@@ -723,8 +853,9 @@ class FalProvider(ImageProvider):
             cost_per_image_usd=float(self._spec(DEFAULT_ROLE)["price_usd"]),
             notes="fal.ai: edicion sobre la foto real, inpainting por zona y "
                   "referencias de identidad. Precio por imagen segun modelo. "
-                  "Devuelve alrededor de 1 megapixel (1024 px de lado largo) "
-                  "en cualquier calidad: se paga fidelidad, no tamano.",
+                  "Kontext y Gemini 2.5 devuelven alrededor de 1 megapixel; "
+                  "GPT Image 2 y Gemini Pro devuelven 2048-2400 px de lado "
+                  "largo desde la vista previa.",
         )
 
     def available(self) -> bool:
@@ -797,13 +928,19 @@ class FalProvider(ImageProvider):
         knobs = tuple(spec.get("knobs") or ())
         has_source = 1 if getattr(req, "source_path", "") else 0
         if "images" in knobs:
-            return has_source + len(list(req.reference_paths or [])[:3])
+            return has_source + len(list(req.reference_paths or [])[
+                :_ref_room(spec, has_source, _garment_ok(req))])
         if "image" in knobs:
             return has_source
         return 0
 
     def estimate_cost(self, req: GenRequest) -> float:
-        spec = self._spec(self.pick_model(req))
+        return self._price(self.pick_model(req), req)
+
+    def _price(self, role: str, req: GenRequest) -> float:
+        """What one image of this role costs - the role that really ran, which
+        after a refusal fallback is not the one the request asked for."""
+        spec = self._spec(role)
         price = float(spec.get("price_usd") or 0.0)
         if spec.get("per_megapixel"):
             width = int(getattr(req, "width", 0) or 0)
@@ -830,6 +967,17 @@ class FalProvider(ImageProvider):
         # to send (see _PARTIAL_DRESS), so it is read before the prompt is
         # assembled rather than below where the crop is taken.
         masked = bool(req.mask_path and "mask" in knobs and "image" in knobs)
+        if "natural" in knobs:
+            # The editors that read like a person get the request the way she
+            # writes it to ChatGPT: who she is, what changes, where - not the
+            # 2500-character checklist Kontext needs, whose guessed details
+            # ("short black hair" for long wavy hair) the reader then obeys.
+            # generation/prompt.build_prompt writes both from the same choices.
+            natural = str(((getattr(req, "extra", None) or {})
+                           .get("prompt_natural")) or "").strip()
+            if natural:
+                prompt = natural
+                meta["prompt_natural"] = True
         if role in _EDITOR_ROLES:
             # See _EDITOR_ROLES: plain words, and no negative list at all.
             prompt, swapped_editor = _editor_safe(prompt)
@@ -912,22 +1060,44 @@ class FalProvider(ImageProvider):
                 meta["source_size"] = [size[0], size[1]]
             garment = str(((getattr(req, "extra", None) or {}).get("garment_path")) or "")
             garment_ok = bool(garment) and os.path.isfile(garment)
-            # Room for the garment: two of her references instead of three.
-            for ref in list(req.reference_paths or [])[:(2 if garment_ok else 3)]:
+            # Room for the garment: on the four-picture endpoints two of her
+            # references instead of three.  See _ref_room.
+            room = _ref_room(spec, 1 if req.source_path else 0, garment_ok)
+            pool = list(req.reference_paths or [])
+            if "natural" in knobs:
+                # The photograph being edited travels once.  Sending it again
+                # as its own reference is what keeps Kontext on multi at 0.040
+                # (see images_sent); to a reader that bills input pictures it
+                # is the same photograph paid for twice.
+                pool = [r for r in pool if str(r) != str(req.source_path or "")]
+            refs_sent = 0
+            for ref in pool[:room]:
                 urls.append(_encode(str(ref), side)[0])
+                refs_sent += 1
+            meta["refs_sent"] = refs_sent
             if garment_ok:
                 # The picture she sent of the dress, on somebody else.  Said
                 # plainly to the engine: take the garment from it, and nothing
                 # else - identity comes only from her own pictures.
                 urls.append(_encode(garment, side)[0])
                 meta["garment_sent"] = True
-                payload["prompt"] = (payload["prompt"] + "\n\nThe LAST input "
-                    "image shows a garment worn by a different person: dress "
-                    "the person from the first image in that exact garment - "
-                    "same cut, neckline, sleeves, colour, fabric and details - "
-                    "fitted to her own body. Take nothing else from the last "
-                    "image: her face, hair, body and skin come only from the "
-                    "first images.")
+                if meta.get("prompt_natural"):
+                    # Measured on GPT Image 2 on 2026-09-29: the same request
+                    # with her dress picture went through with this one line
+                    # and was refused at the content check with the paragraph
+                    # below ("worn by a different person ... her own body ...
+                    # skin").  The plain request already names the dress.
+                    if "last image" not in payload["prompt"].lower():
+                        payload["prompt"] = (payload["prompt"] + " Copy only the "
+                                             "garment shown in the last image.")
+                else:
+                    payload["prompt"] = (payload["prompt"] + "\n\nThe LAST input "
+                        "image shows a garment worn by a different person: dress "
+                        "the person from the first image in that exact garment - "
+                        "same cut, neckline, sleeves, colour, fabric and details - "
+                        "fitted to her own body. Take nothing else from the last "
+                        "image: her face, hair, body and skin come only from the "
+                        "first images.")
             if urls:
                 payload["image_urls"] = urls
                 meta["n_references"] = len(urls) - (1 if req.source_path else 0)
@@ -981,6 +1151,25 @@ class FalProvider(ImageProvider):
             payload["image_size"] = ("1024x1536" if height > width
                                      else "1536x1024" if width > height else "1024x1024")
             payload["quality"] = "high"
+        if "gpt2" in knobs or "banana_pro" in knobs:
+            size = meta.get("source_size") or []
+            width = int(req.width or (size[0] if len(size) == 2 else 0))
+            height = int(req.height or (size[1] if len(size) == 2 else 0))
+            # JPEG: a 2K PNG is 6-8 MB for no visible gain, and every later
+            # step of the pipeline writes JPEG anyway.
+            payload["output_format"] = "jpeg"
+            if "gpt2" in knobs:
+                payload["image_size"] = _gpt2_size(width, height)
+                payload["quality"] = "high"
+                meta["image_size"] = dict(payload["image_size"])
+                if width and height:
+                    meta["aspect_ratio"] = _aspect_ratio(width, height)
+            else:
+                payload["aspect_ratio"] = _banana_pro_aspect(width, height)
+                # Same price at 1K and 2K on fal (0.15 USD), so always 2K.
+                payload["resolution"] = "2K"
+                meta["aspect_ratio"] = payload["aspect_ratio"]
+                meta["resolution"] = "2K"
         if "aspect" in knobs:
             # Her photographs are 2316x3088 - 3:4 - and Kontext reframes to
             # whatever ratio it is told, so a wrong one here crops or squeezes
@@ -1011,6 +1200,11 @@ class FalProvider(ImageProvider):
                     abs(_ASPECT_VALUE[payload["aspect_ratio"]] - ratio)
                     <= _ASPECT_TOLERANCE)
 
+        if meta.get("prompt_natural"):
+            # The attempt row keeps the Kontext checklist in its prompt column;
+            # what a reader really received is kept here, because a content
+            # refusal can only be understood from the words that were sent.
+            meta["texto_enviado"] = str(payload.get("prompt") or "")[:1500]
         return payload, meta
 
     # -------------------------------------------------------------- queue
@@ -1285,15 +1479,46 @@ class FalProvider(ImageProvider):
             "Accept": "application/json",
         }
 
+        refused_by: list[dict] = []
         try:
-            with httpx.Client(headers=headers, follow_redirects=True,
-                              timeout=_SUBMIT_TIMEOUT) as client:
-                request_id, status_url, response_url = self._submit(
-                    client, endpoint, payload)
-                meta["request_id"] = request_id
-                result = self._wait(client, status_url, response_url, deadline)
-                image = self._first_image(result)
-                meta["bytes"] = self._download(client, str(image["url"]), out)
+            while True:
+                try:
+                    with httpx.Client(headers=headers, follow_redirects=True,
+                                      timeout=_SUBMIT_TIMEOUT) as client:
+                        request_id, status_url, response_url = self._submit(
+                            client, endpoint, payload)
+                        meta["request_id"] = request_id
+                        result = self._wait(client, status_url, response_url,
+                                            deadline)
+                        image = self._first_image(result)
+                        meta["bytes"] = self._download(client, str(image["url"]),
+                                                       out)
+                    break
+                except ProviderError as exc:
+                    # See _REFUSAL_FALLBACK: a reader's refusal, unbilled, with
+                    # the other engine not yet asked and time left to ask it.
+                    fallback = _REFUSAL_FALLBACK.get(role, "")
+                    if (getattr(exc, "refused", False)
+                            and not getattr(exc, "billed", False)
+                            and fallback and not refused_by
+                            and time.monotonic() < deadline - 60):
+                        log.warning("fal.ai: %s rechazo la peticion; se pide "
+                                    "a %s en el mismo intento", role, fallback)
+                        refused_by.append({
+                            "motor": role, "endpoint": endpoint,
+                            "request_id": meta.get("request_id", ""),
+                            # How many pictures the refused call carried: a
+                            # refusal can only be pinned on her photograph
+                            # when it travelled alone (engine_memory).
+                            "imagenes": len(payload.get("image_urls") or []),
+                            "prenda": bool(meta.get("garment_sent"))})
+                        role = fallback
+                        spec = self._spec(role)
+                        endpoint = str(spec["endpoint"])
+                        payload, meta = self._payload(role, req)
+                        meta["motor_rechazado"] = list(refused_by)
+                        continue
+                    raise
         except ProviderError as exc:
             # THE TRAIL A CHARGED FAILURE MUST LEAVE.  meta already holds the
             # endpoint, the request_id fal files the job under, and the
@@ -1340,7 +1565,8 @@ class FalProvider(ImageProvider):
             image_path=str(out),
             provider=self.name,
             model=endpoint,
-            cost_usd=self.estimate_cost(req),
+            # The role that really drew it: after a refusal it is the fallback.
+            cost_usd=self._price(role, req),
             latency_ms=int((time.monotonic() - started) * 1000),
             seed=seed,
             meta=meta,

@@ -43,7 +43,9 @@ sample/
 #  Python
 # =====================================================================
 backend/.venv/
+backend/.venv-*/
 .venv/
+.venv-*/
 venv/
 __pycache__/
 *.py[cod]

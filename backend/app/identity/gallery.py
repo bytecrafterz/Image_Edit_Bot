@@ -91,6 +91,11 @@ LOO_REL_DROP = 0.12                 # below (median - this) is an outlier
 # describes one distance and one light.
 REF_SIZE_SPREAD_MIN = 1.8           # max face px / min face px inside the trio
 REF_SHOT_TYPES_MIN = 2              # closeup / half / full: at least two
+# Every combination is tried while that stays cheap - a trio out of twenty is
+# 1,140 of them.  The newer engines read seven of her photographs, and C(20,7)
+# is 77,520 combinations: seconds of Python on the estimate screen.  Past this
+# many the same rule is applied greedily (see _greedy_references).
+EXHAUSTIVE_MAX_COMBOS = 3000
 
 # Face graft donors.  A similarity transform cannot correct yaw, and her
 # library spans -41.3..+35.4 degrees, so a donor whose head is turned
@@ -446,7 +451,7 @@ def _leave_one_out(vectors: list[list[float]]) -> list[float]:
 
 
 def choose_references(profile: dict, n: int = 3, must_include: str = "",
-                      prefer_shot: str = "") -> dict:
+                      prefer_shot: str = "", only_paths: Any = None) -> dict:
     """Up to ``n`` deliberately different photographs of her, by measurement.
 
     ``must_include`` is the photograph the run is editing.  It travels to the
@@ -501,6 +506,12 @@ def choose_references(profile: dict, n: int = 3, must_include: str = "",
             why = "sin malla facial"
         elif own < LOO_ABS_FLOOR and own < median_loo - LOO_REL_DROP:
             why = "se parece poco al resto de tus fotos (%.2f)" % own
+        if not why and only_paths is not None \
+                and str(row.get("path")) not in only_paths \
+                and str(row.get("path")) != str(must_include or ""):
+            # The engine this is for has not accepted this photograph (see
+            # generation/engine_memory); it is not a candidate for it.
+            why = "este motor no la ha aceptado todavia"
         if why:
             dropped.append("%s: %s" % (row.get("filename") or row["path"], why))
             continue
@@ -542,7 +553,17 @@ def choose_references(profile: dict, n: int = 3, must_include: str = "",
 
     best = None
     best_relaxed = None
-    for combo in itertools.combinations(range(len(candidates)), n):
+    exhaustive = math.comb(len(candidates), n) <= EXHAUSTIVE_MAX_COMBOS
+    if not exhaustive:
+        row = _greedy_references(candidates, vectors, n, forced_index,
+                                 want_shot if has_shot else "", forced)
+        if row is not None:
+            best_relaxed = row
+            if not (n >= 2 and (row["shots"] < min(REF_SHOT_TYPES_MIN, n)
+                                or row["spread"] < REF_SIZE_SPREAD_MIN)):
+                best = row
+    for combo in (itertools.combinations(range(len(candidates)), n)
+                  if exhaustive else ()):
         if forced_index >= 0 and forced_index not in combo:
             continue
         picked = [candidates[i] for i in combo]
@@ -608,6 +629,57 @@ def choose_references(profile: dict, n: int = 3, must_include: str = "",
             "relajado": relaxed,
         },
     }
+
+
+def _set_row(picked: list[dict], vectors: list) -> dict | None:
+    """The same measurements choose_references ranks a combination by."""
+    mean = embedding_mod.gallery_mean([p["face"]["embedding"] for p in picked])
+    if not mean:
+        return None
+    coverage = min(_cos(v, mean) for v in vectors)
+    inner = [_cos(picked[a]["face"]["embedding"], picked[b]["face"]["embedding"])
+             for a in range(len(picked)) for b in range(a + 1, len(picked))]
+    diversity = 1.0 - (sum(inner) / len(inner)) if inner else 0.0
+    sizes = [_f(p["face"].get("face_px")) for p in picked]
+    spread = (max(sizes) / max(1.0, min(sizes))) if sizes else 1.0
+    return {"combo": list(picked), "coverage": coverage, "diversity": diversity,
+            "spread": spread, "shots": len({p.get("shot_type") for p in picked})}
+
+
+def _greedy_references(candidates: list[dict], vectors: list, n: int,
+                       forced_index: int, want_shot: str, forced: str
+                       ) -> dict | None:
+    """choose_references' rule, one photograph at a time.
+
+    Start from the photograph being edited (and, when the edit is full length,
+    her best full-length photograph), then keep adding whichever candidate
+    lifts the coverage of her WORST photograph the most, diversity breaking
+    ties - the same key the exhaustive search ranks by.  Seven out of twenty
+    this way is 7 x 20 evaluations instead of 77,520.
+    """
+    picked: list[int] = [forced_index] if forced_index >= 0 else []
+    if want_shot:
+        options = [i for i, c in enumerate(candidates)
+                   if i not in picked and str(c.get("shot_type") or "") == want_shot
+                   and str(c.get("path")) != forced]
+        if options:
+            picked.append(max(options,
+                              key=lambda i: float(candidates[i].get("loo") or 0.0)))
+    while len(picked) < min(n, len(candidates)):
+        best_i, best_key = -1, None
+        for i in range(len(candidates)):
+            if i in picked:
+                continue
+            row = _set_row([candidates[j] for j in picked + [i]], vectors)
+            if row is None:
+                continue
+            key = (round(row["coverage"], 4), round(row["diversity"], 4))
+            if best_key is None or key > best_key:
+                best_i, best_key = i, key
+        if best_i < 0:
+            break
+        picked.append(best_i)
+    return _set_row([candidates[i] for i in picked], vectors) if picked else None
 
 
 # --------------------------------------------------------------------- donors

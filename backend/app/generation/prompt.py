@@ -141,6 +141,28 @@ QUALITY_LANGUAGE = (
     "field, high dynamic range, straight out of camera, no digital retouching"
 )
 
+# THE SAME REQUEST, THE WAY SHE WRITES IT TO CHATGPT.  The editors that read
+# like a person (GPT Image 2, Gemini Pro - see providers/fal "natural") are
+# given this instead of the checklist above: what changes, where, and that she
+# stays herself.  The checklist exists for Kontext, which has no reader; handed
+# to a reader it carries every guess of the photo description as an order - on
+# 2026-09-11 it told the engine to keep "short black hair" on a woman with long
+# wavy hair.
+# THE WORDING IS MEASURED, NOT CHOSEN.  On 2026-09-29 GPT Image 2's content
+# check refused her clothed photograph with a first version of this text -
+# "keep her identity exactly ... the same body - height, build, shoulders,
+# waist, hips ... do not age or de-age her ... unmistakably her" - and accepted
+# the same photograph, the same dress and the same place asked for in one
+# ChatGPT-style sentence, at 0.841 and 0.842 on her face signature.  Adding
+# body-part lists or identity language back is how the refusal comes back.
+NATURAL_OPENING = "Make a realistic photo of this same woman"
+NATURAL_KEEP = "Keep her {what} exactly as they are in her photos."
+NATURAL_FINISH = "Natural, unretouched photo."
+# Said instead of Claude's long description when she sent a picture of the
+# garment: the picture carries the cut and the colour, and the description's
+# vocabulary ("deep plunging", "clinging", "slit") is what a reader flags.
+NATURAL_PICTURED_GARMENT = "wearing the outfit shown in the last image"
+
 # ------------------------------------------------------------------ params
 
 BASE_PARAMS: dict[str, float] = {
@@ -1027,6 +1049,9 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
 
     # ---- 2. what is being changed -----------------------------------
     change_bits: list[str] = []
+    # The same changes for natural_prompt: identical, except that a garment she
+    # sent a picture of is named by its picture (NATURAL_PICTURED_GARMENT).
+    natural_bits: list[str] = []
     negatives: list[str] = []
     used_options: list[dict] = []
     # Only the garments that survive the body-change refusal below, because a
@@ -1050,6 +1075,20 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
             if fragment and canon_group(group) not in ("scene", "background",
                                                         "location"):
                 change_bits.append(fragment)
+                opt_params = opt.get("params") or {}
+                if opt_params.get("garment_image"):
+                    natural_bits.append(NATURAL_PICTURED_GARMENT)
+                elif _norm_ws(opt_params.get("natural")):
+                    natural_bits.append(_norm_ws(opt_params.get("natural")))
+                elif opt.get("source") == "given":
+                    # A value the catalogue does not know - a key typed by a
+                    # script, or a catalogue not yet reseeded - would reach
+                    # the reader as a raw Spanish key ("ampliar cuerpo
+                    # entero").  The checklist can carry it; the plain request
+                    # leaves it out rather than say something nobody meant.
+                    pass
+                else:
+                    natural_bits.append(fragment)
             if opt.get("negative"):
                 negatives.append(opt["negative"])
             used_options.append(opt)
@@ -1072,8 +1111,10 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
                 SETTINGS.limits.outfit_coverage_text)))
     if outfit["lower_phrase"]:
         change_bits.append("with " + outfit["lower_phrase"])
+        natural_bits.append("with " + outfit["lower_phrase"])
     if outfit["upper_phrase"]:
         change_bits.append("with " + outfit["upper_phrase"])
+        natural_bits.append("with " + outfit["upper_phrase"])
     negatives.extend(outfit["negatives"])
     tokens.extend(outfit["tokens"])
 
@@ -1217,13 +1258,60 @@ def build_prompt(brief: dict, profile: dict, style: dict, options: dict) -> dict
     tokens.append("parametros: " + " ".join(
         "%s=%s" % (k, params[k]) for k in sorted(params)))
 
+    prompt_natural = natural_prompt(natural_bits, outfit.get("instruction") or "",
+                                    new_scene, changed_groups, marks)
+    tokens.append("texto natural (GPT Image 2 / Gemini Pro): %d caracteres"
+                  % len(prompt_natural))
+
     return {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
         "identity_clause": identity_clause,
+        "prompt_natural": prompt_natural,
         "params": params,
         "tokens": tokens,
     }
+
+
+def natural_prompt(change_bits: list[str], outfit_instruction: str,
+                   new_scene: str, changed_groups: set, marks: str) -> str:
+    """The request in plain sentences, for the editors that read like a person.
+
+    Built from the same resolved choices as the checklist, so the two can never
+    ask for different things: the changes are the same fragments (a garment she
+    sent a picture of is named by the picture), the new place is the same scene
+    fragment, and the marks are the same garment-aware list.  What it leaves
+    out is everything the checklist only guessed from the photo - her hair
+    colour, her lighting, a lens - because the reader sees her photographs.
+    See NATURAL_OPENING for why it is this short.
+    """
+    groups = {canon_group(g) for g in (changed_groups or set())}
+    changes = _join([c for c in (change_bits or []) if _norm_ws(c)], "; ")
+    first = NATURAL_OPENING
+    if changes:
+        first += ", with these changes: " + changes
+    first += "."
+    parts = [first]
+    if _norm_ws(outfit_instruction) and NATURAL_PICTURED_GARMENT not in changes:
+        parts.append(_norm_ws(outfit_instruction).rstrip(".") + ".")
+    if _norm_ws(new_scene):
+        parts.append("Place: " + _norm_ws(new_scene).rstrip(".")
+                     + ", in place of the original background.")
+    else:
+        parts.append("Same place and light as her photo.")
+    if not ({"pose", "framing", "camera"} & groups):
+        parts.append("Same pose and framing as her photo.")
+    parts.append(NATURAL_KEEP.format(
+        what="face and figure" if "hair" in groups else "face, hair and figure"))
+    if _norm_ws(marks):
+        # Named generically: the checklist's "the mark on the body, the mark
+        # on the neck" is body vocabulary to a reader, and the reader can see
+        # her marks in her photographs anyway.
+        parts.append("Keep her tattoos, moles and marks as they are.")
+    if NATURAL_PICTURED_GARMENT in changes:
+        parts.append("Copy only the outfit from the last image.")
+    parts.append(NATURAL_FINISH)
+    return " ".join(parts)
 
 
 def _chosen_fragments(kept: dict, groups: tuple) -> str:

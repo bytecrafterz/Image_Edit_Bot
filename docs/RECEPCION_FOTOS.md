@@ -25,9 +25,11 @@ Las cuatro descripciones ya existen sin imagen como `vestido_rojo_cruzado`, `ves
 
 Con una sesion de admin guardada en un tarro de cookies (Mozilla):
 
-    python scripts/demo_batch.py cookies.txt lote1.json --shots full,half --engine identity_banana --n 2
+    python scripts/demo_batch.py cookies.txt lote1.json --shots full,half --n 2
 
-Por defecto: cada foto de cuerpo entero o medio cuerpo, con cada vestido, restaurante y calle alternando. Precio aproximado: 0.039 USD por imagen (Gemini). Si se registraron los vestidos con imagen, usar sus claves `mi_...` con `--dresses`.
+Por defecto: cada foto de cuerpo entero o medio cuerpo, con cada vestido, restaurante y calle alternando, con el motor por defecto (GPT Image 2, el de ChatGPT). Precio aproximado: 0.30 USD por imagen reservado, unos 0.20-0.25 reales; si GPT Image 2 rechaza la foto la hace Gemini Pro en el mismo intento (0.15 USD). Si se registraron los vestidos con imagen, usar sus claves `mi_...` con `--dresses`.
+
+Que fotos acepta el motor de ChatGPT (medido el 2026-09-29): su foto de medio cuerpo vestida (WhatsApp) si, con parecido 0.84-0.85; sus dos fotos de cuerpo entero IMG_7871 e IMG_7880 y el primer plano IMG_7778 no, ni con una frase neutra. Para que salga con el motor de ChatGPT hace falta una foto con ropa de calle, sin escote ni hombros descubiertos; "Ampliar a cuerpo entero" saca el cuerpo entero desde una foto de medio cuerpo. El sistema recuerda que fotos acepta y cuales no (`generation/engine_memory.py`).
 
 ## 4. Seleccion y entrega
 
