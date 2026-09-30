@@ -1,0 +1,87 @@
+# /etc/nginx/sites-available/fotografica
+# ---------------------------------------------------------------------------
+# Photo Robot on 62.171.135.13 (Ubuntu 24.04, since 2026-09-30).
+#   fotografica.62-171-135-13.sslip.io  - works as soon as the server does
+#   fotografica.duckdns.org             - once DuckDNS points here
+# Both names share one certificate, --cert-name fotografica, so adding the
+# DuckDNS name later changes nothing in this file:
+#   certbot certonly --webroot -w /var/www/acme --cert-name fotografica \
+#     -d fotografica.62-171-135-13.sslip.io -d fotografica.duckdns.org \
+#     --expand --deploy-hook "systemctl reload nginx"
+#
+# Everything below the TLS block is carried over from the old droplet's
+# deploy/nginx/fotografica.duckdns.org, which explains each line: private
+# photographs of an identifiable person, cookie Secure from
+# X-Forwarded-Proto, X-Forwarded-For overwritten so the rate limits hold,
+# the 320 MB gallery upload, no static location for data/.
+# ---------------------------------------------------------------------------
+
+server {
+    listen       80;
+    listen       [::]:80;
+    server_name  fotografica.62-171-135-13.sslip.io fotografica.duckdns.org;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root          /var/www/acme;
+        default_type  "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen       443 ssl http2;
+    listen       [::]:443 ssl http2;
+    server_name  fotografica.62-171-135-13.sslip.io fotografica.duckdns.org;
+
+    ssl_certificate      /etc/letsencrypt/live/fotografica/fullchain.pem;
+    ssl_certificate_key  /etc/letsencrypt/live/fotografica/privkey.pem;
+    ssl_protocols        TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache    shared:SSL:10m;
+    ssl_session_timeout  1d;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options    "nosniff"          always;
+    add_header X-Frame-Options           "DENY"             always;
+    add_header Referrer-Policy           "no-referrer"      always;
+    add_header X-Robots-Tag              "noindex, nofollow, noimageindex" always;
+
+    client_max_body_size 32m;
+    client_body_timeout  120s;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_http_version 1.1;
+    proxy_set_header Connection        "";
+    proxy_redirect off;
+
+    location = /api/originals {
+        client_max_body_size 320m;
+        client_body_timeout  600s;
+        proxy_pass http://127.0.0.1:8131;
+        proxy_read_timeout  600s;
+        proxy_send_timeout  600s;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8131;
+        proxy_read_timeout  300s;
+        proxy_send_timeout  300s;
+    }
+
+    location = /sw.js {
+        proxy_pass http://127.0.0.1:8131;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+    }
+
+    error_page 502 503 504 = @photorobot_down;
+    location @photorobot_down {
+        default_type text/html; charset utf-8;
+        return 503 '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font:16px system-ui;background:#111113;color:#f2f2f4;padding:2rem"><h1>Un momento</h1><p>El robot se esta reiniciando. Tus fotos estan a salvo. Vuelve a intentarlo en un minuto.</p></body>';
+    }
+}

@@ -1,0 +1,35 @@
+# /etc/systemd/system/photorobot.service
+# Photo Robot on the Ubuntu 24.04 server 62.171.135.13 (since 2026-09-30).
+# Code and venv in /opt/photorobot, owned by the system user "photorobot";
+# the only writable path is data/, which holds her photographs, the SQLite
+# database and the keystore.  uvicorn listens on 127.0.0.1 only: nginx is the
+# one thing that may talk to it (deploy/nginx/fotografica).
+[Unit]
+Description=Photo Robot (FastAPI) - fotografica
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=photorobot
+Group=photorobot
+WorkingDirectory=/opt/photorobot
+Environment=PYTHONUNBUFFERED=1
+# matplotlib and fontconfig want a writable cache; data/ is the only one.
+Environment=MPLCONFIGDIR=/opt/photorobot/data/cache/matplotlib
+Environment=XDG_CACHE_HOME=/opt/photorobot/data/cache
+ExecStart=/opt/photorobot/backend/.venv/bin/python backend/run.py --host 127.0.0.1 --port 8131 --no-reload
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/photorobot/data
+# The old 4 GB droplet was OOM-killed on 2026-09-14 with a batch and the test
+# suite running together; this box has 24 GB, and the cap keeps a runaway
+# batch from taking the rest of the machine with it.
+MemoryMax=8G
+
+[Install]
+WantedBy=multi-user.target
