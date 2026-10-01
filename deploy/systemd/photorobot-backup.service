@@ -1,0 +1,26 @@
+# /etc/systemd/system/photorobot-backup.service
+# Nightly dated copy of /opt/photorobot/data into /var/backups/photorobot,
+# fourteen kept (scripts/backup_data.py explains how and how to restore).
+# Started by photorobot-backup.timer; run it by hand with
+#   systemctl start photorobot-backup && journalctl -u photorobot-backup -n 3
+# Same server, so it does not survive losing the server: the provider's
+# snapshots cover that.
+[Unit]
+Description=Photo Robot - nightly copy of data/
+
+[Service]
+Type=oneshot
+User=photorobot
+Group=photorobot
+WorkingDirectory=/opt/photorobot
+UMask=0077
+ExecStart=/opt/photorobot/backend/.venv/bin/python scripts/backup_data.py --data /opt/photorobot/data --dest /var/backups/photorobot --keep 14
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# data/ stays writable only because SQLite readers of a WAL database need its
+# -shm file; the script itself never writes there.
+ReadWritePaths=/opt/photorobot/data /var/backups/photorobot

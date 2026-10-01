@@ -1,0 +1,13 @@
+# /etc/systemd/system/photorobot-backup.timer
+# Enable with: systemctl enable --now photorobot-backup.timer
+[Unit]
+Description=Photo Robot - nightly copy of data/
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=20m
+# A night the server was off is made up at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
